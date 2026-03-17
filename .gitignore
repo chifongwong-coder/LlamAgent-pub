@@ -1,0 +1,58 @@
+# === Private / Internal ===
+docs/
+tests_internal/
+
+# === AI Tool Traces ===
+.claude/
+.claude.*
+claude.md
+CLAUDE.md
+.cursorrules
+.cursor/
+.aider*
+.copilot/
+.github/copilot/
+.codeium/
+.continue/
+.windsurf/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# === Virtual Environment ===
+llamagent_env/
+venv/
+.venv/
+env/
+
+# === Environment / Secrets ===
+.env
+.env.local
+.env.*.local
+
+# === OS ===
+.DS_Store
+Thumbs.db
+
+# === IDE ===
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# === Testing / Coverage ===
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# === Misc ===
+*.log
