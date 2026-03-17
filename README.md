@@ -57,21 +57,24 @@ LlamAgent isn't a research prototype or a framework-of-frameworks. It's **produc
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│                  Interfaces                      │
-│            CLI  ·  Web UI  ·  API                │
-└──────────────────────┬──────────────────────────┘
-                       │
-┌──────────────────────▼──────────────────────────┐
-│                 SmartAgent                        │
-│  chat() ──► on_input ──► on_context ──► execute  │
-│                                    ──► on_output │
-└──┬───────────────────────────────────────────┬──┘
-   │              Module Hooks                  │
-┌──▼──────────────────────────────────────────▼──┐
-│  Tools · RAG · Memory · Reasoning · Reflection  │
-│  Multi-Agent · MCP · Safety                     │
-└─────────────────────────────────────────────────┘
+                    +-------------------------------------------+
+                    |               Interfaces                  |
+                    |         CLI  /  Web UI  /  API            |
+                    +--------------------|----------------------+
+                                         |
+                    +--------------------|----------------------+
+                    |              SmartAgent                   |
+                    |                                           |
+                    |  on_input -> on_context -> execute        |
+                    |                             -> on_output  |
+                    +--------------------|----------------------+
+                                         |
+                    +--------------------|----------------------+
+                    |            Pluggable Modules              |
+                    |                                           |
+                    |  Tools - RAG - Memory - Reasoning         |
+                    |  Reflection - Multi-Agent - MCP - Safety  |
+                    +-------------------------------------------+
 ```
 
 ## Quick Start
