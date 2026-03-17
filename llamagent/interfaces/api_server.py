@@ -1,0 +1,715 @@
+"""
+LlamAgent HTTP API Server.
+
+Wraps LlamAgent as a RESTful API + WebSocket service using FastAPI.
+FastAPI is an optional dependency; importing this module without it installed
+will raise an ImportError with installation instructions.
+
+Endpoints:
+    POST /chat       — Chat
+    GET  /status     — Health check
+    GET  /modules    — Module list
+    POST /upload     — Upload files to RAG
+    WS   /ws/chat    — WebSocket streaming chat
+
+Usage:
+    python -m llamagent --mode api
+    python -m llamagent.interfaces.api_server
+    API docs: http://localhost:8000/docs (Swagger UI)
+"""
+
+import os
+import time
+import asyncio
+import logging
+from collections import OrderedDict
+
+# FastAPI and related dependencies: optional install
+try:
+    from fastapi import (
+        FastAPI, HTTPException, Depends,
+        WebSocket, WebSocketDisconnect, UploadFile, File,
+    )
+    from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import JSONResponse
+    from pydantic import BaseModel, Field
+    from typing import Optional
+    from contextlib import asynccontextmanager
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request
+    from starlette.responses import Response
+    HAS_FASTAPI = True
+except ImportError:
+    HAS_FASTAPI = False
+
+
+# ============================================================
+# Logging configuration
+# ============================================================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("llamagent-api")
+
+
+# ============================================================
+# Global state
+# ============================================================
+
+# Server start time
+START_TIME = time.time()
+
+# Agent instance pool — maintains independent Agents for different sessions
+# Uses OrderedDict for LRU eviction to prevent unbounded memory growth
+MAX_SESSIONS = 100
+
+# Session storage and rate limit counters
+agent_sessions: OrderedDict = OrderedDict()
+rate_limit_store: dict[str, list[float]] = {}
+
+# Auth token (configured via environment variable, empty string = dev mode, no auth)
+API_AUTH_TOKEN = os.getenv("API_AUTH_TOKEN", "")
+
+# Agent creation factory function — set by create_api_server()
+_agent_factory = None
+
+
+# ============================================================
+# Pydantic data models (request & response)
+# ============================================================
+# Data structures defined with Pydantic's BaseModel.
+# Three birds with one stone: parameter validation + auto serialization + API doc generation.
+
+if HAS_FASTAPI:
+
+    class ChatRequest(BaseModel):
+        """Chat request"""
+        message: str = Field(
+            ...,
+            min_length=1,
+            max_length=10000,
+            description="User message content",
+            examples=["Help me check the weather in Beijing today"],
+        )
+        session_id: Optional[str] = Field(
+            default=None,
+            description="Session ID for maintaining context. If omitted, the default session is used",
+        )
+
+    class ChatResponse(BaseModel):
+        """Chat response"""
+        reply: str = Field(description="Agent's reply content")
+        session_id: str = Field(description="Session ID")
+        model: str = Field(description="Model name used")
+
+    class StatusResponse(BaseModel):
+        """Status response"""
+        status: str = Field(description="Service status: healthy / degraded")
+        version: str = Field(description="Service version")
+        model: str = Field(description="Currently used model")
+        uptime_seconds: float = Field(description="Service uptime in seconds")
+        modules: dict = Field(description="Loaded modules")
+
+    class ModuleInfo(BaseModel):
+        """Module information"""
+        name: str = Field(description="Module name")
+        description: str = Field(description="Module description")
+        loaded: bool = Field(description="Whether the module is loaded")
+
+    class UploadResponse(BaseModel):
+        """File upload response"""
+        message: str = Field(description="Upload result description")
+        files_processed: int = Field(description="Number of files processed")
+
+    class ErrorResponse(BaseModel):
+        """Standardized error response"""
+        error: str = Field(description="Error type")
+        message: str = Field(description="Error description")
+        detail: Optional[str] = Field(
+            default=None,
+            description="Detailed info (only returned in DEBUG mode)",
+        )
+
+
+# ============================================================
+# Helper functions
+# ============================================================
+
+def _get_agent(session_id: str | None = None):
+    """
+    Get an Agent instance (LRU eviction strategy).
+
+    If a session_id is specified, returns the Agent for that session (creates one if it doesn't exist).
+    If not specified, returns the default instance.
+    Automatically evicts the least recently used session when MAX_SESSIONS is exceeded.
+    """
+    sid = session_id or "default"
+
+    if sid in agent_sessions:
+        # LRU update: move the accessed session to the end
+        agent_sessions.move_to_end(sid)
+        return agent_sessions[sid]
+
+    # Create a new session
+    logger.info("Creating new Agent instance: session=%s", sid)
+    if _agent_factory:
+        new_agent = _agent_factory()
+    else:
+        # Fallback: create a bare Agent directly
+        from llamagent.core import SmartAgent, Config
+        new_agent = SmartAgent(Config())
+
+    agent_sessions[sid] = new_agent
+
+    # Evict the oldest session
+    while len(agent_sessions) > MAX_SESSIONS:
+        evicted_sid, _ = agent_sessions.popitem(last=False)
+        logger.info("LRU evicted expired session: session=%s", evicted_sid)
+
+    return new_agent
+
+
+# ============================================================
+# FastAPI application factory
+# ============================================================
+
+def create_api_server(
+    module_names: list[str] | None = None,
+    persona_name: str | None = None,
+) -> "FastAPI":
+    """
+    Create a FastAPI application instance.
+
+    Args:
+        module_names: List of modules to load (passed to create_agent)
+        persona_name: Persona name
+
+    Returns:
+        A FastAPI instance with routes and middleware configured
+
+    Raises:
+        ImportError: Raised when FastAPI is not installed
+    """
+    if not HAS_FASTAPI:
+        raise ImportError(
+            "FastAPI is not installed! Please run: pip install fastapi uvicorn[standard]\n"
+            "Then try again."
+        )
+
+    from llamagent.main import create_agent, AVAILABLE_MODULES
+
+    # Set the Agent factory function for _get_agent() to use when creating new sessions
+    global _agent_factory
+    _agent_factory = lambda: create_agent(module_names, persona_name=persona_name)
+
+    # --- Lifecycle management ---
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        """Code executed during server startup/shutdown."""
+        global START_TIME
+        START_TIME = time.time()
+
+        logger.info("=" * 60)
+        logger.info("LlamAgent API server starting...")
+        logger.info("  Auth: %s", "Enabled" if API_AUTH_TOKEN else "Disabled (dev mode)")
+        logger.info("  Max sessions: %d", MAX_SESSIONS)
+        logger.info("=" * 60)
+
+        # Create the default Agent instance
+        agent_sessions["default"] = _agent_factory()
+        logger.info("Default Agent instance created")
+
+        yield  # Server running...
+
+        # Shutdown phase
+        logger.info("LlamAgent API server shutting down...")
+        agent_sessions.clear()
+        logger.info("All Agent instances cleaned up")
+
+    # --- Create FastAPI app ---
+
+    app = FastAPI(
+        title="LlamAgent API",
+        description=(
+            "LlamAgent RESTful API\n\n"
+            "An AI Agent service with chat, tool calling, knowledge retrieval, "
+            "and reasoning & planning capabilities.\n\n"
+            "## Endpoints\n"
+            "- POST /chat — Chat\n"
+            "- GET /status — Agent status\n"
+            "- GET /modules — Module list\n"
+            "- POST /upload — Upload files to RAG\n"
+            "- WebSocket /ws/chat — Streaming chat\n"
+        ),
+        version="1.0.0",
+        lifespan=lifespan,
+        responses={
+            401: {"model": ErrorResponse, "description": "Authentication failed"},
+            429: {"model": ErrorResponse, "description": "Too many requests"},
+            500: {"model": ErrorResponse, "description": "Internal server error"},
+        },
+    )
+
+    # --- CORS middleware ---
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # In production, replace with specific frontend domains
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # --- Rate limiting middleware ---
+
+    class RateLimitMiddleware(BaseHTTPMiddleware):
+        """Simple rate limiter: limits the maximum number of requests per IP within a time window."""
+
+        def __init__(self, app, max_requests: int = 60, window_seconds: int = 60):
+            super().__init__(app)
+            self.max_requests = max_requests
+            self.window_seconds = window_seconds
+
+        async def dispatch(self, request: Request, call_next) -> Response:
+            # Health check and docs endpoints are exempt from rate limiting
+            exempt_paths = ("/status", "/docs", "/redoc", "/openapi.json")
+            if request.url.path in exempt_paths:
+                return await call_next(request)
+
+            client_ip = request.client.host if request.client else "unknown"
+            now = time.time()
+
+            # Clean expired records + check rate limit
+            timestamps = rate_limit_store.get(client_ip, [])
+            timestamps = [t for t in timestamps if now - t < self.window_seconds]
+
+            if len(timestamps) >= self.max_requests:
+                return JSONResponse(
+                    status_code=429,
+                    content={
+                        "error": "rate_limit_exceeded",
+                        "message": f"Too many requests, please retry after {self.window_seconds} seconds",
+                    }
+                )
+
+            timestamps.append(now)
+            rate_limit_store[client_ip] = timestamps
+            return await call_next(request)
+
+    app.add_middleware(RateLimitMiddleware, max_requests=60, window_seconds=60)
+
+    # --- Auth dependency ---
+
+    security = HTTPBearer(auto_error=False)
+
+    async def verify_token(
+        credentials: HTTPAuthorizationCredentials = Depends(security),
+    ) -> str:
+        """
+        Verify Bearer Token.
+
+        Skips authentication when API_AUTH_TOKEN is not configured (dev mode).
+        """
+        if not API_AUTH_TOKEN:
+            return "anonymous"
+
+        if not credentials:
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": "missing_token",
+                    "message": "Please provide an API Key in the header: Authorization: Bearer <your-key>",
+                }
+            )
+
+        if credentials.credentials != API_AUTH_TOKEN:
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": "invalid_token",
+                    "message": "Invalid API Key, please check your credentials",
+                }
+            )
+
+        return credentials.credentials
+
+    # ============================================================
+    # API route definitions
+    # ============================================================
+
+    # ---- 1. Chat endpoint ----
+
+    @app.post(
+        "/chat",
+        response_model=ChatResponse,
+        tags=["Chat"],
+        summary="Send a chat message",
+        description="Send a message to LlamAgent and get a reply. Supports multiple sessions via session_id.",
+    )
+    async def chat(
+        request: ChatRequest,
+        token: str = Depends(verify_token),
+    ):
+        """Handle chat requests."""
+        agent = _get_agent(request.session_id)
+        session_id = request.session_id or "default"
+
+        try:
+            # asyncio.to_thread runs the synchronous agent.chat() in a thread pool,
+            # preventing it from blocking FastAPI's event loop
+            reply = await asyncio.to_thread(agent.chat, request.message)
+
+            return ChatResponse(
+                reply=reply,
+                session_id=session_id,
+                model=agent.config.model,
+            )
+
+        except Exception as e:
+            logger.error("Chat processing failed: %s", e, exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "chat_failed",
+                    "message": f"Error processing chat: {e}",
+                }
+            )
+
+    # ---- 2. Status endpoint (no auth required) ----
+
+    @app.get(
+        "/status",
+        response_model=StatusResponse,
+        tags=["System"],
+        summary="Agent status and health check",
+        description="Returns the current Agent status. No authentication required.",
+    )
+    async def get_status():
+        """Return Agent runtime status."""
+        try:
+            agent = _get_agent()
+            status = agent.status()
+            return StatusResponse(
+                status="healthy",
+                version="1.0.0",
+                model=status.get("model", "Unknown"),
+                uptime_seconds=round(time.time() - START_TIME, 2),
+                modules=status.get("modules", {}),
+            )
+        except Exception:
+            return StatusResponse(
+                status="degraded",
+                version="1.0.0",
+                model="Unknown",
+                uptime_seconds=round(time.time() - START_TIME, 2),
+                modules={},
+            )
+
+    # ---- 3. Module list endpoint ----
+
+    @app.get(
+        "/modules",
+        response_model=list[ModuleInfo],
+        tags=["System"],
+        summary="Get module list",
+        description="Returns all available modules and their loading status.",
+    )
+    async def list_modules(token: str = Depends(verify_token)):
+        """Return information about all available modules."""
+        agent = _get_agent()
+        loaded_modules = agent.list_modules()
+
+        result = []
+        for name, path in AVAILABLE_MODULES.items():
+            desc = path
+            if name in agent.modules:
+                mod = agent.modules[name]
+                desc = mod.description or path
+            result.append(ModuleInfo(
+                name=name,
+                description=desc,
+                loaded=name in loaded_modules,
+            ))
+        return result
+
+    # ---- 4. Clear conversation endpoint ----
+
+    @app.post(
+        "/clear",
+        tags=["Chat"],
+        summary="Clear conversation history",
+        description="Clears the conversation history for the specified session (or the default session).",
+    )
+    async def clear_conversation(
+        session_id: str | None = None,
+        token: str = Depends(verify_token),
+    ):
+        """Clear conversation history."""
+        agent = _get_agent(session_id)
+        agent.clear_conversation()
+        return {"message": "Conversation history cleared", "session_id": session_id or "default"}
+
+    # ---- 5. File upload endpoint ----
+
+    @app.post(
+        "/upload",
+        response_model=UploadResponse,
+        tags=["Knowledge Base"],
+        summary="Upload files to RAG knowledge base",
+        description="Upload .txt / .md / .pdf files to add to the knowledge base for retrieval during conversations.",
+    )
+    async def upload_file(
+        files: list[UploadFile] = File(..., description="Files to upload"),
+        token: str = Depends(verify_token),
+    ):
+        """Handle file uploads."""
+        agent = _get_agent()
+
+        if not agent.has_module("rag"):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "rag_not_loaded",
+                    "message": "RAG module is not loaded, cannot process file uploads",
+                }
+            )
+
+        processed = 0
+        for file in files:
+            tmp_path = None
+            try:
+                content = await file.read()
+                filename = file.filename or "unknown"
+
+                import tempfile
+                with tempfile.NamedTemporaryFile(
+                    mode='wb', suffix=f"_{filename}", delete=False
+                ) as tmp:
+                    tmp.write(content)
+                    tmp_path = tmp.name
+
+                rag_module = agent.get_module("rag")
+                if hasattr(rag_module, 'load_documents'):
+                    await asyncio.to_thread(rag_module.load_documents, tmp_path)
+
+                processed += 1
+
+            except Exception as e:
+                logger.error("File upload processing failed: %s - %s", file.filename, e)
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+
+        return UploadResponse(
+            message=f"Successfully processed {processed}/{len(files)} file(s)",
+            files_processed=processed,
+        )
+
+    # ---- 6. WebSocket streaming chat ----
+
+    @app.websocket("/ws/chat")
+    async def websocket_chat(websocket: WebSocket):
+        """
+        WebSocket streaming chat.
+
+        Protocol:
+        1. After connecting, if auth is configured, client sends {"type": "auth", "token": "<key>"}
+        2. Client sends {"type": "message", "content": "Hello"}
+        3. Server streams back {"type": "chunk", "content": "..."}
+        4. Finally sends {"type": "done", "content": "full reply"}
+        5. On error, returns {"type": "error", "content": "error message"}
+        """
+        await websocket.accept()
+        logger.info("WebSocket client connected")
+
+        # Authentication (if token is configured)
+        if API_AUTH_TOKEN:
+            try:
+                auth_data = await asyncio.wait_for(
+                    websocket.receive_json(), timeout=5.0
+                )
+
+                if (auth_data.get("type") != "auth"
+                        or auth_data.get("token") != API_AUTH_TOKEN):
+                    await websocket.send_json({
+                        "type": "error",
+                        "content": "Authentication failed, please send a valid API Key",
+                    })
+                    await websocket.close(code=4001)
+                    return
+
+                await websocket.send_json({
+                    "type": "auth_ok",
+                    "content": "Authentication successful",
+                })
+
+            except asyncio.TimeoutError:
+                await websocket.send_json({
+                    "type": "error",
+                    "content": "Authentication timed out, please send credentials within 5 seconds of connecting",
+                })
+                await websocket.close(code=4002)
+                return
+
+        agent = _get_agent()
+
+        try:
+            while True:
+                data = await websocket.receive_json()
+
+                if data.get("type") != "message":
+                    await websocket.send_json({
+                        "type": "error",
+                        "content": f"Unknown message type: {data.get('type')}",
+                    })
+                    continue
+
+                user_message = data.get("content", "")
+                if not user_message.strip():
+                    await websocket.send_json({
+                        "type": "error",
+                        "content": "Message content cannot be empty",
+                    })
+                    continue
+
+                try:
+                    # Call Agent to get the full reply, then send in chunks to simulate streaming
+                    reply = await asyncio.to_thread(agent.chat, user_message)
+
+                    # Simulate streaming output — send a small segment at a time
+                    chunk_size = 10
+                    for i in range(0, len(reply), chunk_size):
+                        chunk = reply[i:i + chunk_size]
+                        await websocket.send_json({
+                            "type": "chunk",
+                            "content": chunk,
+                        })
+                        await asyncio.sleep(0.05)
+
+                    await websocket.send_json({
+                        "type": "done",
+                        "content": reply,
+                    })
+
+                except Exception as e:
+                    await websocket.send_json({
+                        "type": "error",
+                        "content": f"Error processing message: {e}",
+                    })
+
+        except WebSocketDisconnect:
+            logger.info("WebSocket client disconnected")
+        except Exception as e:
+            logger.error("WebSocket error: %s", e, exc_info=True)
+
+    # --- Global exception handler ---
+
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request, exc):
+        """Catch-all exception handler: prevents uncaught exceptions from leaking stack traces to users."""
+        logger.error("Unhandled exception: %s", exc, exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "internal_error",
+                "message": "Internal server error, please try again later",
+                "detail": str(exc) if os.getenv("DEBUG") else None,
+            }
+        )
+
+    return app
+
+
+# ============================================================
+# Launch entry point
+# ============================================================
+
+# Module-level app cache — stored here after launch_api_server creates it,
+# so uvicorn multi-worker mode can find it via string reference
+_cached_app = None
+_cached_module_names = None
+_cached_persona_name = None
+
+
+def launch_api_server(
+    module_names: list[str] | None = None,
+    persona_name: str | None = None,
+    host: str | None = None,
+    port: int | None = None,
+):
+    """
+    Launch the API server.
+
+    Args:
+        module_names: List of modules to load
+        persona_name: Persona name
+        host: Bind address (defaults to API_HOST env var, falls back to 0.0.0.0)
+        port: Listening port (defaults to API_PORT env var, falls back to 8000)
+    """
+    if not HAS_FASTAPI:
+        print(
+            "Error: FastAPI is not installed!\n"
+            "Please run: pip install fastapi uvicorn[standard]\n"
+            "Then try again."
+        )
+        return
+
+    try:
+        import uvicorn
+    except ImportError:
+        print(
+            "Error: uvicorn is not installed!\n"
+            "Please run: pip install uvicorn[standard]\n"
+            "Then try again."
+        )
+        return
+
+    # Cache parameters for uvicorn multi-worker mode factory function
+    global _cached_module_names, _cached_persona_name, _cached_app
+    _cached_module_names = module_names
+    _cached_persona_name = persona_name
+
+    host = host or os.getenv("API_HOST", "0.0.0.0")
+    port = port or int(os.getenv("API_PORT", "8000"))
+    workers = int(os.getenv("API_WORKERS", "1"))
+
+    print(f"\n{'='*50}")
+    print(f"  LlamAgent API")
+    print(f"  Address: http://{host}:{port}")
+    print(f"  Docs: http://{host}:{port}/docs")
+    print(f"{'='*50}\n")
+
+    if workers > 1:
+        # Multi-worker mode: uvicorn needs to find the app via string reference,
+        # using a factory function so each worker process creates its own app instance
+        uvicorn.run(
+            "llamagent.interfaces.api_server:_create_app_for_uvicorn",
+            host=host,
+            port=port,
+            workers=workers,
+            log_level="info",
+            factory=True,
+        )
+    else:
+        # Single worker mode: pass the app object directly, simpler
+        app = create_api_server(module_names, persona_name)
+        _cached_app = app
+        uvicorn.run(
+            app,
+            host=host,
+            port=port,
+            log_level="info",
+        )
+
+
+def _create_app_for_uvicorn():
+    """Factory function for uvicorn multi-worker mode: each worker creates its own app."""
+    return create_api_server(_cached_module_names, _cached_persona_name)
+
+
+def main():
+    """python -m llamagent.interfaces.api_server entry point."""
+    launch_api_server()
+
+
+if __name__ == "__main__":
+    main()

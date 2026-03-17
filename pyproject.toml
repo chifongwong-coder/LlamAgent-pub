@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llamagent"
+version = "1.1.0"
+description = "A modular AI Agent framework — plug in capabilities, not complexity."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "LlamAgent Contributors"},
+]
+keywords = ["agent", "llm", "ai", "modular", "react", "planning"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "litellm>=1.40.0",
+    "python-dotenv>=1.0.0",
+    "requests>=2.28.0",
+]
+
+[project.optional-dependencies]
+rag = ["chromadb>=0.4.0"]
+cli = ["rich>=13.0.0"]
+web = ["gradio>=4.0.0"]
+api = ["fastapi>=0.100.0", "uvicorn>=0.20.0"]
+mcp = ["mcp>=1.0.0"]
+all = [
+    "chromadb>=0.4.0",
+    "rich>=13.0.0",
+    "gradio>=4.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "mcp>=1.0.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/llamagent/llamagent"
+Repository = "https://github.com/llamagent/llamagent"
+Issues = "https://github.com/llamagent/llamagent/issues"
+
+[project.scripts]
+llamagent = "llamagent.main:main"
+
+[tool.setuptools.packages.find]
+include = ["llamagent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
