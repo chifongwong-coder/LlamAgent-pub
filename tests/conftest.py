@@ -135,6 +135,7 @@ def bare_agent(mock_llm_client):
     agent.conversation = agent.history
     agent._execution_strategy = None
     agent.pre_call_check = None
+    agent.tool_executor = None
     agent._tools = {}
     agent._tools_version = 0
 

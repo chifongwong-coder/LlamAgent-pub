@@ -42,6 +42,7 @@ def _create_test_agent(mock_llm_client):
     agent.summary = None
     agent.conversation = agent.history
     agent.pre_call_check = None
+    agent.tool_executor = None
     agent._tools = {}
     agent._tools_version = 0
 
