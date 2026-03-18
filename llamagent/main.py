@@ -40,6 +40,8 @@ AVAILABLE_MODULES = {
     "planning": "llamagent.modules.reasoning.PlanningModule",
     "mcp": "llamagent.modules.mcp.MCPModule",
     "multi_agent": "llamagent.modules.multi_agent.MultiAgentModule",
+    "sandbox": "llamagent.modules.sandbox.SandboxModule",
+    "child_agent": "llamagent.modules.child_agent.ChildAgentModule",
 }
 
 

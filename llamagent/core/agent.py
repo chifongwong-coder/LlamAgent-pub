@@ -253,6 +253,7 @@ class SmartAgent:
         # Safety callback slot, injected by the safety module during on_attach
         # Signature: (tool_info, kwargs) -> str | None; returns None to allow, returns string as rejection reason
         self.pre_call_check: Callable | None = None
+        self.tool_executor = None  # v1.2: injected by SandboxModule for sandbox execution dispatch
 
         # Tool registry (simple implementation, later enhanced by tools module)
         # Format: {name: {"func": callable, "description": str, "parameters": dict,
@@ -340,6 +341,7 @@ class SmartAgent:
         parameters: dict | None = None,
         tier: str = "common",
         safety_level: int = 1,
+        execution_policy=None,
     ) -> None:
         """
         Register a tool in the registry.
@@ -351,17 +353,20 @@ class SmartAgent:
             parameters: Parameter definition in JSON Schema format; inferred from function signature when None
             tier: Tool tier "default" / "common" / "admin" / "agent"
             safety_level: Safety level 1=read-only 2=has side effects 3=high risk
+            execution_policy: ExecutionPolicy object from sandbox module, or None (default = host execution)
         """
         # Infer parameter definition from function signature when empty
         if parameters is None:
             parameters = self._infer_parameters(func)
 
         self._tools[name] = {
+            "name": name,
             "func": func,
             "description": description,
             "parameters": parameters,
             "tier": tier,
             "safety_level": safety_level,
+            "execution_policy": execution_policy,
         }
         self._tools_version += 1
         logger.debug("Tool registered: %s (tier=%s, safety_level=%d)", name, tier, safety_level)
@@ -413,6 +418,14 @@ class SmartAgent:
             # Safety not loaded, built-in fallback: reject tools with safety_level >= 2
             if tool.get("safety_level", 1) >= 2:
                 return f"Tool '{name}' requires safety module authorization. Please load the safety module before using this tool."
+
+        # v1.2: route through ToolExecutor if available
+        if self.tool_executor is not None:
+            try:
+                return self.tool_executor.execute(tool, args)
+            except Exception as e:
+                logger.error("Tool '%s' sandbox execution error: %s", name, e)
+                return f"Tool '{name}' execution error: {e}"
 
         # 3. Execute tool (expand dict internally)
         try:

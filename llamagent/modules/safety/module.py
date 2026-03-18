@@ -92,6 +92,13 @@ class SafetyModule(Module):
             return result["sanitized_output"]
         return response
 
+    def on_shutdown(self) -> None:
+        """Close audit log file handler to prevent resource leaks."""
+        if self.guard and hasattr(self.guard, '_logger'):
+            for handler in self.guard._logger.handlers[:]:
+                handler.close()
+                self.guard._logger.removeHandler(handler)
+
     # ------------------------------------------------------------------
     # Command Checking (for internal tool use)
     # ------------------------------------------------------------------
