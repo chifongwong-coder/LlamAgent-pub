@@ -311,20 +311,8 @@ class ChildAgentModule(Module):
         child.summary = None
         child.conversation = child.history
         child._execution_strategy = SimpleReAct()
-        # Inherit safety check but enforce child's own permission level
-        parent_check = parent.pre_call_check
-        child_permission = config.permission_level
-        if parent_check is not None:
-            def _child_pre_call_check(tool, args, _parent_check=parent_check, _perm=child_permission):
-                # Override permission level to use child's config, not parent's
-                tool_safety = tool.get("safety_level", 1)
-                if tool_safety > _perm:
-                    tool_name = tool.get("name", "unknown")
-                    return f"Tool '{tool_name}' requires permission level {tool_safety}, child agent has {_perm}."
-                return _parent_check(tool, args)
-            child.pre_call_check = _child_pre_call_check
-        else:
-            child.pre_call_check = None
+        # Inherit safety_loaded flag from parent
+        child.safety_loaded = parent.safety_loaded
         child._tools = {}
         child._tools_version = 0
         child.tool_executor = getattr(parent, "tool_executor", None)  # Inherit sandbox

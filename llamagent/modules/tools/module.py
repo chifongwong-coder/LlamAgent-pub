@@ -92,6 +92,28 @@ class ToolsModule(Module):
         # --- 4. Register meta-tools (per-instance, by role) ---
         self._register_meta_tools()
 
+        # --- 5. Bridge all tools to agent._tools (core visibility) ---
+        self._bridge_to_core()
+
+
+    # ============================================================
+    # Bridge internal registries → agent._tools (core visibility)
+    # ============================================================
+
+    def _bridge_to_core(self):
+        """Sync tools from internal registries to agent._tools so the LLM can see and call them."""
+        for _name, info in self.common_registry._tools.items():
+            self.agent.register_tool(
+                name=info.name, func=info.func, description=info.description,
+                parameters=info.parameters, tier=info.tier,
+                safety_level=info.safety_level,
+            )
+        for _name, info in self.agent_registry._tools.items():
+            self.agent.register_tool(
+                name=info.name, func=info.func, description=info.description,
+                parameters=info.parameters, tier=info.tier,
+                safety_level=info.safety_level,
+            )
 
     # ============================================================
     # Meta-tool registration (all go to agent_registry to avoid global overwrite)
@@ -115,7 +137,7 @@ class ToolsModule(Module):
                 "required": ["name", "description", "code"],
             },
             tier="default",
-            safety_level=3,
+            safety_level=2,
         )
 
         self.agent_registry.register(
@@ -165,7 +187,7 @@ class ToolsModule(Module):
                     "required": ["name", "description", "code"],
                 },
                 tier="admin",
-                safety_level=3,
+                safety_level=2,
             )
 
             self.agent_registry.register(
@@ -190,7 +212,7 @@ class ToolsModule(Module):
                     "required": ["persona_id", "tool_name"],
                 },
                 tier="admin",
-                safety_level=3,
+                safety_level=2,
             )
 
     # ============================================================
@@ -199,6 +221,8 @@ class ToolsModule(Module):
 
     def _tool_create(self, name: str, description: str, code: str) -> str:
         """Create a role custom tool."""
+        if not self.agent.has_module("sandbox"):
+            return "Cannot create custom tools: sandbox module is not loaded. Load SandboxModule first for safe code execution."
         if self.agent_store is None:
             return "Tool storage not initialized, cannot create tool."
 
@@ -217,6 +241,11 @@ class ToolsModule(Module):
                     name=name, func=func, description=description,
                     tier="agent", safety_level=safety_level,
                     creator_id=persona_id,
+                )
+                # Bridge to core so LLM can see and call the new tool
+                self.agent.register_tool(
+                    name=name, func=func, description=description,
+                    tier="agent", safety_level=safety_level,
                 )
             return f"Tool '{name}' created successfully! (safety level: {safety_level})"
         except ValueError as e:
@@ -244,6 +273,7 @@ class ToolsModule(Module):
 
         if self.agent_store.delete(name):
             self.agent_registry.remove(name)
+            self.agent.remove_tool(name)  # Remove from core
             return f"Tool '{name}' has been deleted."
         return f"No custom tool named '{name}' found."
 
@@ -282,6 +312,11 @@ class ToolsModule(Module):
             func = common_store.get_function(name)
             if func:
                 self.common_registry.register(
+                    name=name, func=func, description=description,
+                    tier="common", safety_level=safety_level,
+                )
+                # Bridge to core
+                self.agent.register_tool(
                     name=name, func=func, description=description,
                     tier="common", safety_level=safety_level,
                 )
@@ -342,6 +377,12 @@ class ToolsModule(Module):
             func = common_store.get_function(tool_def["name"])
             if func:
                 self.common_registry.register(
+                    name=tool_def["name"], func=func,
+                    description=tool_def["description"],
+                    tier="common", safety_level=safety_level,
+                )
+                # Bridge to core
+                self.agent.register_tool(
                     name=tool_def["name"], func=func,
                     description=tool_def["description"],
                     tier="common", safety_level=safety_level,

@@ -25,8 +25,8 @@ class ToolInfo:
     Tool information data structure.
 
     Difference between tier and safety_level:
-    - tier:          Controls "visibility" -- whether the model can see the tool (filtered by tier + role when building prompts and schemas)
-    - safety_level:  Controls "executability" -- whether the call is allowed (compares safety_level against permission_level)
+    - tier:          Controls "visibility" -- whether the model can see the tool (filtered by tier + role in get_all_tool_schemas)
+    - safety_level:  Core fallback only -- without SafetyModule, core blocks tools with safety_level >= 2
     """
 
     name: str                           # Tool name (unique identifier)

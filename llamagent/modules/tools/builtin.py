@@ -131,7 +131,7 @@ def web_fetch(url: str) -> str:
 
 @tool(
     name="execute_command",
-    description="Execute a shell command and return its output (high-risk operation, requires admin permission)",
+    description="Execute a shell command and return its output (admin only)",
     parameters={
         "type": "object",
         "properties": {
@@ -139,11 +139,12 @@ def web_fetch(url: str) -> str:
         },
         "required": ["command"],
     },
-    safety_level=3,
+    tier="admin",
+    safety_level=2,
 )
 def execute_command(command: str) -> str:
     """
-    Execute a shell command. High-risk operation, safety_level=3.
+    Execute a shell command. Admin-only operation (tier=admin).
 
     Internally calls the safety module's check_command() for command blacklist checking.
     The _agent attribute is injected by ToolsModule.on_attach() to access the safety module.
@@ -162,9 +163,11 @@ def execute_command(command: str) -> str:
                 }, ensure_ascii=False)
 
     try:
+        import shlex
+        cmd_list = shlex.split(command)
         result = subprocess.run(
-            command,
-            shell=True,
+            cmd_list,
+            shell=False,
             capture_output=True,
             text=True,
             timeout=30,
@@ -222,9 +225,12 @@ def execute_command(command: str) -> str:
     safety_level=1,
 )
 def read_file(filename: str) -> str:
-    """Read file content. Plain filenames are looked up in the output directory."""
-    output_dir = getattr(read_file, "_output_dir", "./output")
-    filepath = filename if os.path.dirname(filename) else os.path.join(output_dir, filename)
+    """Read file content. Only files within the output directory are accessible."""
+    output_dir = os.path.abspath(getattr(read_file, "_output_dir", "./output"))
+    filepath = os.path.abspath(os.path.join(output_dir, filename))
+    # Path traversal protection: must stay within output_dir
+    if not filepath.startswith(output_dir + os.sep) and filepath != output_dir:
+        return json.dumps({"error": f"Access denied: path must be within the output directory"}, ensure_ascii=False)
     try:
         if not os.path.exists(filepath):
             return json.dumps({"error": f"File not found: {filepath}"}, ensure_ascii=False)

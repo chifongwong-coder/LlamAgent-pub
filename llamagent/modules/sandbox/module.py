@@ -4,7 +4,7 @@ SandboxModule: pluggable module that adds sandbox execution to the Agent.
 On attach the module:
 1. Creates a BackendResolver and registers available backends.
 2. Creates a ToolExecutor and injects it into the agent as agent.tool_executor.
-3. Optionally auto-assigns sandbox policies to high-risk tools (safety_level >= 3).
+3. Optionally auto-assigns sandbox policies to tools with side effects (safety_level >= 2).
 
 On shutdown the module cleans up all sessions and temporary workspaces.
 """
@@ -27,7 +27,7 @@ class SandboxModule(Module):
         """
         Args:
             auto_assign: When True, automatically assign POLICY_LOCAL_SUBPROCESS
-                to any registered tool with safety_level >= 3 that does not
+                to any registered tool with safety_level >= 2 that does not
                 already have an execution_policy.
         """
         self.auto_assign = auto_assign
@@ -55,7 +55,7 @@ class SandboxModule(Module):
         if self.auto_assign:
             for name, tool in agent._tools.items():
                 if (
-                    tool.get("safety_level", 1) >= 3
+                    tool.get("safety_level", 1) >= 2
                     and tool.get("execution_policy") is None
                 ):
                     tool["execution_policy"] = POLICY_LOCAL_SUBPROCESS
