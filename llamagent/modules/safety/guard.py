@@ -1,14 +1,11 @@
 """
 Safety guardrails -- perform security checks on Agent inputs and outputs.
 
-Three-layer security mechanism:
+Capabilities:
 1. Input filtering (check_input): injection attack detection, harmful content filtering, input length limits
-2. Permission checking (check_permission): compare tool safety_level with role permission_level
-3. Output sanitization (check_output): redact API keys / credentials / phone numbers / ID numbers / bank card numbers
-
-Additional capabilities:
-- Command blacklist checking (check_command): for internal use by tools like execute_command
-- Code scanning (scan_code): scan custom tool code and return suggested safety_level
+2. Output sanitization (check_output): redact API keys / credentials / phone numbers / ID numbers / bank card numbers
+3. Command checking (check_command): blacklist check for execute_command tool
+4. Code scanning (scan_code): scan custom tool code and return suggested safety_level
 """
 
 import re
@@ -274,24 +271,6 @@ class SafetyGuard:
     # ------------------------------------------------------------------
     # Permission Checking
     # ------------------------------------------------------------------
-
-    def check_permission(self, tool_safety_level: int, permission_level: int) -> str | None:
-        """
-        Check whether tool safety level matches role permission level.
-
-        Args:
-            tool_safety_level: Tool's safety_level (1=read-only, 2=has side effects, 3=high risk)
-            permission_level: Role's permission_level
-
-        Returns:
-            None means allowed, str is the rejection reason
-        """
-        if tool_safety_level > permission_level:
-            return (
-                f"Insufficient permissions: this tool requires permission level {tool_safety_level}, "
-                f"current level is {permission_level}"
-            )
-        return None
 
     # ------------------------------------------------------------------
     # Code Scanning

@@ -151,7 +151,10 @@ class PlanReAct(ExecutionStrategy):
             completed = [s for s in steps if s.status == "completed"]
             replan_result = self.planner.replan(steps, completed, feedback)
             new_steps = replan_result["steps"]
-            validate_plan(new_steps)
+            try:
+                validate_plan(new_steps)
+            except ValueError as e:
+                return f"Replan failed validation: {e}"
             steps[:] = new_steps  # In-place replacement, visible to while loop
             interrupt_flag = True  # Notify run_react to stop
             return "Plan adjusted, remaining steps updated"

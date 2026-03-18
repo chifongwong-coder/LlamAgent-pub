@@ -226,8 +226,8 @@ def execute_command(command: str) -> str:
 )
 def read_file(filename: str) -> str:
     """Read file content. Only files within the output directory are accessible."""
-    output_dir = os.path.abspath(getattr(read_file, "_output_dir", "./output"))
-    filepath = os.path.abspath(os.path.join(output_dir, filename))
+    output_dir = os.path.realpath(getattr(read_file, "_output_dir", "./output"))
+    filepath = os.path.realpath(os.path.join(output_dir, filename))
     # Path traversal protection: must stay within output_dir
     if not filepath.startswith(output_dir + os.sep) and filepath != output_dir:
         return json.dumps({"error": f"Access denied: path must be within the output directory"}, ensure_ascii=False)
