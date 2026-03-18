@@ -250,9 +250,9 @@ class SmartAgent:
         # Execution strategy, default SimpleReAct
         self._execution_strategy: ExecutionStrategy = SimpleReAct()
 
-        # Safety callback slot, injected by the safety module during on_attach
-        # Signature: (tool_info, kwargs) -> str | None; returns None to allow, returns string as rejection reason
-        self.pre_call_check: Callable | None = None
+        # Safety module loaded flag: when True, core fallback (block sl>=2) is disabled
+        # Set by SafetyModule.on_attach(); real safety is handled by on_input/on_output hooks
+        self.safety_loaded: bool = False
         self.tool_executor = None  # v1.2: injected by SandboxModule for sandbox execution dispatch
 
         # Tool registry (simple implementation, later enhanced by tools module)
@@ -407,17 +407,9 @@ class SmartAgent:
             available = list(self._tools.keys())
             return f"Tool '{name}' does not exist. Available tools: {available}"
 
-        # 2. Permission check
-        if self.pre_call_check is not None:
-            # Safety module loaded, use full permission check
-            check_result = self.pre_call_check(tool, args)
-            if check_result is not None:
-                logger.warning("Tool '%s' blocked by safety check: %s", name, check_result)
-                return check_result
-        else:
-            # Safety not loaded, built-in fallback: reject tools with safety_level >= 2
-            if tool.get("safety_level", 1) >= 2:
-                return f"Tool '{name}' requires safety module authorization. Please load the safety module before using this tool."
+        # 2. Safety fallback: without safety module, block tools with safety_level >= 2
+        if not self.safety_loaded and tool.get("safety_level", 1) >= 2:
+            return f"Tool '{name}' requires safety module. Please load SafetyModule before using this tool."
 
         # v1.2: route through ToolExecutor if available
         if self.tool_executor is not None:
@@ -453,7 +445,7 @@ class SmartAgent:
         for name, tool in self._tools.items():
             tier = tool.get("tier", "common")
 
-            # Filter by tier
+            # Filter by tier (visibility control)
             if tier == "admin" and not is_admin:
                 continue
             # Agent-tier tool filtering is handled by the module (no filtering here for now)

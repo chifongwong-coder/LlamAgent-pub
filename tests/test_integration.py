@@ -41,7 +41,7 @@ def _create_test_agent(mock_llm_client):
     agent.history = []
     agent.summary = None
     agent.conversation = agent.history
-    agent.pre_call_check = None
+    agent.safety_loaded = False
     agent.tool_executor = None
     agent._tools = {}
     agent._tools_version = 0
@@ -54,12 +54,13 @@ def _create_test_agent(mock_llm_client):
 class TestModuleIntegration:
     """Multi-module loading and cooperation tests."""
 
-    def test_safety_injects_pre_call_check(self, mock_llm_client):
-        """SafetyModule sets agent.pre_call_check for permission enforcement."""
+    def test_safety_sets_safety_loaded(self, mock_llm_client):
+        """SafetyModule sets agent.safety_loaded to disable core fallback."""
         agent = _create_test_agent(mock_llm_client)
+        assert not agent.safety_loaded
         from llamagent.modules.safety.module import SafetyModule
         agent.register_module(SafetyModule())
-        assert agent.pre_call_check is not None
+        assert agent.safety_loaded
 
     def test_planning_sets_strategy(self, mock_llm_client):
         """PlanningModule upgrades execution strategy to PlanReAct."""

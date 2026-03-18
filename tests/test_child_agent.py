@@ -49,7 +49,7 @@ class TestChildAgentModuleIntegration:
         assert "collect_results" in bare_agent._tools
 
         # Allow safety check for all tools
-        bare_agent.pre_call_check = lambda tool, args: None
+        bare_agent.safety_loaded = True
 
         # Spawn a child via the tool
         result = bare_agent.call_tool("spawn_child", {
@@ -77,7 +77,7 @@ class TestBudgetEnforcement:
         """Child agent with tight budget: BudgetExceededError surfaces in result."""
         module = ChildAgentModule()
         bare_agent.register_module(module)
-        bare_agent.pre_call_check = lambda tool, args: None
+        bare_agent.safety_loaded = True
 
         # BudgetedLLM checks BEFORE each call: max_llm_calls=0 means
         # llm_calls(0) >= max(0) is True -> BudgetExceededError on the very
@@ -194,7 +194,7 @@ class TestTaskBoardLifecycle:
 
         module = ChildAgentModule()
         bare_agent.register_module(module)
-        bare_agent.pre_call_check = lambda tool, args: None
+        bare_agent.safety_loaded = True
 
         # Spawn two children
         result1 = module._spawn_child(task="task alpha", role="worker")
@@ -215,17 +215,11 @@ class TestTaskBoardLifecycle:
 
 
 class TestChildInheritsSafety:
-    """Child agent has same pre_call_check as parent."""
+    """Child agent inherits parent's safety_loaded flag."""
 
     def test_child_inherits_safety(self, bare_agent):
-        """Child agent inherits parent's pre_call_check callback."""
-        call_log = []
-
-        def parent_safety_check(tool, args):
-            call_log.append(("checked", tool.get("description", "")))
-            return None  # allow
-
-        bare_agent.pre_call_check = parent_safety_check
+        """Child agent inherits parent's safety_loaded flag."""
+        bare_agent.safety_loaded = True
 
         module = ChildAgentModule()
         bare_agent.register_module(module)
@@ -233,13 +227,13 @@ class TestChildInheritsSafety:
         spec = ChildAgentSpec(task="test task", role="worker")
         child = module._create_child_agent(spec)
 
-        # Child should have a safety check (wrapped with child's permission level)
-        assert child.pre_call_check is not None
+        # Child should inherit safety_loaded = True
+        assert child.safety_loaded is True
 
-        # If parent has no safety check, child also has none
-        bare_agent.pre_call_check = None
+        # If parent has no safety, child also has none
+        bare_agent.safety_loaded = False
         child_no_safety = module._create_child_agent(spec)
-        assert child_no_safety.pre_call_check is None
+        assert child_no_safety.safety_loaded is False
 
     def test_child_inherits_tool_executor(self, bare_agent):
         """Child agent inherits parent's tool_executor (sandbox dispatch)."""
@@ -329,7 +323,7 @@ class TestChildAgentSecurityFixes:
     def test_child_permission_level_enforced(self, bare_agent, mock_llm_client):
         """Child agent uses its own permission_level, not parent's."""
         mock_llm_client.set_responses([make_llm_response("done")])
-        bare_agent.pre_call_check = lambda tool, args: None  # parent allows all
+        bare_agent.safety_loaded = True
 
         bare_agent.register_tool("dangerous", lambda: "boom", "high risk", safety_level=3)
 
@@ -339,10 +333,8 @@ class TestChildAgentSecurityFixes:
         spec = ChildAgentSpec(task="test")
         child = module._create_child_agent(spec)
 
-        # Child has permission_level=1, tool requires safety_level=3
-        result = child.pre_call_check({"name": "dangerous", "safety_level": 3}, {})
-        assert result is not None  # Blocked
-        assert "permission level" in result.lower()
+        # Child inherits safety_loaded from parent
+        assert child.safety_loaded is True
 
     def test_runner_cleanup_prevents_memory_leak(self, bare_agent, mock_llm_client):
         """Runner results cleaned after sync to TaskBoard."""

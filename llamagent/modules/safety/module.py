@@ -1,13 +1,16 @@
 """
-SafetyModule: safety module providing three-layer security mechanism.
+SafetyModule: safety module providing two-layer security mechanism.
 
 1. Input filtering (on_input): intercept injection attacks and harmful content
-2. Tool permission checking (pre_call_check): compare safety_level with permission_level
-3. Output sanitization (on_output): redact API keys, credentials, personal information, and other sensitive content
+2. Output sanitization (on_output): redact API keys, credentials, personal information, and other sensitive content
+
+Additionally, loading SafetyModule sets agent.safety_loaded = True, which disables the core
+fallback that blocks tools with safety_level >= 2. Tool visibility is controlled by tier;
+tool execution safety is handled by sandbox isolation, not by permission gates.
 
 Design principles:
 - Interface layers (CLI / Web / API) automatically load the safety module
-- Even when permission_level is set to maximum, input filtering and output sanitization still apply
+- Input filtering and output sanitization always apply regardless of role
 - When on_input returns an empty string, agent.chat() short-circuits with a rejection response
 """
 
@@ -18,10 +21,10 @@ from llamagent.modules.safety.guard import SafetyGuard
 
 
 class SafetyModule(Module):
-    """Safety module: input filtering + permission checking + output sanitization."""
+    """Safety module: input filtering + output sanitization."""
 
     name = "safety"
-    description = "Safety guardrails: injection defense, permission control, sensitive information redaction"
+    description = "Safety guardrails: injection defense, sensitive information redaction"
 
     def __init__(self):
         self.guard: SafetyGuard | None = None
@@ -31,7 +34,7 @@ class SafetyModule(Module):
         Initialization when module is attached to Agent.
 
         1. Create SafetyGuard instance
-        2. Inject pre_call_check callback into agent (reserved; agent.call_tool not yet implemented)
+        2. Set agent.safety_loaded = True to disable core fallback (block sl>=2)
         """
         super().on_attach(agent)
 
@@ -45,9 +48,8 @@ class SafetyModule(Module):
             log_path=str(output_dir / "safety_audit.log"),
         )
 
-        # Inject permission check callback (reserved: takes effect after agent.call_tool is implemented)
-        if hasattr(agent, "pre_call_check"):
-            agent.pre_call_check = self._check_permission
+        # Signal core that safety module is loaded
+        agent.safety_loaded = True
 
 
     # ------------------------------------------------------------------
@@ -56,7 +58,7 @@ class SafetyModule(Module):
 
     def on_input(self, user_input: str) -> str:
         """
-        Input filtering hook. Applies regardless of permission_level.
+        Input filtering hook.
 
         Return values:
         - Safe input -> original text
@@ -79,7 +81,7 @@ class SafetyModule(Module):
 
     def on_output(self, response: str) -> str:
         """
-        Output sanitization hook. Applies regardless of permission_level.
+        Output sanitization hook.
 
         Checks and redacts sensitive information in output such as API keys, credentials, phone numbers, ID numbers, bank card numbers.
         """
@@ -123,58 +125,3 @@ class SafetyModule(Module):
         if self.guard is None:
             return None
         return self.guard.check_command(cmd)
-
-    # ------------------------------------------------------------------
-    # Permission Checking (injected into agent.pre_call_check)
-    # ------------------------------------------------------------------
-
-    def _check_permission(self, tool, kwargs) -> str | None:
-        """
-        Permission check function, injected into the agent.pre_call_check slot.
-
-        Compares tool's safety_level with role's permission_level:
-        - permission_level >= safety_level -> allow (return None)
-        - permission_level <  safety_level -> reject (return reason string)
-
-        Permission source priority:
-        1. agent.persona.permission_level (if persona exists and has this attribute)
-        2. agent.config.permission_level (fallback default)
-        """
-        if self.guard is None:
-            return None
-
-        # Get tool's safety_level (tool is a dict from agent._tools)
-        if isinstance(tool, dict):
-            tool_safety_level = tool.get("safety_level", 1)
-            tool_name = tool.get("name", "unknown")
-        else:
-            tool_safety_level = getattr(tool, "safety_level", 1)
-            tool_name = getattr(tool, "name", "unknown")
-
-        # Get role's permission_level
-        perm = self._get_permission_level()
-
-        result = self.guard.check_permission(tool_safety_level, perm)
-        if result:
-            return f"Insufficient permissions: tool '{tool_name}' requires permission level {tool_safety_level}, current level is {perm}"
-
-        return None
-
-    def _get_permission_level(self) -> int:
-        """
-        Get the current role's permission level.
-
-        Priority: persona.permission_level > config.permission_level > default value 1
-        """
-        # Try to get from persona
-        if hasattr(self, "agent") and self.agent:
-            if self.agent.persona and hasattr(self.agent.persona, "permission_level"):
-                perm = self.agent.persona.permission_level
-                if perm is not None:
-                    return perm
-            # Get from config
-            if hasattr(self.agent.config, "permission_level"):
-                return self.agent.config.permission_level
-
-        # Fallback default value
-        return 1
