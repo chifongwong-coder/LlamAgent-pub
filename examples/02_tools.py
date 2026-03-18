@@ -82,19 +82,17 @@ def main():
     reply = agent.chat("What's the weather in Tokyo?")
     print(f"Agent: {reply}")
 
-    # --- Safety: pre_call_check ---
-    # You can add a check function that intercepts tool calls.
-    def block_dangerous(tool_name: str, args: dict) -> str | None:
-        """Return a reason string to block, or None to allow."""
-        if tool_name == "calculator" and "import" in args.get("expression", ""):
-            return "Blocked: import is not allowed in calculator"
-        return None
-
-    agent.pre_call_check = block_dangerous
-
-    # This call will be blocked:
-    result = agent.call_tool("calculator", {"expression": "__import__('os').listdir('/')"})
-    print(f"Blocked call result: {result}")
+    # --- Safety fallback ---
+    # Without SafetyModule loaded, tools with safety_level >= 2 are blocked by core.
+    # Load SafetyModule to enable all tools and get input/output protection.
+    agent.register_tool(
+        name="risky_tool",
+        func=lambda: "danger",
+        description="A tool with side effects",
+        safety_level=2,
+    )
+    result = agent.call_tool("risky_tool", {})
+    print(f"Safety fallback result: {result}")  # Blocked without SafetyModule
 
     agent.shutdown()
     print("Done!")

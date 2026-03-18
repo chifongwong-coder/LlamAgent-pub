@@ -45,6 +45,7 @@ class InlineRunnerBackend(AgentRunnerBackend):
         """
         task_id = str(uuid.uuid4())[:12]
         start_time = time.time()
+        child = None
 
         try:
             child = agent_factory(spec)
@@ -56,9 +57,6 @@ class InlineRunnerBackend(AgentRunnerBackend):
 
             result_text = child.chat(prompt)
             elapsed = time.time() - start_time
-
-            # Shutdown the child agent to release resources
-            child.shutdown()
 
             record = TaskRecord(
                 task_id=task_id,
@@ -111,6 +109,13 @@ class InlineRunnerBackend(AgentRunnerBackend):
                 "Child agent (%s) failed after %.1fs: %s",
                 spec.role, elapsed, e,
             )
+
+        finally:
+            if child is not None:
+                try:
+                    child.shutdown()
+                except Exception as shutdown_err:
+                    logger.error("Child agent shutdown error: %s", shutdown_err)
 
         self._results[task_id] = record
         return task_id

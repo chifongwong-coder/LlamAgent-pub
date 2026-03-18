@@ -342,6 +342,7 @@ class SmartAgent:
         tier: str = "common",
         safety_level: int = 1,
         execution_policy=None,
+        creator_id: str | None = None,
     ) -> None:
         """
         Register a tool in the registry.
@@ -354,6 +355,7 @@ class SmartAgent:
             tier: Tool tier "default" / "common" / "admin" / "agent"
             safety_level: Safety level 1=read-only 2=has side effects 3=high risk
             execution_policy: ExecutionPolicy object from sandbox module, or None (default = host execution)
+            creator_id: Creator persona_id (for agent-tier tools, used for visibility filtering)
         """
         # Infer parameter definition from function signature when empty
         if parameters is None:
@@ -367,6 +369,7 @@ class SmartAgent:
             "tier": tier,
             "safety_level": safety_level,
             "execution_policy": execution_policy,
+            "creator_id": creator_id,
         }
         self._tools_version += 1
         logger.debug("Tool registered: %s (tier=%s, safety_level=%d)", name, tier, safety_level)
@@ -445,10 +448,13 @@ class SmartAgent:
         for name, tool in self._tools.items():
             tier = tool.get("tier", "common")
 
-            # Filter by tier (visibility control)
+            # Filter by tier (visibility = usability)
             if tier == "admin" and not is_admin:
                 continue
-            # Agent-tier tool filtering is handled by the module (no filtering here for now)
+            if tier == "agent":
+                current_pid = self.persona.persona_id if self.persona else "default"
+                if tool.get("creator_id") != current_pid:
+                    continue
 
             schema = {
                 "type": "function",

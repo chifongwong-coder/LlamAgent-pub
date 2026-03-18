@@ -32,11 +32,19 @@ class ToolsModule(Module):
     name = "tools"
     description = "Tool system: core tools + common toolbox + custom tool creation"
 
-    def __init__(self):
+    def __init__(self, allowed_modules: set[str] | str | None = None):
+        """
+        Args:
+            allowed_modules: Modules allowed in create_tool code.
+                None = default safe set (json, math, re, datetime, etc.)
+                set of strings = default + extra modules (e.g., {"numpy", "pandas"})
+                "*" = allow all modules (developer takes full responsibility)
+        """
         self.common_registry: ToolRegistry | None = None   # Globally shared built-in common tools
         self.agent_registry: ToolRegistry = ToolRegistry()  # Per-instance: meta-tools + custom tools
         self.agent_store: AgentToolManager | None = None
         self._is_admin: bool = False
+        self._allowed_modules = allowed_modules
 
     def on_attach(self, agent):
         """Initialization logic when module is attached to an Agent."""
@@ -76,6 +84,7 @@ class ToolsModule(Module):
             self.agent_store = AgentToolManager(
                 storage_dir=agent.config.agent_tools_dir,
                 persona_id=persona_id,
+                allowed_modules=self._allowed_modules,
             )
             for tool_info in self.agent_store.list_tools():
                 func = self.agent_store.get_function(tool_info["name"])
@@ -103,16 +112,21 @@ class ToolsModule(Module):
     def _bridge_to_core(self):
         """Sync tools from internal registries to agent._tools so the LLM can see and call them."""
         for _name, info in self.common_registry._tools.items():
+            if _name in self.agent._tools:
+                continue  # Don't overwrite tools registered by other modules
             self.agent.register_tool(
                 name=info.name, func=info.func, description=info.description,
                 parameters=info.parameters, tier=info.tier,
                 safety_level=info.safety_level,
             )
         for _name, info in self.agent_registry._tools.items():
+            if _name in self.agent._tools:
+                continue
             self.agent.register_tool(
                 name=info.name, func=info.func, description=info.description,
                 parameters=info.parameters, tier=info.tier,
                 safety_level=info.safety_level,
+                creator_id=info.creator_id,
             )
 
     # ============================================================
@@ -246,6 +260,7 @@ class ToolsModule(Module):
                 self.agent.register_tool(
                     name=name, func=func, description=description,
                     tier="agent", safety_level=safety_level,
+                    creator_id=persona_id,
                 )
             return f"Tool '{name}' created successfully! (safety level: {safety_level})"
         except ValueError as e:
