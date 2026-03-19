@@ -82,17 +82,26 @@ def main():
     reply = agent.chat("What's the weather in Tokyo?")
     print(f"Agent: {reply}")
 
-    # --- Safety fallback ---
-    # Without SafetyModule loaded, tools with safety_level >= 2 are blocked by core.
-    # Load SafetyModule to enable all tools and get input/output protection.
+    # --- Zone-based safety (v1.3) ---
+    # Tools with path_extractor are checked against three zones:
+    #   playground/ -> always allowed
+    #   project dir -> sl=1 allowed, sl=2 needs confirmation
+    #   outside     -> sl=1 needs confirmation, sl=2 denied
     agent.register_tool(
-        name="risky_tool",
-        func=lambda: "danger",
-        description="A tool with side effects",
+        name="write_example",
+        func=lambda filename, content: f"Written to {filename}",
+        description="Write to a file",
         safety_level=2,
+        path_extractor=lambda args: [args.get("filename", "")],
     )
-    result = agent.call_tool("risky_tool", {})
-    print(f"Safety fallback result: {result}")  # Blocked without SafetyModule
+
+    # Writing to playground: allowed without confirmation
+    result = agent.call_tool("write_example", {"filename": "llama_playground/test.txt", "content": "hello"})
+    print(f"Playground write: {result}")
+
+    # Writing outside project: denied
+    result = agent.call_tool("write_example", {"filename": "/etc/test.txt", "content": "hack"})
+    print(f"External write: {result}")  # Denied by zone system
 
     agent.shutdown()
     print("Done!")
