@@ -52,14 +52,14 @@ def part1_direct_persona():
 # Part 2: Admin vs User permissions
 # =============================================================
 
-def part2_permissions():
+def part2_tier_visibility():
     print("\n" + "=" * 60)
-    print("Part 2: Permission Levels")
+    print("Part 2: Tier-Based Visibility")
     print("=" * 60)
 
     config = Config()
 
-    # Admin persona — can access all tools (permission_level=3)
+    # Admin persona — sees admin-tier tools
     admin = Persona(
         name="Admin",
         role_description="System administrator",
@@ -67,7 +67,7 @@ def part2_permissions():
         role="admin",
     )
 
-    # Regular user — restricted tool access (permission_level=1)
+    # Regular user — only sees default + common tier tools
     user = Persona(
         name="Intern",
         role_description="Junior developer",
@@ -75,29 +75,29 @@ def part2_permissions():
         role="user",
     )
 
-    print(f"Admin permission: {admin.permission_level}")  # 3
-    print(f"User permission: {user.permission_level}")    # 1
+    print(f"Admin role: {admin.role}")  # admin
+    print(f"User role: {user.role}")    # user
 
-    # Tools with different safety levels
+    # Tools with different tiers
     agent = SmartAgent(config, persona=user)
 
     def read_file(path: str) -> str:
         """Read a file (safe operation)."""
         return f"Contents of {path}"
 
-    def delete_file(path: str) -> str:
-        """Delete a file (dangerous operation)."""
-        return f"Deleted {path}"
+    def admin_command(cmd: str) -> str:
+        """Run an admin command (admin only)."""
+        return f"Executed: {cmd}"
 
-    # safety_level=1: anyone can call; safety_level=3: admin only
-    agent.register_tool("read_file", read_file, "Read a file", safety_level=1)
-    agent.register_tool("delete_file", delete_file, "Delete a file", safety_level=3)
+    # tier=common: visible to all; tier=admin: admin only
+    agent.register_tool("read_file", read_file, "Read a file", tier="common")
+    agent.register_tool("admin_command", admin_command, "Admin command", tier="admin")
 
-    # Tool schemas are filtered by persona permission
+    # Tool visibility is controlled by tier — visibility equals usability
     schemas = agent.get_all_tool_schemas()
     visible_tools = [s["function"]["name"] for s in schemas]
     print(f"Tools visible to '{user.name}': {visible_tools}")
-    # The user won't see delete_file because their permission_level (1) < safety_level (3)
+    # The user won't see admin_command because tier=admin and user is not admin
 
     agent.shutdown()
 
@@ -153,5 +153,5 @@ def part3_persona_manager():
 
 if __name__ == "__main__":
     part1_direct_persona()
-    part2_permissions()
+    part2_tier_visibility()
     part3_persona_manager()
