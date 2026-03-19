@@ -32,20 +32,27 @@ Deadlock? Detected automatically. Circular dependencies? Caught at plan validati
 
 ## The Toolbox: Four Tiers of Access Control
 
-Tools aren't just functions you register. LlamAgent implements a **four-tier tool system** — `default`, `common`, `admin`, and `agent` — where **visibility equals usability**. If an agent can see a tool, it can call it. An admin persona sees everything including `execute_command`. A regular persona sees the standard toolset. The agent can even **create its own tools** at runtime, validated through AST whitelist and executed in a restricted namespace.
+Tools aren't just functions you register. LlamAgent implements a **four-tier tool system** — `default`, `common`, `admin`, and `agent` — where **visibility equals usability**. If an agent can see a tool, it can call it. An admin persona sees everything including `execute_command`. A regular persona sees the standard toolset. The agent can even **create its own tools** at runtime, with a minimal builtins blacklist to prevent code nesting.
 
-Security wraps around every interaction:
-- **Input filtering** — blocks injection attacks, jailbreak attempts, and dangerous patterns
-- **Output sanitization** — masks API keys, credentials, phone numbers, and ID cards before they reach the user
-- **Sandbox isolation** — high-risk tools execute in isolated environments with timeout and workspace confinement
+## Three-Zone Safety: Sandbox the Environment, Not the Operations
 
-## Controlled Execution: Sandbox + Child Agents
+LlamAgent v1.3 protects against LLM hallucination errors — not by restricting what tools can do, but by restricting **where** they can operate:
 
-LlamAgent v1.2 adds two new capabilities for production-grade safety:
+| Zone | Read (sl=1) | Write/Execute (sl=2) |
+|------|-------------|---------------------|
+| **Playground** (`llama_playground/`) | Allow | Allow |
+| **Project directory** | Allow | Confirm with user |
+| **Outside project** | Confirm with user | Deny |
 
-**Sandbox Execution** — Tools with side effects can be routed through an isolated execution backend. The `SandboxModule` auto-assigns sandbox policies to risky tools, and the `ToolExecutor` transparently dispatches between host execution and sandbox backends. Phase 1 ships with `LocalProcessBackend` (subprocess-based); the protocol is designed for drop-in Docker/gVisor backends later.
+The playground is a free zone — the agent can read, write, and execute anything inside it. Project files require user confirmation for destructive operations. Anything outside the project is locked down.
 
-**Child Agent Control** — The parent agent can spawn constrained child agents for subtasks. Each child inherits the parent's LLM but operates under strict boundaries: filtered tool access (allowlist/denylist), budget limits (max LLM calls, time, steps), and no recursive spawning by default. Results flow back through a `TaskBoard` for structured collection.
+Each tool declares a **path_extractor** that tells the framework how to find file paths in its arguments. Tools without path extractors get automatic detection based on parameter names. The `SafetyModule` provides optional input filtering and output sanitization on top.
+
+## Child Agents + Sandbox
+
+**Child Agent Control** — The parent agent can spawn constrained child agents for subtasks. Each child inherits the parent's LLM and zone boundaries, but operates under strict limits: filtered tool access (allowlist/denylist), budget limits (max LLM calls, time, steps), and no recursive spawning by default.
+
+**Sandbox Execution** — For maximum isolation, the optional `SandboxModule` routes tools through isolated execution backends. Phase 1 ships with `LocalProcessBackend` (subprocess-based); the protocol is designed for drop-in Docker/gVisor backends later.
 
 ## Any LLM. Any Interface. Zero Lock-in.
 
