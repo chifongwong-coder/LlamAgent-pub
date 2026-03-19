@@ -41,7 +41,10 @@ def _create_test_agent(mock_llm_client):
     agent.history = []
     agent.summary = None
     agent.conversation = agent.history
-    agent.safety_loaded = False
+    import os
+    agent.confirm_handler = None
+    agent.project_dir = os.path.realpath(os.getcwd())
+    agent.playground_dir = os.path.realpath(os.path.join(agent.project_dir, "llama_playground"))
     agent.tool_executor = None
     agent._tools = {}
     agent._tools_version = 0
@@ -54,13 +57,14 @@ def _create_test_agent(mock_llm_client):
 class TestModuleIntegration:
     """Multi-module loading and cooperation tests."""
 
-    def test_safety_sets_safety_loaded(self, mock_llm_client):
-        """SafetyModule sets agent.safety_loaded to disable core fallback."""
+    def test_safety_module_provides_hooks(self, mock_llm_client):
+        """SafetyModule provides on_input/on_output hooks without affecting tool execution."""
         agent = _create_test_agent(mock_llm_client)
-        assert not agent.safety_loaded
         from llamagent.modules.safety.module import SafetyModule
-        agent.register_module(SafetyModule())
-        assert agent.safety_loaded
+        safety = SafetyModule()
+        agent.register_module(safety)
+        assert agent.has_module("safety")
+        assert safety.guard is not None
 
     def test_planning_sets_strategy(self, mock_llm_client):
         """PlanningModule upgrades execution strategy to PlanReAct."""

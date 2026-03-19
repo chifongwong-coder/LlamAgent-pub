@@ -17,6 +17,8 @@ Permission model:
 - Regular llama (user): Creates custom tools + uses common tools
 """
 
+import re
+
 from llamagent.core.agent import Module
 from llamagent.modules.tools.registry import ToolRegistry, global_registry
 from llamagent.modules.tools.agent_tools import AgentToolManager
@@ -26,25 +28,36 @@ from llamagent.modules.tools.agent_tools import AgentToolManager
 COMMON_STORE_ID = "__common__"
 
 
+# ----------------------------------------------------------
+# Path extractors for builtin tools (used by zone system)
+# ----------------------------------------------------------
+
+def _extract_paths_from_command(args):
+    """Extract absolute paths from a shell command string."""
+    command = args.get("command", "")
+    # Match absolute paths like /foo/bar or ~/foo
+    paths = re.findall(r'(?:^|\s)([/~][^\s;|&><]+)', command)
+    return [p.strip() for p in paths if p.strip()]
+
+
+_BUILTIN_PATH_EXTRACTORS = {
+    "read_file": lambda args: [args["filename"]] if "filename" in args else [],
+    "write_file": lambda args: [args["filename"]] if "filename" in args else [],
+    "execute_command": _extract_paths_from_command,
+}
+
+
 class ToolsModule(Module):
     """Tools module: four-tier tool system + role-based permission management."""
 
     name = "tools"
     description = "Tool system: core tools + common toolbox + custom tool creation"
 
-    def __init__(self, allowed_modules: set[str] | str | None = None):
-        """
-        Args:
-            allowed_modules: Modules allowed in create_tool code.
-                None = default safe set (json, math, re, datetime, etc.)
-                set of strings = default + extra modules (e.g., {"numpy", "pandas"})
-                "*" = allow all modules (developer takes full responsibility)
-        """
+    def __init__(self):
         self.common_registry: ToolRegistry | None = None   # Globally shared built-in common tools
         self.agent_registry: ToolRegistry = ToolRegistry()  # Per-instance: meta-tools + custom tools
         self.agent_store: AgentToolManager | None = None
         self._is_admin: bool = False
-        self._allowed_modules = allowed_modules
 
     def on_attach(self, agent):
         """Initialization logic when module is attached to an Agent."""
@@ -84,7 +97,6 @@ class ToolsModule(Module):
             self.agent_store = AgentToolManager(
                 storage_dir=agent.config.agent_tools_dir,
                 persona_id=persona_id,
-                allowed_modules=self._allowed_modules,
             )
             for tool_info in self.agent_store.list_tools():
                 func = self.agent_store.get_function(tool_info["name"])
@@ -118,6 +130,7 @@ class ToolsModule(Module):
                 name=info.name, func=info.func, description=info.description,
                 parameters=info.parameters, tier=info.tier,
                 safety_level=info.safety_level,
+                path_extractor=_BUILTIN_PATH_EXTRACTORS.get(info.name),
             )
         for _name, info in self.agent_registry._tools.items():
             if _name in self.agent._tools:
@@ -235,8 +248,6 @@ class ToolsModule(Module):
 
     def _tool_create(self, name: str, description: str, code: str) -> str:
         """Create a role custom tool."""
-        if not self.agent.has_module("sandbox"):
-            return "Cannot create custom tools: sandbox module is not loaded. Load SandboxModule first for safe code execution."
         if self.agent_store is None:
             return "Tool storage not initialized, cannot create tool."
 

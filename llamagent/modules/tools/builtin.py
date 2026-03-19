@@ -14,7 +14,6 @@ Registered to global_registry with safety_level assigned per tool characteristic
 import os
 import json
 import subprocess
-import shlex
 
 from llamagent.modules.tools.registry import tool
 
@@ -163,11 +162,9 @@ def execute_command(command: str) -> str:
                 }, ensure_ascii=False)
 
     try:
-        import shlex
-        cmd_list = shlex.split(command)
         result = subprocess.run(
-            cmd_list,
-            shell=False,
+            command,
+            shell=True,
             capture_output=True,
             text=True,
             timeout=30,
@@ -226,11 +223,7 @@ def execute_command(command: str) -> str:
 )
 def read_file(filename: str) -> str:
     """Read file content. Files are resolved relative to the current working directory."""
-    cwd = os.path.realpath(os.getcwd())
-    filepath = os.path.realpath(os.path.join(cwd, filename))
-    # Path traversal protection: must stay within cwd
-    if not filepath.startswith(cwd + os.sep) and filepath != cwd:
-        return json.dumps({"error": "Access denied: path must be within the current working directory"}, ensure_ascii=False)
+    filepath = os.path.join(os.getcwd(), filename) if not os.path.isabs(filename) else filename
     try:
         if not os.path.exists(filepath):
             return json.dumps({"error": f"File not found: {filepath}"}, ensure_ascii=False)
@@ -280,13 +273,12 @@ def read_file(filename: str) -> str:
     safety_level=2,
 )
 def write_file(filename: str, content: str) -> str:
-    """Write a file to the output directory. _output_dir is injected by ToolsModule.on_attach()."""
-    output_dir = getattr(write_file, "_output_dir", "./output")
+    """Write a file. Path is resolved relative to the current working directory."""
     try:
-        # Prevent path traversal
-        filename = os.path.basename(filename)
-        os.makedirs(output_dir, exist_ok=True)
-        filepath = os.path.join(output_dir, filename)
+        filepath = os.path.join(os.getcwd(), filename) if not os.path.isabs(filename) else filename
+        dirpath = os.path.dirname(filepath)
+        if dirpath:
+            os.makedirs(dirpath, exist_ok=True)
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(content)
         return json.dumps({

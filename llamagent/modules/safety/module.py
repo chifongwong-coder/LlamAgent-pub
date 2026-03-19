@@ -4,9 +4,8 @@ SafetyModule: safety module providing two-layer security mechanism.
 1. Input filtering (on_input): intercept injection attacks and harmful content
 2. Output sanitization (on_output): redact API keys, credentials, personal information, and other sensitive content
 
-Additionally, loading SafetyModule sets agent.safety_loaded = True, which disables the core
-fallback that blocks tools with safety_level >= 2. Tool visibility is controlled by tier;
-tool execution safety is handled by sandbox isolation, not by permission gates.
+Tool execution safety is handled by the core zone system (v1.3), not by this module.
+SafetyModule is an optional enhancement that provides on_input and on_output hooks.
 
 Design principles:
 - Interface layers (CLI / Web / API) automatically load the safety module
@@ -33,8 +32,7 @@ class SafetyModule(Module):
         """
         Initialization when module is attached to Agent.
 
-        1. Create SafetyGuard instance
-        2. Set agent.safety_loaded = True to disable core fallback (block sl>=2)
+        Creates SafetyGuard instance for input filtering and output sanitization.
         """
         super().on_attach(agent)
 
@@ -47,9 +45,6 @@ class SafetyModule(Module):
             enable_filter=True,
             log_path=str(output_dir / "safety_audit.log"),
         )
-
-        # Signal core that safety module is loaded
-        agent.safety_loaded = True
 
 
     # ------------------------------------------------------------------
