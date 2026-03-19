@@ -3,7 +3,7 @@ Agent custom tool manager: lets LlamAgent write code to create tools by itself.
 
 Features:
 - Isolated storage per persona (JSON persistence)
-- AST safety checks: rejects __ access and dangerous builtin calls (exec, eval, __import__)
+- AST safety checks: rejects __ access and dangerous builtin calls (exec, eval)
 - String literal path scanning: rejects code with hardcoded paths outside the project directory
 - Restricted execution: compiled in a namespace with dangerous builtins removed
 - Admin common tools are stored in __common__.json
@@ -23,8 +23,9 @@ from typing import Callable
 
 
 # Builtins blacklisted from tool code execution.
-# Only block code-execution primitives that could bypass static checks.
-_DANGEROUS_BUILTINS = {"exec", "eval", "__import__"}
+# Only block code-nesting primitives (exec/eval). Normal imports are allowed;
+# the zone system handles path safety at runtime.
+_DANGEROUS_BUILTINS = {"exec", "eval"}
 
 
 class AgentToolManager:
@@ -145,9 +146,9 @@ class AgentToolManager:
         AST validation: reject code containing dangerous constructs.
 
         Forbidden:
-        - Double-underscore attribute access (no __class__, __import__, etc.)
+        - Double-underscore attribute access (no __class__, __subclasses__, etc.)
         - Double-underscore name access (no __builtins__, etc.)
-        - Calls to dangerous builtins (exec, eval, __import__)
+        - Calls to dangerous builtins (exec, eval)
         - String literal paths outside the current working directory
         """
         tree = ast.parse(code)
