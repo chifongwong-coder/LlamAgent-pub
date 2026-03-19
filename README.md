@@ -52,11 +52,9 @@ LlamAgent v1.2 adds two new capabilities for production-grade safety:
 LlamAgent talks to **any LLM backend** through [LiteLLM](https://github.com/BerriAI/litellm) — OpenAI, Anthropic, DeepSeek, Mistral, or a free local Ollama model running on your laptop. No API key? No problem. It auto-detects what's available and falls back gracefully.
 
 Ship your agent however you want:
-- **CLI** — rich terminal interface with slash commands
-- **Web UI** — Gradio-based chat with file upload for RAG
-- **API Server** — FastAPI with WebSocket streaming, session management, and Swagger docs
-
-All three interfaces share the same `create_agent()` factory. Same agent, different door.
+- **CLI** — Interactive setup wizard (module presets, persona config, save/load personas), Rich-rendered output, slash commands. Ctrl+C exits the current agent and returns to setup.
+- **Web UI** — Single-page Gradio interface with a graphical configuration panel (dropdowns, checkboxes, radio buttons for modules and persona), chat area activates after building the agent. Supports document upload for RAG.
+- **API Server** — FastAPI with RESTful endpoints (chat, status, modules, upload), WebSocket streaming, session management, rate limiting, and Swagger docs at `/docs`.
 
 ## Built to Be Understood
 
@@ -120,20 +118,20 @@ cp .env.example .env
 ### Run
 
 ```bash
-# Interactive CLI (default: loads all available modules)
+# CLI with interactive setup (module presets, persona config)
 python -m llamagent
 
-# Web UI
-python -m llamagent --mode web
+# CLI with specific modules (skip interactive setup)
+python -m llamagent --modules tools,rag,memory
 
-# API server
-python -m llamagent --mode api
-
-# Pure chat mode (no modules)
+# CLI pure chat mode (no modules, skip setup)
 python -m llamagent --no-modules
 
-# Select specific modules
-python -m llamagent --modules tools,rag,memory
+# Web UI (Gradio, graphical config panel + chat)
+python -m llamagent --mode web
+
+# API server (FastAPI, Swagger docs at /docs)
+python -m llamagent --mode api
 ```
 
 ### Use as a library
