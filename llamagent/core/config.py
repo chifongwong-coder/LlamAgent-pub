@@ -174,7 +174,7 @@ class Config:
             logger.info("Detected ANTHROPIC_API_KEY, using Anthropic model")
             return "anthropic/claude-sonnet-4-20250514"
         logger.info("No API Key detected, falling back to Ollama local model")
-        return "ollama_chat/qwen2.5:7b"
+        return "ollama_chat/qwen3.5:latest"
 
     def _detect_max_context_tokens(self) -> int:
         """

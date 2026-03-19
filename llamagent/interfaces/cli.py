@@ -1,16 +1,21 @@
 """
 LlamAgent Command-Line Interface (CLI).
 
-The "front door" for chatting with LlamAgent in the terminal.
-Uses the Rich library to beautify output, giving the command line a polished look.
-When Rich is not installed, it automatically falls back to plain text mode — not as pretty, but functional.
+Interactive terminal for building and chatting with LlamAgent.
+
+Flow:
+    1. Show banner
+    2. Interactive setup: select modules, persona role, persona details
+    3. Build agent and enter chat mode
+    4. Ctrl+C once: exit current agent, return to setup
+    5. Ctrl+C at setup: exit program
 
 Usage:
-    python -m llamagent                                     # Interactive chat (default)
+    python -m llamagent                                     # Interactive setup + chat
     python -m llamagent.interfaces.cli                      # Same as above
     python -m llamagent.interfaces.cli ask "How's the weather today"  # Single question
-    python -m llamagent.interfaces.cli --modules tools,rag  # Specify modules
-    python -m llamagent.interfaces.cli --no-modules         # Pure chat mode
+    python -m llamagent.interfaces.cli --modules tools,rag  # Skip setup, specify modules
+    python -m llamagent.interfaces.cli --no-modules         # Skip setup, pure chat mode
 """
 
 import argparse
@@ -23,7 +28,7 @@ try:
     from rich.panel import Panel
     from rich.table import Table
     from rich.markdown import Markdown
-    from rich.prompt import Prompt
+    # Note: Rich Prompt has issues with CJK input; we use plain input() instead
     HAS_RICH = True
 except ImportError:
     HAS_RICH = False
@@ -32,8 +37,6 @@ except ImportError:
 # ============================================================
 # Rich fallback adapter
 # ============================================================
-# Runs fine without Rich, just less fancy output.
-# Budget Console: strips Rich markup, outputs plain text.
 
 if HAS_RICH:
     console = Console()
@@ -46,7 +49,6 @@ else:
 
         def print(self, *args, **kwargs):
             text = str(args[0]) if args else ""
-            # Strip Rich markup syntax [bold cyan]...[/bold cyan]
             text = _re.sub(r'\[/?[^\]]*\]', '', text)
             print(text)
 
@@ -61,9 +63,41 @@ else:
 
 
 # ============================================================
+# Input helpers (plain input() for CJK compatibility)
+# ============================================================
+
+def _ask(prompt: str, default: str = "") -> str:
+    """Prompt for text input with optional default."""
+    suffix = f" [{default}]" if default else ""
+    try:
+        val = input(f"{prompt}{suffix}: ").strip()
+    except EOFError:
+        val = ""
+    return val or default
+
+
+def _ask_choice(prompt: str, choices: list[str], default: str = "1") -> str:
+    """Prompt for a numbered choice."""
+    while True:
+        val = _ask(prompt, default)
+        if val in choices:
+            return val
+        print(f"  Invalid choice. Options: {', '.join(choices)}")
+
+
+def _ask_confirm(prompt: str, default: bool = True) -> bool:
+    """Prompt for yes/no confirmation."""
+    suffix = "[Y/n]" if default else "[y/N]"
+    val = input(f"{prompt} {suffix}: ").strip().lower()
+    if not val:
+        return default
+    return val in ("y", "yes")
+
+
+# ============================================================
 # Version info and welcome banner
 # ============================================================
-VERSION = "1.0.0"
+VERSION = "1.2.1"
 
 BANNER = """
 [bold cyan]
@@ -75,8 +109,223 @@ BANNER = """
                                   |___/
 [/bold cyan]
 [bold white]  LlamAgent v{version} — Your AI Assistant[/bold white]
-[dim]  Type /help for help | /quit to exit[/dim]
+[dim]  Type /help for help | Ctrl+C to exit agent[/dim]
 """.format(version=VERSION)
+
+
+# ============================================================
+# Available modules for interactive setup
+# ============================================================
+
+MODULE_GROUPS = {
+    "Core": [
+        ("safety", "Input filtering + output sanitization"),
+        ("tools", "Four-tier tool system + built-in tools"),
+        ("sandbox", "Isolated execution for high-risk tools"),
+    ],
+    "Intelligence": [
+        ("planning", "PlanReAct task decomposition"),
+        ("reflection", "Quality evaluation + lesson learning"),
+    ],
+    "Knowledge": [
+        ("rag", "RAG semantic search over documents"),
+        ("memory", "Persistent memory with semantic recall"),
+    ],
+    "Collaboration": [
+        ("multi_agent", "Role-based task delegation"),
+        ("child_agent", "Spawn constrained sub-agents"),
+        ("mcp", "Model Context Protocol bridge"),
+    ],
+}
+
+# Preset configurations
+PRESETS = {
+    "full": "All modules (recommended for first time)",
+    "minimal": "Safety + Tools only",
+    "chat": "No modules (pure conversation)",
+    "custom": "Choose modules manually",
+}
+
+
+# ============================================================
+# Interactive setup
+# ============================================================
+
+def _load_saved_personas() -> list:
+    """Load saved personas from disk. Returns empty list if none exist."""
+    from llamagent.core import Config, PersonaManager
+    try:
+        config = Config()
+        manager = PersonaManager(config.persona_file)
+        return manager.list()
+    except Exception:
+        return []
+
+
+def interactive_setup() -> dict:
+    """
+    Interactive configuration menu. Returns a dict with:
+        modules: list[str] | None
+        persona_name: str
+        persona_role: str ("admin" | "user")
+        persona_desc: str
+        save_persona: bool
+    """
+    console.print("\n[bold cyan]--- Agent Setup ---[/bold cyan]\n")
+
+    # Step 0: Check for saved personas
+    saved = _load_saved_personas()
+    use_saved = False
+
+    if saved:
+        console.print("[bold]Saved personas found:[/bold]\n")
+        for i, p in enumerate(saved, 1):
+            role_tag = "[red]admin[/red]" if p.role == "admin" else "[green]user[/green]"
+            desc = p.role_description or "No description"
+            console.print(f"  [bold]{i}[/bold]. {p.name} ({role_tag}) — {desc[:60]}")
+        console.print(f"  [bold]{len(saved) + 1}[/bold]. Create new persona")
+        console.print()
+
+        p_choice = _ask_choice(
+            "Select persona",
+            [str(i) for i in range(1, len(saved) + 2)],
+            default="1",
+        )
+
+        idx = int(p_choice) - 1
+        if idx < len(saved):
+            # Use saved persona
+            p = saved[idx]
+            persona_name = p.name
+            persona_role = p.role
+            persona_desc = p.role_description or "A helpful AI assistant"
+            use_saved = True
+            console.print(f"\n[green]Using persona: {persona_name}[/green]")
+
+    # Step 1: Module preset
+    console.print("\n[bold]Step 1:[/bold] Choose module configuration\n")
+    preset_keys = list(PRESETS.keys())
+    for i, (key, desc) in enumerate(PRESETS.items(), 1):
+        marker = "[cyan]*[/cyan] " if key == "full" else "  "
+        console.print(f"  {marker}[bold]{i}[/bold]. {key} — {desc}")
+
+    console.print()
+    choice = _ask_choice(
+        "Select preset",
+        [str(i) for i in range(1, len(PRESETS) + 1)],
+        default="1",
+    )
+
+    preset = preset_keys[int(choice) - 1]
+
+    if preset == "full":
+        module_names = None  # None = load all
+    elif preset == "minimal":
+        module_names = ["safety", "tools"]
+    elif preset == "chat":
+        module_names = []
+    else:
+        module_names = _pick_modules()
+
+    if not use_saved:
+        # Step 2: Persona role
+        console.print("\n[bold]Step 2:[/bold] Choose persona role\n")
+        console.print("  [cyan]*[/cyan] [bold]1[/bold]. user — Standard access")
+        console.print("    [bold]2[/bold]. admin — Full access (includes execute_command)")
+        console.print()
+
+        role_choice = _ask_choice("Select role", ["1", "2"], default="1")
+
+        persona_role = "admin" if role_choice == "2" else "user"
+
+        # Step 3: Persona details
+        console.print("\n[bold]Step 3:[/bold] Persona details\n")
+
+        persona_name = _ask("Agent name", default="LlamAgent")
+        persona_desc = _ask("Role description", default="A helpful AI assistant")
+
+        # Ask whether to save
+        save_persona = _ask_confirm("Save this persona for next time?")
+    else:
+        save_persona = False  # Already saved
+
+    return {
+        "modules": module_names,
+        "persona_name": persona_name,
+        "persona_role": persona_role,
+        "persona_desc": persona_desc,
+        "save_persona": save_persona,
+    }
+
+
+def _pick_modules() -> list[str]:
+    """Let user pick individual modules from grouped list."""
+    selected = []
+    console.print()
+
+    for group_name, modules in MODULE_GROUPS.items():
+        console.print(f"\n  [bold cyan]{group_name}[/bold cyan]")
+        for mod_name, mod_desc in modules:
+            yes = _ask_confirm(f"    Load {mod_name} ({mod_desc})?")
+            if yes:
+                selected.append(mod_name)
+
+    return selected
+
+
+def build_agent(setup: dict):
+    """Build a SmartAgent from interactive setup results."""
+    from llamagent.core import SmartAgent, Config, Persona, PersonaManager
+    from llamagent.main import load_module, AVAILABLE_MODULES
+
+    config = Config()
+
+    # Create persona
+    persona = Persona(
+        name=setup["persona_name"],
+        role_description=setup["persona_desc"],
+        role=setup["persona_role"],
+    )
+
+    # Save persona if requested
+    if setup.get("save_persona"):
+        try:
+            manager = PersonaManager(config.persona_file)
+            # Check if already exists
+            existing = manager.get(persona.persona_id)
+            if not existing:
+                manager.create(
+                    name=persona.name,
+                    role_description=persona.role_description,
+                    role=persona.role,
+                )
+                console.print(f"[green]Persona '{persona.name}' saved![/green]")
+            else:
+                console.print(f"[dim]Persona '{persona.name}' already exists, skipping save[/dim]")
+        except Exception as e:
+            console.print(f"[yellow]Failed to save persona: {e}[/yellow]")
+
+    agent = SmartAgent(config, persona=persona)
+
+    # Load modules
+    module_names = setup["modules"]
+    if module_names is None:
+        module_names = list(AVAILABLE_MODULES.keys())
+
+    if module_names:
+        console.print(f"\n[dim]Loading modules...[/dim]")
+        for name in module_names:
+            mod = load_module(name)
+            if mod:
+                agent.register_module(mod)
+                console.print(f"  [green]+[/green] {name}")
+    else:
+        console.print("\n[dim]Pure chat mode (no modules)[/dim]")
+
+    console.print(f"\n[green]Agent ready![/green] Model: {config.model} | "
+                  f"Role: {persona.role} | Modules: {len(agent.modules)}\n")
+
+    return agent
 
 
 # ============================================================
@@ -94,30 +343,16 @@ class SmartAgentCLI:
     4. Error handling (never crash regardless of user input)
     """
 
-    def __init__(
-        self,
-        module_names: list[str] | None = None,
-        persona_name: str | None = None,
-        agent=None,
-    ):
+    def __init__(self, agent):
         """
-        Initialize CLI: create Agent instance and set up command mappings.
+        Initialize CLI with a pre-built agent.
 
         Args:
-            module_names: List of modules to load, None means load all
-            persona_name: Persona name, None uses default identity
-            agent: Pass in an already-created SmartAgent instance (highest priority)
+            agent: A configured SmartAgent instance
         """
-        if agent is not None:
-            # Use the externally provided Agent directly
-            self.agent = agent
-        else:
-            # Create a new Agent via create_agent
-            console.print("\n[dim]Initializing LlamAgent...[/dim]")
-            from llamagent.main import create_agent
-            self.agent = create_agent(module_names, persona_name=persona_name)
+        self.agent = agent
 
-        # Slash command mapping — using a dict instead of if-elif chains, more elegant and extensible
+        # Slash command mapping
         self._slash_commands = {
             "/quit": self._cmd_quit,
             "/exit": self._cmd_quit,
@@ -128,29 +363,22 @@ class SmartAgentCLI:
             "/clear": self._cmd_clear,
         }
 
-        console.print(f"[green]Initialization complete! Model: {self.agent.config.model}[/green]\n")
-
     # ============================================================
     # Interactive chat mode (main loop)
     # ============================================================
 
     def chat_mode(self):
         """
-        Enter interactive chat mode — the core feature of the CLI.
+        Enter interactive chat mode.
 
-        Like opening a messaging app to chat with a friend, except this time your
-        friend is an AI llama. Supports slash commands (/help, /status, etc.)
-        and regular conversation.
+        Returns:
+            "restart" if user pressed Ctrl+C (go back to setup)
+            "quit" if user typed /quit
         """
-        console.print(BANNER)
-
         while True:
             try:
-                # Get user input — Rich's Prompt looks better than input()
-                if HAS_RICH:
-                    user_input = Prompt.ask("\n[bold green]You[/bold green]").strip()
-                else:
-                    user_input = input("\nYou: ").strip()
+                # Get user input (plain input for CJK compatibility)
+                user_input = input("\nYou: ").strip()
 
                 if not user_input:
                     continue
@@ -162,9 +390,8 @@ class SmartAgentCLI:
 
                     handler = self._slash_commands.get(cmd)
                     if handler:
-                        # Execute command; returning False means exit
                         if handler() is False:
-                            break
+                            return "quit"
                     else:
                         console.print(
                             f"[yellow]Unknown command: {cmd}, "
@@ -172,28 +399,22 @@ class SmartAgentCLI:
                         )
                     continue
 
-                # Regular chat: send to Agent for processing
+                # Regular chat
                 self._process_chat(user_input)
 
             except KeyboardInterrupt:
-                # Ctrl+C graceful exit — don't show the user an ugly stack trace
-                console.print("\n\n[dim]Exit signal received, goodbye![/dim]")
-                break
+                # Ctrl+C: exit current agent, return to setup
+                console.print("\n\n[dim]Exiting current agent...[/dim]")
+                return "restart"
             except EOFError:
-                # End of input stream (pipe mode, etc.)
-                break
+                return "quit"
 
     # ============================================================
     # Single question mode
     # ============================================================
 
     def ask(self, question: str):
-        """
-        Single question mode: ask a question, get an answer, done.
-
-        Suitable for scripted usage:
-            python -m llamagent.interfaces.cli ask "Summarize my emails for today"
-        """
+        """Single question mode: ask a question, get an answer, done."""
         try:
             with console.status("[bold cyan]LlamAgent is thinking...[/bold cyan]"):
                 response = self.agent.chat(question)
@@ -209,12 +430,7 @@ class SmartAgentCLI:
     # ============================================================
 
     def _process_chat(self, user_input: str):
-        """
-        Process a single chat turn: send to Agent, display the response.
-
-        console.status() shows a spinning animation in the terminal,
-        letting the user know LlamAgent is "thinking" — much better than staring at a blank screen.
-        """
+        """Process a single chat turn: send to Agent, display the response."""
         try:
             with console.status("[bold cyan]LlamAgent is thinking...[/bold cyan]"):
                 response = self.agent.chat(user_input)
@@ -226,7 +442,7 @@ class SmartAgentCLI:
             console.print("[dim]Please try again, or type /help for assistance[/dim]")
 
     def _display_response(self, response: str):
-        """Render Agent response with Rich Panel + Markdown, or plain text if Rich is unavailable."""
+        """Render Agent response with Rich Panel + Markdown, or plain text."""
         if HAS_RICH:
             console.print()
             console.print(Panel(
@@ -244,8 +460,8 @@ class SmartAgentCLI:
 
     def _cmd_quit(self):
         """Exit the conversation."""
-        console.print("\n[bold cyan]Goodbye! Looking forward to chatting with you again.[/bold cyan]")
-        return False  # Returning False exits the main loop
+        console.print("\n[bold cyan]Goodbye![/bold cyan]")
+        return False
 
     def _cmd_help(self):
         """Display help information."""
@@ -263,7 +479,8 @@ class SmartAgentCLI:
                 ("/status", "View Agent runtime status"),
                 ("/modules", "View loaded modules"),
                 ("/clear", "Clear conversation history"),
-                ("/quit", "Exit the conversation (also: /exit, /q, Ctrl+C)"),
+                ("/quit", "Exit the conversation (also: /exit, /q)"),
+                ("Ctrl+C", "Exit current agent, return to setup"),
             ]
             for cmd, desc in commands:
                 help_table.add_row(cmd, desc)
@@ -278,6 +495,7 @@ class SmartAgentCLI:
                 "  /modules    View loaded modules\n"
                 "  /clear      Clear conversation history\n"
                 "  /quit       Exit\n"
+                "  Ctrl+C      Exit current agent, return to setup\n"
             )
 
     def _cmd_status(self):
@@ -350,7 +568,7 @@ class SmartAgentCLI:
 
 
 # ============================================================
-# Command-line argument parsing (python -m llamagent.interfaces.cli entry)
+# Main entry loop
 # ============================================================
 
 def _create_parser() -> argparse.ArgumentParser:
@@ -361,30 +579,24 @@ def _create_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python -m llamagent.interfaces.cli                      Enter interactive chat
+  python -m llamagent.interfaces.cli                      Interactive setup + chat
   python -m llamagent.interfaces.cli ask "How's the weather"  Single question
-  python -m llamagent.interfaces.cli --modules tools,rag   Load only tools and RAG
-  python -m llamagent.interfaces.cli --no-modules          Pure chat mode
+  python -m llamagent.interfaces.cli --modules tools,rag   Skip setup, load specific modules
+  python -m llamagent.interfaces.cli --no-modules          Skip setup, pure chat mode
         """,
     )
 
-    # Module selection
     parser.add_argument(
         "--modules", type=str, default=None,
-        help="Comma-separated list of modules, e.g.: tools,rag,memory",
+        help="Comma-separated list of modules (skips interactive setup)",
     )
     parser.add_argument(
         "--no-modules", action="store_true",
-        help="Load no modules (pure chat mode)",
+        help="Load no modules, pure chat mode (skips interactive setup)",
     )
 
-    # Subcommands
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
-
-    # chat command (default)
     subparsers.add_parser("chat", help="Enter interactive chat mode")
-
-    # ask command: single question
     ask_parser = subparsers.add_parser("ask", help="Ask a single question")
     ask_parser.add_argument("question", help="The question to ask")
 
@@ -392,35 +604,80 @@ Examples:
 
 
 def main():
-    """CLI standalone entry point: parse arguments and execute the corresponding action."""
+    """CLI entry point: interactive setup loop or direct mode."""
     if not HAS_RICH:
         print(
-            "[Note] Rich library not installed, terminal interface will use simplified mode. "
+            "[Note] Rich library not installed, using simplified mode. "
             "Install with: pip install rich"
         )
 
     parser = _create_parser()
     args = parser.parse_args()
 
-    # Parse module arguments
-    if args.no_modules:
-        module_names = []
-    elif args.modules:
-        module_names = [m.strip() for m in args.modules.split(",") if m.strip()]
-    else:
-        module_names = None  # None = load all
+    # Direct mode: --modules or --no-modules skips interactive setup
+    if args.no_modules or args.modules is not None:
+        if args.no_modules:
+            module_names = []
+        else:
+            module_names = [m.strip() for m in args.modules.split(",") if m.strip()]
 
-    # Default to interactive chat mode
-    if args.command is None or args.command == "chat":
-        cli = SmartAgentCLI(module_names=module_names)
-        cli.chat_mode()
+        setup = {
+            "modules": module_names,
+            "persona_name": "LlamAgent",
+            "persona_role": "user",
+            "persona_desc": "A helpful AI assistant",
+        }
+        agent = build_agent(setup)
+        console.print(BANNER)
+        cli = SmartAgentCLI(agent)
 
-    elif args.command == "ask":
-        cli = SmartAgentCLI(module_names=module_names)
+        if args.command == "ask":
+            cli.ask(args.question)
+        else:
+            cli.chat_mode()
+        return
+
+    # Ask mode with question
+    if args.command == "ask":
+        setup = {
+            "modules": None,
+            "persona_name": "LlamAgent",
+            "persona_role": "user",
+            "persona_desc": "A helpful AI assistant",
+        }
+        agent = build_agent(setup)
+        cli = SmartAgentCLI(agent)
         cli.ask(args.question)
+        return
 
-    else:
-        parser.print_help()
+    # Interactive setup loop
+    console.print(BANNER)
+
+    while True:
+        try:
+            setup = interactive_setup()
+        except KeyboardInterrupt:
+            console.print("\n\n[bold cyan]Goodbye![/bold cyan]")
+            break
+
+        try:
+            agent = build_agent(setup)
+        except Exception as e:
+            console.print(f"\n[red]Failed to build agent: {e}[/red]")
+            continue
+
+        cli = SmartAgentCLI(agent)
+        result = cli.chat_mode()
+
+        # Cleanup
+        try:
+            agent.shutdown()
+        except Exception:
+            pass
+
+        if result == "quit":
+            break
+        # result == "restart": loop back to setup
 
 
 if __name__ == "__main__":

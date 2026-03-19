@@ -241,7 +241,7 @@ def create_api_server(
             "- POST /upload — Upload files to RAG\n"
             "- WebSocket /ws/chat — Streaming chat\n"
         ),
-        version="1.0.0",
+        version="1.2.1",
         lifespan=lifespan,
         responses={
             401: {"model": ErrorResponse, "description": "Authentication failed"},
@@ -390,7 +390,7 @@ def create_api_server(
             status = agent.status()
             return StatusResponse(
                 status="healthy",
-                version="1.0.0",
+                version="1.2.1",
                 model=status.get("model", "Unknown"),
                 uptime_seconds=round(time.time() - START_TIME, 2),
                 modules=status.get("modules", {}),
@@ -398,7 +398,7 @@ def create_api_server(
         except Exception:
             return StatusResponse(
                 status="degraded",
-                version="1.0.0",
+                version="1.2.1",
                 model="Unknown",
                 uptime_seconds=round(time.time() - START_TIME, 2),
                 modules={},

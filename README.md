@@ -32,12 +32,20 @@ Deadlock? Detected automatically. Circular dependencies? Caught at plan validati
 
 ## The Toolbox: Four Tiers of Access Control
 
-Tools aren't just functions you register. LlamAgent implements a **four-tier tool system** — `default`, `common`, `admin`, and `agent` — with visibility controlled by tier and executability controlled by safety level. An intern persona sees read-only tools. An admin persona sees everything. The agent can even **create its own tools** at runtime, with automatic code scanning to assign safety levels.
+Tools aren't just functions you register. LlamAgent implements a **four-tier tool system** — `default`, `common`, `admin`, and `agent` — where **visibility equals usability**. If an agent can see a tool, it can call it. An admin persona sees everything including `execute_command`. A regular persona sees the standard toolset. The agent can even **create its own tools** at runtime, validated through AST whitelist and executed in a restricted namespace.
 
-Three-layer security wraps around every interaction:
+Security wraps around every interaction:
 - **Input filtering** — blocks injection attacks, jailbreak attempts, and dangerous patterns
-- **Permission checking** — compares tool safety level against persona permission level
 - **Output sanitization** — masks API keys, credentials, phone numbers, and ID cards before they reach the user
+- **Sandbox isolation** — high-risk tools execute in isolated environments with timeout and workspace confinement
+
+## Controlled Execution: Sandbox + Child Agents
+
+LlamAgent v1.2 adds two new capabilities for production-grade safety:
+
+**Sandbox Execution** — Tools with side effects can be routed through an isolated execution backend. The `SandboxModule` auto-assigns sandbox policies to risky tools, and the `ToolExecutor` transparently dispatches between host execution and sandbox backends. Phase 1 ships with `LocalProcessBackend` (subprocess-based); the protocol is designed for drop-in Docker/gVisor backends later.
+
+**Child Agent Control** — The parent agent can spawn constrained child agents for subtasks. Each child inherits the parent's LLM but operates under strict boundaries: filtered tool access (allowlist/denylist), budget limits (max LLM calls, time, steps), and no recursive spawning by default. Results flow back through a `TaskBoard` for structured collection.
 
 ## Any LLM. Any Interface. Zero Lock-in.
 
@@ -74,6 +82,7 @@ LlamAgent isn't a research prototype or a framework-of-frameworks. It's **produc
                     |                                           |
                     |  Tools - RAG - Memory - Reasoning         |
                     |  Reflection - Multi-Agent - MCP - Safety  |
+                    |  Sandbox - Child Agent                    |
                     +-------------------------------------------+
 ```
 
@@ -157,7 +166,9 @@ reply = agent.chat("Search for recent AI papers and summarize the top 3")
 | **Reflection** | Quality evaluation and lesson learning | Score-based replan trigger |
 | **Multi-Agent** | Role-based task delegation | Writer, coder, analyst, researcher |
 | **MCP** | Model Context Protocol client | Connect to external MCP servers |
-| **Safety** | Three-layer security (input/permission/output) | Injection detection, output masking |
+| **Sandbox** | Isolated execution for high-risk tools | Auto-assign policies, timeout protection |
+| **Child Agent** | Spawn constrained sub-agents with budgets | Role-based tools, budget limits, task board |
+| **Safety** | Input filtering + output sanitization | Injection detection, API key masking |
 
 ## Module Hook Pipeline
 
@@ -193,7 +204,7 @@ All settings can be overridden via environment variables. See [`.env.example`](.
 | `OPENAI_API_KEY` | — | OpenAI API key |
 | `ANTHROPIC_API_KEY` | — | Anthropic API key |
 | `MEMORY_MODE` | `off` | Memory mode: `off` / `autonomous` / `hybrid` |
-| `PERMISSION_LEVEL` | `1` | Default tool permission level (1-3) |
+| `PERMISSION_LEVEL` | `1` | Default persona permission level |
 | `MAX_REACT_STEPS` | `10` | Max ReAct loop iterations |
 | `WEB_UI_PORT` | `7860` | Gradio web UI port |
 | `API_PORT` | `8000` | FastAPI server port |
@@ -207,6 +218,8 @@ See the [`examples/`](examples/) directory for runnable tutorials:
 - **[03_modules.py](examples/03_modules.py)** — Load modules and understand the hook pipeline
 - **[04_reasoning.py](examples/04_reasoning.py)** — ReAct loops and task planning
 - **[05_persona.py](examples/05_persona.py)** — Create personas with roles and permissions
+- **[06_sandbox.py](examples/06_sandbox.py)** — Sandbox execution for high-risk tools
+- **[07_child_agent.py](examples/07_child_agent.py)** — Spawn constrained child agents
 
 ## Project Structure
 
@@ -222,7 +235,9 @@ llamagent/
 │   │   ├── reflection/ # Quality evaluation
 │   │   ├── multi_agent/# Role-based delegation
 │   │   ├── mcp/        # Model Context Protocol
-│   │   └── safety/     # Input/permission/output security
+│   │   ├── sandbox/    # Isolated tool execution
+│   │   ├── child_agent/# Constrained sub-agent control
+│   │   └── safety/     # Input filtering + output sanitization
 │   └── interfaces/     # CLI, Web UI, API server
 ├── examples/           # Tutorial scripts
 ├── tests/              # Test suite
