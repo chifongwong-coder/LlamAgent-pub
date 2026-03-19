@@ -1,11 +1,12 @@
 """
-06 — Sandbox: Isolate High-Risk Tool Execution
+06 — Sandbox: Isolate Tool Execution
 
-The SandboxModule adds execution isolation for dangerous tools.
-Tools with safety_level >= 3 are automatically routed through a sandbox
+The SandboxModule adds optional execution isolation for tools.
+Tools with safety_level >= 2 are automatically routed through a sandbox
 backend (subprocess with timeout, workspace confinement, etc.).
 
 You can also manually assign execution policies to any tool.
+The sandbox is independent of the zone system and provides additional isolation.
 
 Prerequisites:
     pip install -e .
@@ -44,7 +45,7 @@ def part1_auto_sandbox():
         safety_level=1,
     )
 
-    # Register a high-risk tool (safety_level=3)
+    # Register a tool with side effects (safety_level=2)
     def execute_command(command: str) -> str:
         """Execute a shell command (high risk)."""
         import subprocess
@@ -58,14 +59,14 @@ def part1_auto_sandbox():
         name="execute_command",
         func=execute_command,
         description="Execute a shell command",
-        safety_level=3,
+        safety_level=2,
     )
 
     # Before SandboxModule: no execution policies
     print(f"execute_command policy before: {agent._tools['execute_command'].get('execution_policy')}")
 
     # Register the SandboxModule — auto_assign=True (default)
-    # This will assign POLICY_LOCAL_SUBPROCESS to tools with safety_level >= 3
+    # This will assign POLICY_LOCAL_SUBPROCESS to tools with safety_level >= 2
     agent.register_module(SandboxModule(auto_assign=True))
 
     # After SandboxModule: high-risk tool gets a sandbox policy
@@ -185,7 +186,7 @@ def part4_direct_executor():
         name="run_shell",
         func=run_shell,
         description="Run a shell command in sandbox",
-        safety_level=3,
+        safety_level=2,
     )
 
     # Attach sandbox module
