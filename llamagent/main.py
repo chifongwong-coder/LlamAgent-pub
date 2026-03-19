@@ -210,11 +210,10 @@ Examples:
     elif args.mode == "web":
         from llamagent.interfaces.web_ui import create_web_ui, launch_web_ui
 
-        agent = create_agent(module_names, persona_name=args.persona)
         port = args.port or int(__import__("os").getenv("WEB_UI_PORT", "7860"))
 
         try:
-            demo = create_web_ui(agent)
+            demo = create_web_ui()
         except ImportError as e:
             print(f"Error: {e}")
             sys.exit(1)

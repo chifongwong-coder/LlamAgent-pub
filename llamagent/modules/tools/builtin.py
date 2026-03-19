@@ -225,12 +225,12 @@ def execute_command(command: str) -> str:
     safety_level=1,
 )
 def read_file(filename: str) -> str:
-    """Read file content. Only files within the output directory are accessible."""
-    output_dir = os.path.realpath(getattr(read_file, "_output_dir", "./output"))
-    filepath = os.path.realpath(os.path.join(output_dir, filename))
-    # Path traversal protection: must stay within output_dir
-    if not filepath.startswith(output_dir + os.sep) and filepath != output_dir:
-        return json.dumps({"error": f"Access denied: path must be within the output directory"}, ensure_ascii=False)
+    """Read file content. Files are resolved relative to the current working directory."""
+    cwd = os.path.realpath(os.getcwd())
+    filepath = os.path.realpath(os.path.join(cwd, filename))
+    # Path traversal protection: must stay within cwd
+    if not filepath.startswith(cwd + os.sep) and filepath != cwd:
+        return json.dumps({"error": "Access denied: path must be within the current working directory"}, ensure_ascii=False)
     try:
         if not os.path.exists(filepath):
             return json.dumps({"error": f"File not found: {filepath}"}, ensure_ascii=False)

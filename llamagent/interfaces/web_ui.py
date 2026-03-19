@@ -1,25 +1,18 @@
 """
 LlamAgent Web Interface.
 
-A web chat interface built with Gradio — LlamAgent's "pretty face".
-Gradio is an optional dependency; importing this module without it installed
-will raise an ImportError with installation instructions.
+A single-page web interface built with Gradio:
+- Top: Configuration panel (dropdowns, checkboxes, radio buttons)
+- Bottom: Chat area (activated after agent is built)
 
 Usage:
     python -m llamagent --mode web
     python -m llamagent.interfaces.web_ui
     Then open your browser to http://localhost:7860
-
-Features:
-    - Chat conversation (automatic conversation history management)
-    - Document upload (load into RAG knowledge base)
-    - Agent status panel
-    - Example questions for quick start
 """
 
 import os
 
-# Gradio: optional dependency, provides a friendly message if not installed
 try:
     import gradio as gr
     HAS_GRADIO = True
@@ -28,280 +21,348 @@ except ImportError:
 
 
 # ============================================================
+# Module definitions for config panel
+# ============================================================
+
+MODULE_OPTIONS = [
+    ("safety", "Safety — Input filtering + output sanitization"),
+    ("tools", "Tools — Four-tier tool system + built-ins"),
+    ("sandbox", "Sandbox — Isolated execution for high-risk tools"),
+    ("planning", "Planning — PlanReAct task decomposition"),
+    ("reflection", "Reflection — Quality evaluation + lessons"),
+    ("rag", "RAG — Semantic search over documents"),
+    ("memory", "Memory — Persistent memory with recall"),
+    ("multi_agent", "Multi-Agent — Role-based delegation"),
+    ("child_agent", "Child Agent — Constrained sub-agents"),
+    ("mcp", "MCP — Model Context Protocol bridge"),
+]
+
+DEFAULT_MODULES = [m[0] for m in MODULE_OPTIONS]
+
+PRESET_CONFIGS = {
+    "Full (all modules)": DEFAULT_MODULES,
+    "Minimal (safety + tools)": ["safety", "tools"],
+    "Chat only (no modules)": [],
+}
+
+
+# ============================================================
+# Persona persistence helpers
+# ============================================================
+
+def _load_saved_personas() -> list:
+    """Load saved personas from disk."""
+    from llamagent.core import Config, PersonaManager
+    try:
+        config = Config()
+        manager = PersonaManager(config.persona_file)
+        return manager.list()
+    except Exception:
+        return []
+
+
+def _save_persona(name, role, desc):
+    """Save a persona to disk."""
+    from llamagent.core import Config, PersonaManager
+    try:
+        config = Config()
+        manager = PersonaManager(config.persona_file)
+        existing = manager.get(name.lower().replace(" ", ""))
+        if not existing:
+            manager.create(name=name, role_description=desc, role=role)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _get_persona_choices():
+    """Get persona dropdown choices: saved personas + 'Create new'."""
+    saved = _load_saved_personas()
+    choices = [f"{p.name} ({p.role})" for p in saved]
+    choices.append("+ Create new persona")
+    return choices, saved
+
+
+# ============================================================
+# Agent builder
+# ============================================================
+
+def _build_agent(modules_list, role, persona_name, persona_desc):
+    """Build a SmartAgent with the given config."""
+    from llamagent.core import SmartAgent, Config, Persona
+    from llamagent.main import load_module
+
+    config = Config()
+    persona = Persona(name=persona_name, role_description=persona_desc, role=role)
+    agent = SmartAgent(config, persona=persona)
+
+    for mod_name in modules_list:
+        mod = load_module(mod_name)
+        if mod:
+            agent.register_module(mod)
+
+    return agent
+
+
+# ============================================================
 # Web UI construction
 # ============================================================
 
-def create_web_ui(agent) -> "gr.Blocks":
-    """
-    Build the Gradio Web interface.
-
-    Takes an already-created SmartAgent instance and builds a complete
-    web interaction interface around it. gr.Blocks is Gradio's "canvas" mode —
-    you freely arrange components on it, more flexible than gr.Interface.
-
-    Args:
-        agent: SmartAgent instance
-
-    Returns:
-        gr.Blocks interface object
-
-    Raises:
-        ImportError: Raised when Gradio is not installed
-    """
+def create_web_ui() -> "gr.Blocks":
+    """Build the Gradio single-page interface with config panel + chat."""
     if not HAS_GRADIO:
         raise ImportError(
             "Gradio is not installed! Please run: pip install gradio\n"
             "Then try again."
         )
 
+    # Shared state
+    current_agent = {"agent": None}
+
     # ---- Callback functions ----
-    # These closures capture the agent instance, avoiding global variables
 
-    def chat_handler(message: str, history: list) -> str:
-        """Handle user chat messages."""
-        if not message.strip():
-            return "Please enter your question."
-        try:
-            return agent.chat(message)
-        except Exception as e:
-            return f"Sorry, an error occurred: {e}"
+    def on_preset_change(preset_name):
+        """When preset dropdown changes, update module checkboxes."""
+        modules = PRESET_CONFIGS.get(preset_name, DEFAULT_MODULES)
+        return modules
 
-    def upload_handler(files) -> str:
-        """
-        Handle document uploads — let users feed knowledge to LlamAgent via the web.
+    def on_persona_dropdown_change(choice):
+        """When persona dropdown changes, fill in details or show create fields."""
+        _, saved = _get_persona_choices()
+        if choice == "+ Create new persona":
+            return "user", "LlamAgent", "A helpful AI assistant", gr.update(visible=True)
 
-        Uploaded files are processed by the RAG module (if loaded):
-        1. Read file content
-        2. Split into chunks
-        3. Vectorize and store in ChromaDB
-        4. These can be retrieved during subsequent conversations
-        """
-        if not files:
-            return "No files selected."
+        # Find the selected persona
+        for p in saved:
+            label = f"{p.name} ({p.role})"
+            if label == choice:
+                return p.role, p.name, p.role_description or "", gr.update(visible=False)
 
-        if not agent.has_module("rag"):
+        return "user", "LlamAgent", "A helpful AI assistant", gr.update(visible=True)
+
+    def build_agent_click(modules, role, name, desc, save_check):
+        """Build agent from config panel."""
+        if not name.strip():
             return (
-                "RAG module is not loaded, cannot process document uploads.\n"
-                "Please start with the --modules rag parameter, or load all modules."
+                gr.update(interactive=False),
+                "Please enter an agent name.",
+                gr.update(),
             )
 
-        total_chunks = 0
-        results = []
+        try:
+            agent = _build_agent(modules, role, name.strip(), desc.strip())
+            current_agent["agent"] = agent
 
+            # Save persona if requested
+            if save_check:
+                _save_persona(name.strip(), role, desc.strip())
+
+            mod_count = len(agent.modules)
+            status = (
+                f"**Agent Ready!**\n\n"
+                f"**Name**: {name}\n"
+                f"**Role**: {role}\n"
+                f"**Model**: {agent.config.model}\n"
+                f"**Modules**: {mod_count} loaded"
+            )
+            return (
+                gr.update(interactive=True),
+                status,
+                [],  # Clear chat history
+            )
+
+        except Exception as e:
+            return (
+                gr.update(interactive=False),
+                f"**Build failed**: {e}",
+                gr.update(),
+            )
+
+    def chat_respond(message, history):
+        """Handle chat messages."""
+        if not message.strip():
+            return history or [], ""
+
+        agent = current_agent.get("agent")
+        if agent is None:
+            history = history or []
+            history.append({"role": "assistant", "content": "Please build an agent first using the configuration panel above."})
+            return history, ""
+
+        try:
+            response = agent.chat(message)
+        except Exception as e:
+            response = f"Error: {e}"
+
+        history = history or []
+        history.append({"role": "user", "content": message})
+        history.append({"role": "assistant", "content": response})
+        return history, ""
+
+    def clear_chat():
+        """Clear chat history."""
+        if current_agent.get("agent"):
+            current_agent["agent"].clear_conversation()
+        return [], ""
+
+    def upload_handler(files):
+        """Handle document uploads for RAG."""
+        agent = current_agent.get("agent")
+        if not agent:
+            return "Please build an agent first."
+        if not files:
+            return "No files selected."
+        if not agent.has_module("rag"):
+            return "RAG module is not loaded."
+
+        results = []
         for file in files:
             try:
                 file_path = file.name if hasattr(file, 'name') else str(file)
                 filename = os.path.basename(file_path)
-
                 rag_module = agent.get_module("rag")
                 if hasattr(rag_module, 'load_documents'):
                     count = rag_module.load_documents(file_path)
-                    total_chunks += count
-                    results.append(f"  [OK] {filename}: {count} chunk(s)")
+                    results.append(f"OK: {filename} ({count} chunks)")
                 else:
-                    # Fallback: read file content directly
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.read()
-                    results.append(f"  [OK] {filename}: loaded ({len(content)} characters)")
-                    total_chunks += 1
-
+                    results.append(f"OK: {filename}")
             except Exception as e:
-                filename = os.path.basename(str(file))
-                results.append(f"  [Failed] {filename}: loading failed ({e})")
+                results.append(f"Failed: {os.path.basename(str(file))} ({e})")
 
-        detail = "\n".join(results)
-        return f"Loading complete! {total_chunks} document chunk(s) total:\n{detail}"
-
-    def get_status_text() -> str:
-        """Get formatted Agent status text — displayed in the sidebar status panel."""
-        try:
-            status = agent.status()
-            modules = status.get("modules", {})
-
-            lines = [
-                f"**Model**: {status.get('model', 'Unknown')}",
-                f"**Persona**: {status.get('persona') or 'Default'}",
-                f"**Conversation Turns**: {status.get('conversation_turns', 0)}",
-                "",
-                "**Loaded Modules**:",
-            ]
-
-            if modules:
-                for name, desc in modules.items():
-                    lines.append(f"- {name}: {desc}")
-            else:
-                lines.append("- (No modules)")
-
-            return "\n".join(lines)
-        except Exception:
-            return "Failed to retrieve status"
-
-    def clear_chat():
-        """Clear conversation history."""
-        agent.clear_conversation()
-        return [], "Conversation cleared."
+        return "\n".join(results)
 
     # ---- Build the interface ----
 
-    custom_css = """
-    .status-panel { font-size: 14px; line-height: 1.6; }
-    """
+    persona_choices, _ = _get_persona_choices()
 
     with gr.Blocks(
         title="LlamAgent",
         theme=gr.themes.Soft(),
-        css=custom_css,
     ) as demo:
 
-        # Title area
-        gr.Markdown(
-            """
-            # LlamAgent
-            **Your AI Assistant** — Supports tool calling / knowledge retrieval / reasoning & planning / multi-agent collaboration
-            """
+        gr.Markdown("# LlamAgent\n**Build and chat with your AI agent**")
+
+        # ============================================
+        # Configuration Panel
+        # ============================================
+        with gr.Accordion("Agent Configuration", open=True):
+            with gr.Row():
+                # Left: modules
+                with gr.Column(scale=2):
+                    preset_dropdown = gr.Dropdown(
+                        choices=list(PRESET_CONFIGS.keys()),
+                        value="Full (all modules)",
+                        label="Module Preset",
+                    )
+                    module_checkboxes = gr.CheckboxGroup(
+                        choices=[f"{m[0]}" for m in MODULE_OPTIONS],
+                        value=DEFAULT_MODULES,
+                        label="Modules",
+                    )
+                    preset_dropdown.change(
+                        fn=on_preset_change,
+                        inputs=[preset_dropdown],
+                        outputs=[module_checkboxes],
+                    )
+
+                # Right: persona
+                with gr.Column(scale=2):
+                    persona_dropdown = gr.Dropdown(
+                        choices=persona_choices,
+                        value=persona_choices[0] if len(persona_choices) > 1 else "+ Create new persona",
+                        label="Persona",
+                    )
+                    role_radio = gr.Radio(
+                        choices=["user", "admin"],
+                        value="user",
+                        label="Role",
+                    )
+                    with gr.Group(visible=True) as create_fields:
+                        persona_name_input = gr.Textbox(
+                            value="LlamAgent",
+                            label="Agent Name",
+                        )
+                        persona_desc_input = gr.Textbox(
+                            value="A helpful AI assistant",
+                            label="Role Description",
+                        )
+                    save_checkbox = gr.Checkbox(
+                        value=True,
+                        label="Save persona for next time",
+                    )
+
+                    persona_dropdown.change(
+                        fn=on_persona_dropdown_change,
+                        inputs=[persona_dropdown],
+                        outputs=[role_radio, persona_name_input, persona_desc_input, create_fields],
+                    )
+
+            # Build button + status
+            with gr.Row():
+                build_btn = gr.Button("Build Agent", variant="primary", scale=1)
+                status_display = gr.Markdown("*Configure and click Build Agent to start*", scale=3)
+
+        # ============================================
+        # Chat Area
+        # ============================================
+        chatbot = gr.Chatbot(
+            label="Chat",
+            height=450,
+            type="messages",
         )
 
         with gr.Row():
-            # ---- Left side: chat + document upload (3/4 width) ----
-            with gr.Column(scale=3):
+            msg_input = gr.Textbox(
+                placeholder="Type a message... (build agent first)",
+                label="",
+                scale=4,
+                interactive=False,
+            )
+            send_btn = gr.Button("Send", scale=1, variant="primary")
 
-                chatbot = gr.Chatbot(
-                    label="LlamAgent Chat",
-                    height=500,
-                    type="messages",
+        with gr.Row():
+            clear_btn = gr.Button("Clear Chat", size="sm")
+
+        # Document upload
+        with gr.Accordion("Document Upload (RAG)", open=False):
+            with gr.Row():
+                file_upload = gr.File(
+                    label="Select Files",
+                    file_count="multiple",
+                    file_types=[".txt", ".md", ".pdf"],
                 )
+                upload_btn = gr.Button("Upload", variant="primary")
+            upload_result = gr.Textbox(label="Result", interactive=False, lines=2)
+            upload_btn.click(fn=upload_handler, inputs=[file_upload], outputs=[upload_result])
 
-                # Example questions for guidance
-                gr.Examples(
-                    examples=[
-                        "Hello, introduce yourself",
-                        "Help me check the weather in Beijing today",
-                        "What is an AI Agent? Explain in simple terms",
-                        "Help me analyze the pros and cons of Python vs Go",
-                    ],
-                    inputs=None,
-                    label="Try these questions",
-                )
+        # ---- Event bindings ----
 
-                with gr.Row():
-                    msg_input = gr.Textbox(
-                        placeholder="Type a message...",
-                        label="",
-                        scale=4,
-                    )
-                    send_btn = gr.Button("Send", scale=1, variant="primary")
-
-                clear_btn = gr.Button("Clear Chat", size="sm")
-
-                # Event bindings
-                def respond(message, chat_history):
-                    """Process user message and return updated history."""
-                    if not message.strip():
-                        return chat_history or [], ""
-
-                    response = chat_handler(message, chat_history)
-                    chat_history = chat_history or []
-                    chat_history.append({"role": "user", "content": message})
-                    chat_history.append({"role": "assistant", "content": response})
-                    return chat_history, ""
-
-                send_btn.click(
-                    fn=respond,
-                    inputs=[msg_input, chatbot],
-                    outputs=[chatbot, msg_input],
-                )
-                msg_input.submit(
-                    fn=respond,
-                    inputs=[msg_input, chatbot],
-                    outputs=[chatbot, msg_input],
-                )
-
-                # Document upload area (accordion, collapsed by default since it's less frequently used)
-                with gr.Accordion("Document Upload (Load Knowledge Base)", open=False):
-                    gr.Markdown(
-                        "*Upload .txt / .md / .pdf files, "
-                        "and LlamAgent will add them to the knowledge base "
-                        "for retrieval during conversations.*"
-                    )
-
-                    with gr.Row():
-                        file_upload = gr.File(
-                            label="Select Files",
-                            file_count="multiple",
-                            file_types=[".txt", ".md", ".pdf"],
-                        )
-                        upload_btn = gr.Button("Upload to Knowledge Base", variant="primary")
-
-                    upload_result = gr.Textbox(
-                        label="Upload Result",
-                        interactive=False,
-                        lines=3,
-                    )
-
-                    upload_btn.click(
-                        fn=upload_handler,
-                        inputs=[file_upload],
-                        outputs=[upload_result],
-                    )
-
-            # ---- Right side: status panel (1/4 width) ----
-            with gr.Column(scale=1):
-                gr.Markdown("### Agent Status")
-
-                status_display = gr.Markdown(
-                    value=get_status_text(),
-                    elem_classes=["status-panel"],
-                )
-
-                refresh_btn = gr.Button("Refresh Status", size="sm")
-                refresh_btn.click(
-                    fn=get_status_text,
-                    outputs=[status_display],
-                )
-
-                gr.Markdown("### Tips")
-                gr.Markdown(
-                    """
-                    **Chat Tips**:
-                    - The more specific the question, the more precise the answer
-                    - After uploading documents, you can ask questions about them
-                    - For complex tasks, describe them step by step
-
-                    **Loaded modules determine LlamAgent's capabilities**:
-                    - tools: Tool calling
-                    - rag: Knowledge retrieval
-                    - memory: Memory system
-                    - reasoning: Reasoning & planning
-                    - reflection: Self-reflection
-                    - safety: Safety guardrails
-                    """
-                )
-
-        # Clear chat button binding (needs both chatbot and status_display to be created first)
-        clear_btn.click(
-            fn=clear_chat,
-            outputs=[chatbot, status_display],
+        build_btn.click(
+            fn=build_agent_click,
+            inputs=[module_checkboxes, role_radio, persona_name_input, persona_desc_input, save_checkbox],
+            outputs=[msg_input, status_display, chatbot],
         )
 
-        # Footer
-        gr.Markdown(
-            """
-            ---
-            *LlamAgent | Built with LiteLLM + ChromaDB + Gradio*
-            """,
+        send_btn.click(
+            fn=chat_respond,
+            inputs=[msg_input, chatbot],
+            outputs=[chatbot, msg_input],
         )
+        msg_input.submit(
+            fn=chat_respond,
+            inputs=[msg_input, chatbot],
+            outputs=[chatbot, msg_input],
+        )
+        clear_btn.click(fn=clear_chat, outputs=[chatbot, msg_input])
+
+        gr.Markdown("---\n*LlamAgent v1.2.1 | Built with LiteLLM + Gradio*")
 
     return demo
 
 
 def launch_web_ui(demo: "gr.Blocks", port: int = 7860):
-    """
-    Launch the Web UI server.
-
-    Args:
-        demo: The gr.Blocks object returned by create_web_ui()
-        port: Listening port
-    """
+    """Launch the Web UI server."""
     print(f"\n{'='*50}")
     print(f"  LlamAgent Web UI")
     print(f"  URL: http://localhost:{port}")
@@ -315,10 +376,6 @@ def launch_web_ui(demo: "gr.Blocks", port: int = 7860):
     )
 
 
-# ============================================================
-# Standalone entry point
-# ============================================================
-
 def main():
     """python -m llamagent.interfaces.web_ui entry point."""
     if not HAS_GRADIO:
@@ -329,11 +386,8 @@ def main():
         )
         return
 
-    from llamagent.main import create_agent
-
     port = int(os.getenv("WEB_UI_PORT", "7860"))
-    agent = create_agent()
-    demo = create_web_ui(agent)
+    demo = create_web_ui()
     launch_web_ui(demo, port=port)
 
 
