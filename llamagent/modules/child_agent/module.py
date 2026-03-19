@@ -311,8 +311,10 @@ class ChildAgentModule(Module):
         child.summary = None
         child.conversation = child.history
         child._execution_strategy = SimpleReAct()
-        # Inherit safety_loaded flag from parent
-        child.safety_loaded = parent.safety_loaded
+        # Inherit zone system settings from parent (snapshotted paths, not os.getcwd())
+        child.project_dir = parent.project_dir
+        child.playground_dir = parent.playground_dir
+        child.confirm_handler = parent.confirm_handler
         child._tools = {}
         child._tools_version = 0
         child.tool_executor = getattr(parent, "tool_executor", None)  # Inherit sandbox

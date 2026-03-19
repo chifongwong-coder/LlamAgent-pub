@@ -54,5 +54,8 @@ htmlcov/
 .coverage
 coverage.xml
 
+# === Runtime ===
+llama_playground/
+
 # === Misc ===
 *.log

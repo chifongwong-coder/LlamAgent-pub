@@ -48,9 +48,6 @@ class TestChildAgentModuleIntegration:
         assert "list_children" in bare_agent._tools
         assert "collect_results" in bare_agent._tools
 
-        # Allow safety check for all tools
-        bare_agent.safety_loaded = True
-
         # Spawn a child via the tool
         result = bare_agent.call_tool("spawn_child", {
             "task": "research AI trends",
@@ -77,7 +74,6 @@ class TestBudgetEnforcement:
         """Child agent with tight budget: BudgetExceededError surfaces in result."""
         module = ChildAgentModule()
         bare_agent.register_module(module)
-        bare_agent.safety_loaded = True
 
         # BudgetedLLM checks BEFORE each call: max_llm_calls=0 means
         # llm_calls(0) >= max(0) is True -> BudgetExceededError on the very
@@ -194,7 +190,6 @@ class TestTaskBoardLifecycle:
 
         module = ChildAgentModule()
         bare_agent.register_module(module)
-        bare_agent.safety_loaded = True
 
         # Spawn two children
         result1 = module._spawn_child(task="task alpha", role="worker")
@@ -214,12 +209,13 @@ class TestTaskBoardLifecycle:
         assert len(collected) > 0
 
 
-class TestChildInheritsSafety:
-    """Child agent inherits parent's safety_loaded flag."""
+class TestChildInheritsZoneSettings:
+    """Child agent inherits parent's zone system settings (v1.3)."""
 
-    def test_child_inherits_safety(self, bare_agent):
-        """Child agent inherits parent's safety_loaded flag."""
-        bare_agent.safety_loaded = True
+    def test_child_inherits_playground_dir(self, bare_agent):
+        """Child agent inherits parent's project_dir and playground_dir."""
+        bare_agent.project_dir = "/custom/project"
+        bare_agent.playground_dir = "/custom/project/llama_playground"
 
         module = ChildAgentModule()
         bare_agent.register_module(module)
@@ -227,13 +223,26 @@ class TestChildInheritsSafety:
         spec = ChildAgentSpec(task="test task", role="worker")
         child = module._create_child_agent(spec)
 
-        # Child should inherit safety_loaded = True
-        assert child.safety_loaded is True
+        assert child.project_dir == "/custom/project"
+        assert child.playground_dir == "/custom/project/llama_playground"
 
-        # If parent has no safety, child also has none
-        bare_agent.safety_loaded = False
-        child_no_safety = module._create_child_agent(spec)
-        assert child_no_safety.safety_loaded is False
+    def test_child_inherits_confirm_handler(self, bare_agent):
+        """Child agent inherits parent's confirm_handler."""
+        handler = lambda desc: True
+        bare_agent.confirm_handler = handler
+
+        module = ChildAgentModule()
+        bare_agent.register_module(module)
+
+        spec = ChildAgentSpec(task="test task", role="worker")
+        child = module._create_child_agent(spec)
+
+        assert child.confirm_handler is handler
+
+        # If parent has no handler, child also has none
+        bare_agent.confirm_handler = None
+        child_no_handler = module._create_child_agent(spec)
+        assert child_no_handler.confirm_handler is None
 
     def test_child_inherits_tool_executor(self, bare_agent):
         """Child agent inherits parent's tool_executor (sandbox dispatch)."""
@@ -321,9 +330,8 @@ class TestChildAgentSecurityFixes:
         assert "Max children limit" in r3
 
     def test_child_permission_level_enforced(self, bare_agent, mock_llm_client):
-        """Child agent uses its own permission_level, not parent's."""
+        """Child agent inherits zone settings from parent."""
         mock_llm_client.set_responses([make_llm_response("done")])
-        bare_agent.safety_loaded = True
 
         bare_agent.register_tool("dangerous", lambda: "boom", "high risk", safety_level=3)
 
@@ -333,8 +341,8 @@ class TestChildAgentSecurityFixes:
         spec = ChildAgentSpec(task="test")
         child = module._create_child_agent(spec)
 
-        # Child inherits safety_loaded from parent
-        assert child.safety_loaded is True
+        # Child inherits playground_dir from parent
+        assert child.playground_dir == bare_agent.playground_dir
 
     def test_runner_cleanup_prevents_memory_leak(self, bare_agent, mock_llm_client):
         """Runner results cleaned after sync to TaskBoard."""

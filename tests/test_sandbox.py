@@ -40,9 +40,6 @@ class TestSandboxModuleIntegration:
 
     def test_sandbox_module_integration(self, bare_agent):
         """Full flow: module loads, tool gets policy, call_tool uses sandbox backend."""
-        # Disable safety check for this test.
-        bare_agent.safety_loaded = True
-
         # Register a high-risk tool.
         bare_agent.register_tool(
             "exec_shell",

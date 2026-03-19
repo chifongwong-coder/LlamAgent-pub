@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
@@ -250,9 +251,15 @@ class SmartAgent:
         # Execution strategy, default SimpleReAct
         self._execution_strategy: ExecutionStrategy = SimpleReAct()
 
-        # Safety module loaded flag: when True, core fallback (block sl>=2) is disabled
-        # Set by SafetyModule.on_attach(); real safety is handled by on_input/on_output hooks
-        self.safety_loaded: bool = False
+        # v1.3: zone-based safety system
+        self.confirm_handler: Callable[[str], bool] | None = None
+        self._confirm_wait_time: float = 0.0  # Accumulated confirmation wait, excluded from react_timeout
+        self.project_dir: str = os.path.realpath(os.getcwd())
+        self.playground_dir: str = os.path.realpath(os.path.join(self.project_dir, "llama_playground"))
+        try:
+            os.makedirs(self.playground_dir, exist_ok=True)
+        except OSError:
+            pass  # Playground creation failed (read-only fs, permissions, etc.); zone system still works
         self.tool_executor = None  # v1.2: injected by SandboxModule for sandbox execution dispatch
 
         # Tool registry (simple implementation, later enhanced by tools module)
@@ -343,6 +350,7 @@ class SmartAgent:
         safety_level: int = 1,
         execution_policy=None,
         creator_id: str | None = None,
+        path_extractor: Callable[[dict], list[str]] | None = None,
     ) -> None:
         """
         Register a tool in the registry.
@@ -356,6 +364,7 @@ class SmartAgent:
             safety_level: Safety level 1=read-only 2=has side effects 3=high risk
             execution_policy: ExecutionPolicy object from sandbox module, or None (default = host execution)
             creator_id: Creator persona_id (for agent-tier tools, used for visibility filtering)
+            path_extractor: Optional function to extract file paths from tool arguments for zone checking
         """
         # Infer parameter definition from function signature when empty
         if parameters is None:
@@ -370,6 +379,7 @@ class SmartAgent:
             "safety_level": safety_level,
             "execution_policy": execution_policy,
             "creator_id": creator_id,
+            "path_extractor": path_extractor,
         }
         self._tools_version += 1
         logger.debug("Tool registered: %s (tier=%s, safety_level=%d)", name, tier, safety_level)
@@ -410,9 +420,11 @@ class SmartAgent:
             available = list(self._tools.keys())
             return f"Tool '{name}' does not exist. Available tools: {available}"
 
-        # 2. Safety fallback: without safety module, block tools with safety_level >= 2
-        if not self.safety_loaded and tool.get("safety_level", 1) >= 2:
-            return f"Tool '{name}' requires safety module. Please load SafetyModule before using this tool."
+        # 2. Zone checking
+        paths = self._extract_paths(tool, args)
+        zone_result = self._check_zone(name, tool, paths)
+        if zone_result is not None:
+            return zone_result
 
         # v1.2: route through ToolExecutor if available
         if self.tool_executor is not None:
@@ -510,8 +522,72 @@ class SmartAgent:
         return result
 
     # ============================================================
+    # Zone checking (v1.3)
+    # ============================================================
+
+    def _extract_paths(self, tool: dict, args: dict) -> list[str]:
+        """Extract paths from tool arguments using path_extractor or auto-detection."""
+        extractor = tool.get("path_extractor")
+        if extractor is not None:
+            try:
+                return [p for p in extractor(args) if p]
+            except Exception:
+                return []
+        # Auto path extractor fallback
+        PATH_KEYWORDS = {"path", "file", "filepath"}
+        return [v for k, v in args.items()
+                if any(kw in k.lower() for kw in PATH_KEYWORDS)
+                and isinstance(v, str)]
+
+    def _check_zone(self, tool_name: str, tool: dict, paths: list[str]) -> str | None:
+        """Check if paths are within allowed zones. Returns rejection string or None to allow."""
+        if not paths:
+            return None
+
+        sl = tool.get("safety_level", 1)
+        project = self.project_dir
+        playground = self.playground_dir
+
+        for raw_path in paths:
+            resolved = os.path.realpath(os.path.join(project, raw_path)) if not os.path.isabs(raw_path) else os.path.realpath(raw_path)
+
+            # Zone 1: Playground — always allow
+            if resolved.startswith(playground + os.sep) or resolved == playground:
+                continue
+
+            # Zone 2: Project directory — sl=1 allow, sl=2 confirm
+            if resolved.startswith(project + os.sep) or resolved == project:
+                if sl >= 2:
+                    desc = f"Tool '{tool_name}' wants to operate on '{raw_path}' in project directory '{project}' (has side effects)"
+                    if not self._ask_confirmation(desc):
+                        return f"Tool '{tool_name}' operation on '{raw_path}' was denied. Reason: requires user confirmation for side-effect operations in project directory."
+                continue
+
+            # Zone 3: External — sl=1 confirm, sl=2 deny
+            if sl >= 2:
+                return f"Tool '{tool_name}' cannot operate on '{raw_path}'. Reason: path is outside project directory '{project}', side-effect operations are not allowed."
+            else:
+                desc = f"Tool '{tool_name}' wants to read '{raw_path}' (outside project directory '{project}')"
+                if not self._ask_confirmation(desc):
+                    return f"Tool '{tool_name}' operation on '{raw_path}' was denied. Reason: requires user confirmation to read outside project directory."
+
+        return None
+
+    # ============================================================
     # Conversation (core capability)
     # ============================================================
+
+    def _ask_confirmation(self, desc: str) -> bool:
+        """Call confirm_handler and track wait time (excluded from react_timeout)."""
+        if self.confirm_handler is None:
+            return False
+        t0 = time.time()
+        try:
+            result = self.confirm_handler(desc)
+        except Exception:
+            result = False
+        self._confirm_wait_time += time.time() - t0
+        return result
 
     def chat(self, user_input: str) -> str:
         """
@@ -619,6 +695,7 @@ class SmartAgent:
         while steps < self.config.max_react_steps:
             # --- Timeout protection ---
             step_start = time.time()
+            self._confirm_wait_time = 0.0  # Reset per step
 
             try:
                 resp = self.llm.chat(messages, tools=tools_schema,
@@ -701,7 +778,7 @@ class SmartAgent:
                                            reason=stop_reason, steps_used=steps)
 
             # Timeout check
-            elapsed = time.time() - step_start
+            elapsed = time.time() - step_start - self._confirm_wait_time
             if elapsed > self.config.react_timeout:
                 logger.warning("ReAct single step timeout (%.1fs > %.1fs)", elapsed, self.config.react_timeout)
                 text = last_text_response or "Execution timed out. Please simplify the request and try again."
