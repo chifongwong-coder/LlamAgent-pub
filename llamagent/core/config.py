@@ -149,6 +149,20 @@ class Config:
         # Environment variable: PERMISSION_LEVEL
         self.permission_level: int = _safe_int("PERMISSION_LEVEL", 1)
 
+        # ==================== Skill ====================
+        # Additional skill directory paths (appended after default scan paths)
+        # Environment variable: SKILL_DIRS (comma-separated)
+        _skill_dirs_raw = os.getenv("SKILL_DIRS", "")
+        self.skill_dirs: list[str] = [d.strip() for d in _skill_dirs_raw.split(",") if d.strip()]
+
+        # Maximum number of skills to inject per conversation turn
+        self.skill_max_active: int = 2
+
+        # Enable C-level LLM fallback: when B-level tag matching finds no candidates,
+        # send all skill metadata to LLM for semantic matching (default: off)
+        # No environment variable — set programmatically only
+        self.skill_llm_fallback: bool = False
+
         # ==================== Output ====================
         # File output directory
         # Environment variable: OUTPUT_DIR

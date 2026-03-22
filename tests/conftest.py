@@ -124,6 +124,9 @@ def bare_agent(mock_llm_client):
     config.output_dir = "/tmp/llamagent_test_output"
     config.persona_file = "/tmp/llamagent_test_personas.json"
     config.agent_tools_dir = "/tmp/llamagent_test_tools"
+    config.skill_dirs = []
+    config.skill_max_active = 2
+    config.skill_llm_fallback = False
 
     agent = SmartAgent.__new__(SmartAgent)
     agent.config = config
