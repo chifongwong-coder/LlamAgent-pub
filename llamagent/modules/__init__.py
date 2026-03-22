@@ -13,6 +13,7 @@ Available modules:
 - planning:     Task planning (PlanReAct strategy)
 - mcp:          MCP external system integration
 - multi_agent:  Multi-Agent collaboration
+- skill:        v1.4 task-level playbook injection via on_context
 - sandbox:      v1.2 sandboxed tool execution (Docker/subprocess isolation)
 - child_agent:  v1.2 child Agent spawning for delegated sub-tasks
 """
