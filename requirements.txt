@@ -15,5 +15,8 @@ gradio>=4.0.0
 fastapi>=0.100.0
 uvicorn>=0.20.0
 
+# pip install llamagent[skill]
+pyyaml>=6.0
+
 # pip install llamagent[mcp]
 mcp>=1.0.0
