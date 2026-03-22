@@ -10,11 +10,12 @@ A bare `SmartAgent` is a fully functional conversational AI — no modules, no s
 
 ```python
 agent.register_module(ToolsModule())      # Now it can call functions
+agent.register_module(SkillModule())      # Now it follows project-specific playbooks
 agent.register_module(PlanningModule())    # Now it can decompose complex tasks
 agent.register_module(SafetyModule())      # Now it filters dangerous input and masks sensitive output
 ```
 
-Each module interacts through a **hook pipeline** inspired by the onion model — `on_input` and `on_context` fire forward, `on_output` fires in reverse. Safety catches threats on the way in and scrubs secrets on the way out. RAG injects knowledge. Memory recalls past conversations. Reflection evaluates quality. No module knows about any other module. They compose, they don't couple.
+Each module interacts through a **hook pipeline** inspired by the onion model — `on_input` and `on_context` fire forward, `on_output` fires in reverse. Safety catches threats on the way in and scrubs secrets on the way out. RAG injects knowledge. Memory recalls past conversations. Skills inject task playbooks. Reflection evaluates quality. No module knows about any other module. They compose, they don't couple.
 
 ## The Brain: ReAct + PlanReAct
 
@@ -54,6 +55,29 @@ Each tool declares a **path_extractor** that tells the framework how to find fil
 
 **Sandbox Execution** — For maximum isolation, the optional `SandboxModule` routes tools through isolated execution backends. Phase 1 ships with `LocalProcessBackend` (subprocess-based); the protocol is designed for drop-in Docker/gVisor backends later.
 
+## Skills: Playbooks, Not Just Prompts
+
+Most frameworks stuff everything into the system prompt. LlamAgent separates **what the agent can do** (tools) from **how the agent should do it** (skills).
+
+A skill is a directory containing a `config.yaml` (metadata + tags) and a `SKILL.md` (pure natural language playbook). Skills live in `.llamagent/skills/` and are loaded on demand — the framework scans metadata at startup, but only reads the full playbook when a skill is activated.
+
+```
+.llamagent/skills/
+  db-migration/
+    config.yaml     # name, description, tags: [migration, alembic]
+    SKILL.md        # Step-by-step migration workflow
+  code-review/
+    config.yaml     # name, description, tags: [review, pr]
+    SKILL.md        # Review checklist and guidelines
+```
+
+**Three-level activation:**
+- **`/skill deploy`** — Explicit command, deterministic activation
+- **Tag matching** — Query words are normalized (plurals, tenses) and matched against skill tags. One match activates directly; multiple matches trigger LLM disambiguation
+- **LLM fallback** (optional) — When tags miss, the LLM scans all skill metadata for semantic matches
+
+The activated playbook is injected into the LLM context as a `[Active Skill]` block — one turn at a time, never persisted to history. Next turn, the system re-evaluates from scratch.
+
 ## Any LLM. Any Interface. Zero Lock-in.
 
 LlamAgent talks to **any LLM backend** through [LiteLLM](https://github.com/BerriAI/litellm) — OpenAI, Anthropic, DeepSeek, Mistral, or a free local Ollama model running on your laptop. No API key? No problem. It auto-detects what's available and falls back gracefully.
@@ -85,9 +109,9 @@ LlamAgent isn't a research prototype or a framework-of-frameworks. It's **produc
                     +--------------------|----------------------+
                     |            Pluggable Modules              |
                     |                                           |
-                    |  Tools - RAG - Memory - Reasoning         |
-                    |  Reflection - Multi-Agent - MCP - Safety  |
-                    |  Sandbox - Child Agent                    |
+                    |  Tools - RAG - Memory - Skill             |
+                    |  Reasoning - Reflection - Multi-Agent     |
+                    |  MCP - Safety - Sandbox - Child Agent     |
                     +-------------------------------------------+
 ```
 
@@ -167,6 +191,7 @@ reply = agent.chat("Search for recent AI papers and summarize the top 3")
 | **Tools** | Four-tier tool registry with auto schema inference | `register_tool()`, agent-created tools |
 | **RAG** | ChromaDB-based semantic search | `search_knowledge`, document loading |
 | **Memory** | Persistent memory with semantic recall | Autonomous / hybrid modes |
+| **Skill** | Task-level playbook injection via on_context | `/skill` command, tag matching, LLM fallback |
 | **Reasoning** | ReAct + PlanReAct with DAG-based task planning | Complexity routing, replan on failure |
 | **Reflection** | Quality evaluation and lesson learning | Score-based replan trigger |
 | **Multi-Agent** | Role-based task delegation | Writer, coder, analyst, researcher |
@@ -186,7 +211,7 @@ User Input
 on_input()      ← forward order  (safety filtering, preprocessing)
     │
     ▼
-on_context()    ← forward order  (RAG retrieval, memory recall, lesson injection)
+on_context()    ← forward order  (RAG retrieval, memory recall, skill playbook, lesson injection)
     │
     ▼
 execute()       ← strategy       (SimpleReAct or PlanReAct)
@@ -211,6 +236,7 @@ All settings can be overridden via environment variables. See [`.env.example`](.
 | `MEMORY_MODE` | `off` | Memory mode: `off` / `autonomous` / `hybrid` |
 | `PERMISSION_LEVEL` | `1` | Default persona permission level |
 | `MAX_REACT_STEPS` | `10` | Max ReAct loop iterations |
+| `SKILL_DIRS` | — | Extra skill directory paths (comma-separated) |
 | `WEB_UI_PORT` | `7860` | Gradio web UI port |
 | `API_PORT` | `8000` | FastAPI server port |
 
@@ -225,6 +251,7 @@ See the [`examples/`](examples/) directory for runnable tutorials:
 - **[05_persona.py](examples/05_persona.py)** — Create personas with roles and permissions
 - **[06_sandbox.py](examples/06_sandbox.py)** — Sandbox execution for high-risk tools
 - **[07_child_agent.py](examples/07_child_agent.py)** — Spawn constrained child agents
+- **[08_skill.py](examples/08_skill.py)** — Define and use task-level skill playbooks
 
 ## Project Structure
 
@@ -240,6 +267,7 @@ llamagent/
 │   │   ├── reflection/ # Quality evaluation
 │   │   ├── multi_agent/# Role-based delegation
 │   │   ├── mcp/        # Model Context Protocol
+│   │   ├── skill/      # Task-level playbook injection
 │   │   ├── sandbox/    # Isolated tool execution
 │   │   ├── child_agent/# Constrained sub-agent control
 │   │   └── safety/     # Input filtering + output sanitization
