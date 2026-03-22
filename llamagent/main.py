@@ -36,6 +36,7 @@ AVAILABLE_MODULES = {
     "tools": "llamagent.modules.tools.ToolsModule",
     "rag": "llamagent.modules.rag.RAGModule",
     "memory": "llamagent.modules.memory.MemoryModule",
+    "skill": "llamagent.modules.skill.SkillModule",
     "reflection": "llamagent.modules.reflection.ReflectionModule",
     "planning": "llamagent.modules.reasoning.PlanningModule",
     "mcp": "llamagent.modules.mcp.MCPModule",
