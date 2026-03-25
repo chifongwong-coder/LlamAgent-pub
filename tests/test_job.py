@@ -15,11 +15,36 @@ from llamagent.modules.job.module import JobModule
 # Helpers
 # ============================================================
 
+class _MockToolExecutor:
+    """Minimal ToolExecutor that runs commands via subprocess (for testing)."""
+
+    def execute(self, tool_info, args):
+        import subprocess
+        policy = tool_info.get("execution_policy")
+        command = args.get("command", "")
+        timeout = getattr(policy, "timeout_seconds", 30) if policy else 30
+        try:
+            result = subprocess.run(
+                command, shell=True, capture_output=True, text=True, timeout=timeout,
+            )
+            output = result.stdout or ""
+            if result.stderr:
+                output += result.stderr
+            return output
+        except subprocess.TimeoutExpired:
+            return "Command timed out"
+        except Exception as e:
+            return f"Execution error: {e}"
+
+
 def _make_agent_with_jobs(bare_agent, tmp_path):
-    """Set up bare_agent with playground_dir and register JobModule."""
+    """Set up bare_agent with SandboxModule mock (tool_executor) and register JobModule."""
     playground_dir = os.path.join(str(tmp_path), "llama_playground")
     os.makedirs(playground_dir, exist_ok=True)
     bare_agent.playground_dir = playground_dir
+
+    # JobModule hard-depends on SandboxModule (agent.tool_executor)
+    bare_agent.tool_executor = _MockToolExecutor()
 
     mod = JobModule()
     bare_agent.register_module(mod)
@@ -70,8 +95,7 @@ class TestSyncExecution:
 
         result = _call_tool_json(bare_agent, "start_job", command="echo hello", wait=True)
         assert result["status"] == "success"
-        assert "hello" in result["stdout"]
-        assert result["return_code"] == 0
+        assert "hello" in result["output"]
 
 
 # ============================================================
@@ -95,8 +119,8 @@ class TestAsyncExecution:
 
         # Wait for completion
         wait_result = _call_tool_json(bare_agent, "wait_job", job_id=job_id)
-        assert wait_result["status"] == "success"
-        assert "async_output" in wait_result["stdout"]
+        assert wait_result["status"] in ("completed", "success")
+        assert "async_output" in wait_result.get("output", "")
 
     def test_job_status(self, bare_agent, tmp_path):
         """job_status reports 'running' for a still-active job."""

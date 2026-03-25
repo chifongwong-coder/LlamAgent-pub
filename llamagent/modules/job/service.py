@@ -1,9 +1,13 @@
-"""JobService: manages all active JobHandles."""
+"""
+JobService: manages all active JobHandles.
+
+No direct subprocess usage — execution is delegated to ToolExecutor
+via executor_fn closures passed to JobHandle.start().
+"""
 
 from __future__ import annotations
 
 import logging
-import subprocess
 import uuid
 
 from llamagent.modules.job.handle import JobHandle
@@ -15,22 +19,26 @@ class JobService:
     """
     Manages the lifecycle of all active jobs.
 
-    Spawns subprocesses, wraps them in JobHandle instances, and provides
-    lookup, listing, and bulk shutdown capabilities.
+    Creates JobHandle instances and starts them with executor functions
+    that delegate to ToolExecutor. No subprocess management here.
     """
 
     def __init__(self, max_active: int = 10):
         self.max_active = max_active
         self._jobs: dict[str, JobHandle] = {}
 
-    def create_job(self, command: str, cwd: str, timeout: float) -> JobHandle:
+    def create_job(
+        self, command: str, cwd: str, timeout: float, executor_fn
+    ) -> JobHandle:
         """
-        Spawn a new subprocess and create a managed JobHandle.
+        Create a new job and start execution in a background thread.
 
         Args:
             command: Shell command to execute.
-            cwd: Working directory for the subprocess.
+            cwd: Working directory for execution.
             timeout: Maximum lifetime in seconds (0 = no timeout).
+            executor_fn: Callable that performs the actual execution via ToolExecutor.
+                         Must return a result string.
 
         Returns:
             The new JobHandle.
@@ -46,23 +54,10 @@ class JobService:
             )
 
         job_id = uuid.uuid4().hex[:12]
-
-        process = subprocess.Popen(
-            command,
-            shell=True,
-            cwd=cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-
         handle = JobHandle(
-            job_id=job_id,
-            process=process,
-            cwd=cwd,
-            command=command,
-            timeout=timeout,
+            job_id=job_id, command=command, cwd=cwd, timeout=timeout,
         )
+        handle.start(executor_fn)
         self._jobs[job_id] = handle
         logger.info("Job created: %s (command=%r, cwd=%s)", job_id, command, cwd)
         return handle
@@ -80,14 +75,9 @@ class JobService:
         return any(h.poll() == "running" for h in self._jobs.values())
 
     def shutdown(self) -> None:
-        """Terminate all running jobs and clear the registry."""
+        """Cancel all running jobs and clear the registry."""
         for handle in self._jobs.values():
             if handle.poll() == "running":
                 logger.info("Shutting down job: %s", handle.job_id)
-                handle.terminate()
-                try:
-                    handle.process.wait(timeout=5)
-                except Exception:
-                    pass
-                handle.wait(timeout=5)
+                handle.cancel()
         self._jobs.clear()
