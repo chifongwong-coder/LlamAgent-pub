@@ -518,7 +518,7 @@ class ToolsModule(Module):
             tier="common", safety_level=2,
             path_extractor=lambda args: [
                 ps.resolve_project_path(p) for p in (args.get("paths") or [])
-            ],
+            ] or [self.agent.project_dir],  # Sentinel: zone-check project_dir when paths=None
         )
 
         def _revert_changes(targets: list = None) -> str:
@@ -534,7 +534,7 @@ class ToolsModule(Module):
             tier="common", safety_level=2,
             path_extractor=lambda args: [
                 ps.resolve_project_path(t) for t in (args.get("targets") or [])
-            ],
+            ] or [self.agent.project_dir],  # Sentinel: zone-check project_dir when targets=None
         )
 
     # ============================================================

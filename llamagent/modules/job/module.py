@@ -99,6 +99,7 @@ class JobModule(Module):
             },
             tier="common",
             safety_level=2,
+            path_extractor=lambda args: [self._resolve_cwd(args.get("cwd", "workspace"))],
         )
 
         # --- wait_job (sl=1, common) ---
