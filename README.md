@@ -9,7 +9,9 @@ LlamAgent takes the opposite approach: **start with nothing, add only what you n
 A bare `SmartAgent` is a fully functional conversational AI — no modules, no setup, just `agent.chat("hello")` and you're talking. But here's where it gets interesting: every capability is a **pluggable module** that snaps in with a single line of code.
 
 ```python
-agent.register_module(ToolsModule())      # Now it can call functions
+agent.register_module(ToolsModule())      # Now it has workspace file tools
+agent.register_module(SandboxModule())    # Now it can execute code in isolation
+agent.register_module(JobModule())        # Now it can run shell commands
 agent.register_module(SkillModule())      # Now it follows project-specific playbooks
 agent.register_module(PlanningModule())    # Now it can decompose complex tasks
 agent.register_module(SafetyModule())      # Now it filters dangerous input and masks sensitive output
@@ -33,7 +35,9 @@ Deadlock? Detected automatically. Circular dependencies? Caught at plan validati
 
 ## The Toolbox: Four Tiers of Access Control
 
-Tools aren't just functions you register. LlamAgent implements a **four-tier tool system** — `default`, `common`, `admin`, and `agent` — where **visibility equals usability**. If an agent can see a tool, it can call it. An admin persona sees everything including `start_job`. A regular persona sees the standard toolset. The agent can even **create its own tools** at runtime, with a minimal builtins blacklist to prevent code nesting.
+Tools aren't just functions you register. LlamAgent implements a **four-tier tool system** — `default`, `common`, `admin`, and `agent` — where **visibility equals usability**. If an agent can see a tool, it can call it. An admin persona sees everything. A regular persona sees the standard toolset. The agent can even **create its own tools** at runtime, with a minimal builtins blacklist to prevent code nesting.
+
+**Workspace-first workflow** (v1.5): The agent works in an isolated workspace directory (Zone 1, free zone), then explicitly syncs changes to the project via `apply_patch` or `sync_workspace_to_project`. Command execution goes through the `SandboxModule` backend — no sandbox loaded means no shell access (secure by default).
 
 ## Three-Zone Safety: Sandbox the Environment, Not the Operations
 
@@ -53,7 +57,7 @@ Each tool declares a **path_extractor** that tells the framework how to find fil
 
 **Child Agent Control** — The parent agent can spawn constrained child agents for subtasks. Each child inherits the parent's LLM and zone boundaries, but operates under strict limits: filtered tool access (allowlist/denylist), budget limits (max LLM calls, time, steps), and no recursive spawning by default.
 
-**Sandbox Execution** — For maximum isolation, the optional `SandboxModule` routes tools through isolated execution backends. Phase 1 ships with `LocalProcessBackend` (subprocess-based); the protocol is designed for drop-in Docker/gVisor backends later.
+**Sandbox Execution** — The `SandboxModule` routes tools through isolated execution backends and provides `tool_executor` for the `JobModule`'s shell command execution. Phase 1 ships with `LocalProcessBackend` (subprocess-based); the protocol is designed for drop-in Docker/gVisor backends later. No SandboxModule = no command execution (secure by default).
 
 ## Skills: Playbooks, Not Just Prompts
 
@@ -109,7 +113,7 @@ LlamAgent isn't a research prototype or a framework-of-frameworks. It's **produc
                     +--------------------|----------------------+
                     |            Pluggable Modules              |
                     |                                           |
-                    |  Tools - RAG - Memory - Skill             |
+                    |  Tools - Job - RAG - Memory - Skill       |
                     |  Reasoning - Reflection - Multi-Agent     |
                     |  MCP - Safety - Sandbox - Child Agent     |
                     +-------------------------------------------+
@@ -177,10 +181,14 @@ print(reply)
 
 # With modules
 from llamagent.modules.tools import ToolsModule
+from llamagent.modules.sandbox import SandboxModule
+from llamagent.modules.job import JobModule
 from llamagent.modules.reasoning import PlanningModule
 
-agent.register_module(ToolsModule())
-agent.register_module(PlanningModule())
+agent.register_module(ToolsModule())       # Workspace file tools
+agent.register_module(SandboxModule())     # Sandbox execution backend
+agent.register_module(JobModule())         # Shell command execution
+agent.register_module(PlanningModule())    # Task planning
 reply = agent.chat("Search for recent AI papers and summarize the top 3")
 ```
 
@@ -189,7 +197,7 @@ reply = agent.chat("Search for recent AI papers and summarize the top 3")
 | Module | Description | Key Capability |
 |--------|-------------|----------------|
 | **Tools** | Workspace-centric tool system with project sync | `read_files`, `write_files`, `apply_patch`, `sync_workspace_to_project` |
-| **Job** | Managed command execution with lifecycle control | `start_job(wait=True/False)`, `tail_job`, `cancel_job` |
+| **Job** | Managed command execution via SandboxModule | `start_job(wait=True/False)`, `tail_job`, `cancel_job` |
 | **RAG** | ChromaDB-based semantic search | `search_knowledge`, document loading |
 | **Memory** | Persistent memory with semantic recall | Autonomous / hybrid modes |
 | **Skill** | Task-level playbook injection via on_context | `/skill` command, tag matching, LLM fallback |
