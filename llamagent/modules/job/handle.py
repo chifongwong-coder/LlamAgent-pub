@@ -6,7 +6,7 @@ via agent.tool_executor. JobHandle manages the thread lifecycle and provides
 poll/wait/read_output for the job tools.
 
 Phase 1 limitation: tail_job cannot stream partial output because
-ToolExecutor.execute() is synchronous (returns full result only on completion).
+ToolExecutor.run_command() is synchronous (returns full result only on completion).
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ class JobHandle:
     Wraps a command execution running in a background thread via ToolExecutor.
 
     The actual execution is delegated to the sandbox backend (LocalProcessBackend,
-    future DockerBackend, etc.) through ToolExecutor.execute(). This class only
+    future DockerBackend, etc.) through ToolExecutor.run_command(). This class only
     manages the thread lifecycle and stores the result.
     """
 
@@ -100,7 +100,7 @@ class JobHandle:
         """
         Read job output.
 
-        Phase 1 limitation: only available after job completes (ToolExecutor.execute
+        Phase 1 limitation: only available after job completes (ToolExecutor.run_command
         is synchronous, no streaming). Returns empty string while running.
         """
         if not self._completed.is_set():
