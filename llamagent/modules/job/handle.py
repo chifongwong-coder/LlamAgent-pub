@@ -34,7 +34,7 @@ class JobHandle:
         self.timeout = timeout
         self.start_time = time.time()
 
-        # Result from tool_executor.execute() — available after thread completes
+        # Result from tool_executor.run_command() — available after thread completes
         self._result: str | None = None
         self._error: str | None = None
         self._exit_code: int | None = None
@@ -50,7 +50,7 @@ class JobHandle:
         Args:
             executor_fn: Callable that performs the execution and returns
                          the result string. This is typically a closure over
-                         tool_executor.execute().
+                         tool_executor.run_command().
         """
         def _run():
             with self._state_lock:
@@ -137,7 +137,7 @@ class JobHandle:
         """
         Cancel the job.
 
-        Note: The background thread is running tool_executor.execute() which is
+        Note: The background thread is running tool_executor.run_command() which is
         blocking. We mark the job as cancelled but cannot forcefully interrupt the
         thread. The backend's timeout will eventually stop it.
 
