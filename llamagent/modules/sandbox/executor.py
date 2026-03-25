@@ -6,6 +6,9 @@ calls the tool function directly on the host — same behaviour as v1.1.
 
 For tools with a sandbox policy the executor resolves a backend, manages
 sessions (one-shot or task-scoped), and returns structured observations.
+
+v1.5.1: Added run_command() for direct shell command execution via backend,
+used by JobModule. Separate from execute() which routes tool functions.
 """
 
 from __future__ import annotations
@@ -86,6 +89,53 @@ class ToolExecutor:
             # One-shot sessions are closed immediately after execution.
             if policy.session_mode == "one_shot":
                 session.close()
+
+    def run_command(self, command: str, cwd: str, timeout: float = 300) -> str:
+        """
+        Execute a shell command via the sandbox backend.
+
+        Unlike execute(), this method is purpose-built for shell command execution.
+        It always routes through the backend (never direct host call), using the
+        provided cwd as the working directory.
+
+        Used by JobModule for start_job. The backend's LocalProcessBackend runs
+        'sh -c <command>' in the given cwd with environment isolation.
+
+        Args:
+            command: Shell command to execute.
+            cwd: Working directory (absolute path).
+            timeout: Maximum execution time in seconds.
+
+        Returns:
+            A string observation (stdout + stderr) suitable for the ReAct loop.
+        """
+        from llamagent.modules.sandbox.policy import ExecutionPolicy
+
+        policy = ExecutionPolicy(
+            runtime="shell",
+            isolation="none",
+            timeout_seconds=timeout,
+            session_mode="one_shot",
+        )
+
+        backend = self.resolver.resolve(policy)
+        session = backend.create_session(policy)
+
+        # Override the session workspace with the requested cwd
+        session._workspace = cwd
+
+        spec = ExecutionSpec(
+            command=command,
+            args={"command": command},
+            policy=policy,
+            workspace_path=cwd,
+        )
+
+        try:
+            result = session.run(spec)
+            return result.to_observation()
+        finally:
+            session.close()
 
     def close_task_sessions(self, task_id: str) -> None:
         """Close all sessions associated with a specific task."""

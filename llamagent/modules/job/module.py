@@ -281,21 +281,15 @@ class JobModule(Module):
         # Determine timeout from profile
         timeout = self._get_profile_timeout(profile)
 
-        # Build executor function that delegates to tool_executor
+        # Build executor function that delegates to tool_executor.run_command()
         tool_executor = self.agent.tool_executor
 
         def executor_fn():
-            """Execute command via sandbox backend (ToolExecutor)."""
-            # Build a tool_info-like dict for tool_executor.execute()
-            tool_info = {
-                "name": "start_job",
-                "func": lambda **kw: "",  # Not used — execution_policy triggers sandbox path
-                "execution_policy": self._build_execution_policy(timeout, resolved_cwd),
-            }
-            return tool_executor.execute(tool_info, {"command": command})
+            """Execute shell command via sandbox backend."""
+            return tool_executor.run_command(command, resolved_cwd, timeout)
 
         if wait:
-            # Synchronous mode: execute directly via tool_executor (blocking)
+            # Synchronous mode: execute directly (blocking)
             try:
                 result = executor_fn()
             except Exception as e:
@@ -331,20 +325,6 @@ class JobModule(Module):
                 "job_id": handle.job_id,
                 "status": "started",
             }, ensure_ascii=False)
-
-    def _build_execution_policy(self, timeout: float, cwd: str):
-        """Build an ExecutionPolicy for command execution via sandbox backend."""
-        from llamagent.modules.sandbox.policy import ExecutionPolicy
-        # NOTE: isolation="none" is INTENTIONALLY wrong for now (Bug 1+2).
-        # ToolExecutor routes isolation="none" to direct func() call, skipping backend.
-        # This needs redesign — see discussion about ToolExecutor API mismatch
-        # with shell command execution. Tracked as a known issue.
-        return ExecutionPolicy(
-            runtime="shell",
-            isolation="none",
-            timeout_seconds=timeout,
-            session_mode="one_shot",
-        )
 
     def _wait_job(self, job_id: str) -> str:
         """Wait for an async job to complete and return its output."""

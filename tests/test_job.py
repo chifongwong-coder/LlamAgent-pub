@@ -16,23 +16,21 @@ from llamagent.modules.job.module import JobModule
 # ============================================================
 
 class _MockToolExecutor:
-    """Minimal ToolExecutor that runs commands via subprocess (for testing)."""
+    """Minimal ToolExecutor with run_command that runs commands via subprocess (for testing)."""
 
-    def execute(self, tool_info, args):
+    def run_command(self, command, cwd, timeout=300):
         import subprocess
-        policy = tool_info.get("execution_policy")
-        command = args.get("command", "")
-        timeout = getattr(policy, "timeout_seconds", 30) if policy else 30
         try:
             result = subprocess.run(
-                command, shell=True, capture_output=True, text=True, timeout=timeout,
+                command, shell=True, capture_output=True, text=True,
+                timeout=timeout, cwd=cwd,
             )
             output = result.stdout or ""
             if result.stderr:
                 output += result.stderr
             return output
         except subprocess.TimeoutExpired:
-            return "Command timed out"
+            return "[TIMEOUT]"
         except Exception as e:
             return f"Execution error: {e}"
 
