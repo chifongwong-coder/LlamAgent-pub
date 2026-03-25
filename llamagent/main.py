@@ -34,6 +34,7 @@ from llamagent.core import SmartAgent, Config, Persona, PersonaManager
 AVAILABLE_MODULES = {
     "safety": "llamagent.modules.safety.SafetyModule",
     "tools": "llamagent.modules.tools.ToolsModule",
+    "job": "llamagent.modules.job.JobModule",
     "rag": "llamagent.modules.rag.RAGModule",
     "memory": "llamagent.modules.memory.MemoryModule",
     "skill": "llamagent.modules.skill.SkillModule",

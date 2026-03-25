@@ -65,22 +65,22 @@ class ChildAgentSpec:
 
 ROLE_POLICIES: dict[str, AgentExecutionPolicy] = {
     "researcher": AgentExecutionPolicy(
-        tool_allowlist=["web_search", "web_fetch", "search_knowledge"],
+        tool_allowlist=["web_search", "web_fetch", "search_knowledge", "search_text", "read_files"],
         budget=Budget(max_llm_calls=20, max_time_seconds=300),
         can_spawn_children=False,
     ),
     "writer": AgentExecutionPolicy(
-        tool_allowlist=["read_file", "write_file"],
+        tool_allowlist=["read_files", "write_files", "apply_patch"],
         budget=Budget(max_llm_calls=15, max_time_seconds=300),
         can_spawn_children=False,
     ),
     "analyst": AgentExecutionPolicy(
-        tool_allowlist=["read_file", "web_search", "search_knowledge"],
+        tool_allowlist=["read_files", "search_text", "web_search", "search_knowledge"],
         budget=Budget(max_llm_calls=15, max_time_seconds=300),
         can_spawn_children=False,
     ),
     "coder": AgentExecutionPolicy(
-        tool_allowlist=["read_file", "write_file", "execute_command"],
+        tool_allowlist=["read_files", "write_files", "apply_patch", "start_job", "glob_files", "search_text"],
         execution_policy=POLICY_SANDBOXED_CODER if _SANDBOX_AVAILABLE else None,
         budget=Budget(max_llm_calls=30, max_time_seconds=600),
         can_spawn_children=False,
