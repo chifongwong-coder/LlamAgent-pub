@@ -64,7 +64,7 @@ def part1_basic_skill():
             "3. Review the generated SQL\n"
             "4. Ask user for confirmation before applying\n\n"
             "## Tool guidance\n"
-            "- Use write_file to create migration files in migrations/ directory\n"
+            "- Use write_files to create migration files in migrations/ directory\n"
             "- Never auto-apply migrations without confirmation\n"
         )
 

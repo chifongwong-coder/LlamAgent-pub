@@ -46,32 +46,30 @@ def part1_auto_sandbox():
     )
 
     # Register a tool with side effects (safety_level=2)
-    def execute_command(command: str) -> str:
-        """Execute a shell command (high risk)."""
-        import subprocess
-        result = subprocess.run(
-            ["sh", "-c", command],
-            capture_output=True, text=True, timeout=10,
-        )
-        return result.stdout or result.stderr
+    def write_files(files: dict) -> str:
+        """Write files (has side effects)."""
+        for path, content in files.items():
+            with open(path, "w") as f:
+                f.write(content)
+        return f"Wrote {len(files)} file(s)"
 
     agent.register_tool(
-        name="execute_command",
-        func=execute_command,
-        description="Execute a shell command",
+        name="write_files",
+        func=write_files,
+        description="Write files to workspace",
         safety_level=2,
     )
 
     # Before SandboxModule: no execution policies
-    print(f"execute_command policy before: {agent._tools['execute_command'].get('execution_policy')}")
+    print(f"write_files policy before: {agent._tools['write_files'].get('execution_policy')}")
 
     # Register the SandboxModule — auto_assign=True (default)
     # This will assign POLICY_LOCAL_SUBPROCESS to tools with safety_level >= 2
     agent.register_module(SandboxModule(auto_assign=True))
 
     # After SandboxModule: high-risk tool gets a sandbox policy
-    policy = agent._tools["execute_command"].get("execution_policy")
-    print(f"execute_command policy after:  {policy}")
+    policy = agent._tools["write_files"].get("execution_policy")
+    print(f"write_files policy after:  {policy}")
     print(f"  timeout: {policy.timeout_seconds}s")
 
     # Safe tool remains unaffected

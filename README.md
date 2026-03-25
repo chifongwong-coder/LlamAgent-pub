@@ -33,7 +33,7 @@ Deadlock? Detected automatically. Circular dependencies? Caught at plan validati
 
 ## The Toolbox: Four Tiers of Access Control
 
-Tools aren't just functions you register. LlamAgent implements a **four-tier tool system** — `default`, `common`, `admin`, and `agent` — where **visibility equals usability**. If an agent can see a tool, it can call it. An admin persona sees everything including `execute_command`. A regular persona sees the standard toolset. The agent can even **create its own tools** at runtime, with a minimal builtins blacklist to prevent code nesting.
+Tools aren't just functions you register. LlamAgent implements a **four-tier tool system** — `default`, `common`, `admin`, and `agent` — where **visibility equals usability**. If an agent can see a tool, it can call it. An admin persona sees everything including `start_job`. A regular persona sees the standard toolset. The agent can even **create its own tools** at runtime, with a minimal builtins blacklist to prevent code nesting.
 
 ## Three-Zone Safety: Sandbox the Environment, Not the Operations
 
@@ -188,7 +188,8 @@ reply = agent.chat("Search for recent AI papers and summarize the top 3")
 
 | Module | Description | Key Capability |
 |--------|-------------|----------------|
-| **Tools** | Four-tier tool registry with auto schema inference | `register_tool()`, agent-created tools |
+| **Tools** | Workspace-centric tool system with project sync | `read_files`, `write_files`, `apply_patch`, `sync_workspace_to_project` |
+| **Job** | Managed command execution with lifecycle control | `start_job(wait=True/False)`, `tail_job`, `cancel_job` |
 | **RAG** | ChromaDB-based semantic search | `search_knowledge`, document loading |
 | **Memory** | Persistent memory with semantic recall | Autonomous / hybrid modes |
 | **Skill** | Task-level playbook injection via on_context | `/skill` command, tag matching, LLM fallback |
