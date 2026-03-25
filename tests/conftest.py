@@ -127,6 +127,10 @@ def bare_agent(mock_llm_client):
     config.skill_dirs = []
     config.skill_max_active = 2
     config.skill_llm_fallback = False
+    config.job_default_timeout = 300.0
+    config.job_max_active = 10
+    config.job_profiles = {}
+    config.workspace_id = None
 
     agent = SmartAgent.__new__(SmartAgent)
     agent.config = config

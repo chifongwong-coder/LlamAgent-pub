@@ -252,6 +252,7 @@ See the [`examples/`](examples/) directory for runnable tutorials:
 - **[06_sandbox.py](examples/06_sandbox.py)** — Sandbox execution for high-risk tools
 - **[07_child_agent.py](examples/07_child_agent.py)** — Spawn constrained child agents
 - **[08_skill.py](examples/08_skill.py)** — Define and use task-level skill playbooks
+- **[09_workspace_and_jobs.py](examples/09_workspace_and_jobs.py)** — Workspace tools, project sync, and job execution
 
 ## Project Structure
 

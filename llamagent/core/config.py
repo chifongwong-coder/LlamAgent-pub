@@ -163,6 +163,21 @@ class Config:
         # No environment variable — set programmatically only
         self.skill_llm_fallback: bool = False
 
+        # ==================== Job ====================
+        # Default timeout for job execution (seconds)
+        self.job_default_timeout: float = _safe_float("JOB_DEFAULT_TIMEOUT", 300.0)
+
+        # Maximum concurrent active jobs
+        self.job_max_active: int = _safe_int("JOB_MAX_ACTIVE", 10)
+
+        # Job profiles: mapping of profile name -> config dict (timeout, etc.)
+        # Registered programmatically; "default" uses job_default_timeout
+        self.job_profiles: dict = {}
+
+        # ==================== Workspace ====================
+        # Workspace ID (optional, for API session reuse; None = lazy-generated on first use)
+        self.workspace_id: str | None = None
+
         # ==================== Output ====================
         # File output directory
         # Environment variable: OUTPUT_DIR
