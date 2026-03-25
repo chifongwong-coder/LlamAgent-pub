@@ -5,13 +5,17 @@ Registers six tools for the agent:
 - start_job:          Start a command (synchronous or asynchronous)
 - wait_job:           Wait for an async job to complete
 - job_status:         Check the current status of a job
-- tail_job:           Read recent stdout/stderr from a job
-- cancel_job:         Terminate a running job
+- tail_job:           Read recent output from a job
+- cancel_job:         Cancel a running job
 - collect_artifacts:  List files created/modified during a job
 
-The module uses subprocess.Popen for execution. It soft-depends on
-ToolsModule (for workspace cwd resolution) and SafetyModule (for
-command blacklist checking).
+Hard dependency: SandboxModule (provides agent.tool_executor for execution).
+Without SandboxModule, command execution is unavailable (secure by default).
+Soft dependency: ToolsModule (for workspace cwd resolution),
+SafetyModule (for command blacklist checking).
+
+No direct subprocess usage — all execution is delegated to agent.tool_executor
+which routes through the sandbox backend (LocalProcessBackend, future DockerBackend).
 """
 
 from __future__ import annotations
@@ -48,6 +52,15 @@ class JobModule(Module):
     def on_attach(self, agent) -> None:
         """Initialize JobService and register all six job tools."""
         super().on_attach(agent)
+
+        # Hard dependency: SandboxModule must provide tool_executor
+        if agent.tool_executor is None:
+            logger.error(
+                "JobModule requires SandboxModule (agent.tool_executor is None). "
+                "Command execution will be unavailable. "
+                "Load SandboxModule before JobModule to enable command execution."
+            )
+
         self.service = JobService(max_active=getattr(agent.config, "job_max_active", 10))
 
         # --- start_job (sl=2, common) ---
@@ -242,6 +255,14 @@ class JobModule(Module):
         profile: str = "default",
     ) -> str:
         """Start a command as a managed job."""
+        # Hard dependency check: SandboxModule must be loaded
+        if self.agent.tool_executor is None:
+            return json.dumps({
+                "status": "error",
+                "command": command,
+                "reason": "Command execution requires SandboxModule. Load SandboxModule to enable.",
+            }, ensure_ascii=False)
+
         # Safety check: if safety module is loaded, check command against blacklist
         safety_mod = self.agent.get_module("safety")
         if safety_mod is not None:
@@ -260,54 +281,69 @@ class JobModule(Module):
         # Determine timeout from profile
         timeout = self._get_profile_timeout(profile)
 
-        # Create the job
-        try:
-            handle = self.service.create_job(command, resolved_cwd, timeout)
-        except RuntimeError as e:
-            return json.dumps({
-                "status": "error",
-                "command": command,
-                "reason": str(e),
-            }, ensure_ascii=False)
+        # Build executor function that delegates to tool_executor
+        tool_executor = self.agent.tool_executor
+
+        def executor_fn():
+            """Execute command via sandbox backend (ToolExecutor)."""
+            # Build a tool_info-like dict for tool_executor.execute()
+            tool_info = {
+                "name": "start_job",
+                "func": lambda **kw: "",  # Not used — execution_policy triggers sandbox path
+                "execution_policy": self._build_execution_policy(timeout, resolved_cwd),
+            }
+            return tool_executor.execute(tool_info, {"command": command})
 
         if wait:
-            # Synchronous mode: wait for completion and return results
-            rc = handle.wait()
-            stdout = handle.read_output()
-            stderr = handle.read_stderr()
-            status = handle.poll()
+            # Synchronous mode: execute directly via tool_executor (blocking)
+            try:
+                result = executor_fn()
+            except Exception as e:
+                return json.dumps({
+                    "status": "error",
+                    "command": command,
+                    "reason": str(e),
+                }, ensure_ascii=False)
 
             # Truncate overly long output
             max_len = 5000
-            orig_stdout_len = len(stdout)
-            if orig_stdout_len > max_len:
-                stdout = stdout[:max_len] + f"\n...(output truncated, total {orig_stdout_len} characters)"
-            orig_stderr_len = len(stderr)
-            if orig_stderr_len > max_len:
-                stderr = stderr[:max_len] + f"\n...(error output truncated, total {orig_stderr_len} characters)"
-
-            if status == "timeout":
-                return json.dumps({
-                    "status": "timeout",
-                    "command": command,
-                    "reason": f"Command execution timed out ({timeout}-second limit)",
-                    "stdout": stdout,
-                    "stderr": stderr,
-                }, ensure_ascii=False)
+            orig_len = len(result)
+            if orig_len > max_len:
+                result = result[:max_len] + f"\n...(output truncated, total {orig_len} characters)"
 
             return json.dumps({
-                "status": "success" if rc == 0 else "error",
+                "status": "success",
                 "command": command,
-                "return_code": rc,
-                "stdout": stdout,
-                "stderr": stderr,
+                "output": result,
             }, ensure_ascii=False)
         else:
-            # Asynchronous mode: return job_id immediately
+            # Asynchronous mode: create job with background thread
+            try:
+                handle = self.service.create_job(command, resolved_cwd, timeout, executor_fn)
+            except RuntimeError as e:
+                return json.dumps({
+                    "status": "error",
+                    "command": command,
+                    "reason": str(e),
+                }, ensure_ascii=False)
+
             return json.dumps({
                 "job_id": handle.job_id,
                 "status": "started",
             }, ensure_ascii=False)
+
+    def _build_execution_policy(self, timeout: float, cwd: str):
+        """Build an ExecutionPolicy for command execution via sandbox backend."""
+        try:
+            from llamagent.modules.sandbox.policy import ExecutionPolicy
+            return ExecutionPolicy(
+                runtime="shell",
+                isolation="none",
+                timeout_seconds=timeout,
+                session_mode="one_shot",
+            )
+        except ImportError:
+            return None
 
     def _wait_job(self, job_id: str) -> str:
         """Wait for an async job to complete and return its output."""
@@ -319,34 +355,19 @@ class JobModule(Module):
             }, ensure_ascii=False)
 
         rc = handle.wait()
-        stdout = handle.read_output()
-        stderr = handle.read_stderr()
+        output = handle.read_output()
         status = handle.poll()
 
-        # Truncate overly long output
         max_len = 5000
-        orig_stdout_len = len(stdout)
-        if orig_stdout_len > max_len:
-            stdout = stdout[:max_len] + f"\n...(output truncated, total {orig_stdout_len} characters)"
-        orig_stderr_len = len(stderr)
-        if orig_stderr_len > max_len:
-            stderr = stderr[:max_len] + f"\n...(error output truncated, total {orig_stderr_len} characters)"
-
-        if status == "timeout":
-            return json.dumps({
-                "status": "timeout",
-                "command": handle.command,
-                "reason": f"Command execution timed out ({handle.timeout}-second limit)",
-                "stdout": stdout,
-                "stderr": stderr,
-            }, ensure_ascii=False)
+        orig_len = len(output)
+        if orig_len > max_len:
+            output = output[:max_len] + f"\n...(output truncated, total {orig_len} characters)"
 
         return json.dumps({
-            "status": "success" if rc == 0 else "error",
+            "status": status,
             "command": handle.command,
             "return_code": rc,
-            "stdout": stdout,
-            "stderr": stderr,
+            "output": output,
         }, ensure_ascii=False)
 
     def _job_status(self, job_id: str) -> str:
@@ -374,10 +395,12 @@ class JobModule(Module):
                 "reason": f"Job '{job_id}' not found",
             }, ensure_ascii=False)
 
+        output = handle.read_output(lines)
+        status = handle.poll()
         return json.dumps({
             "job_id": handle.job_id,
-            "stdout": handle.read_output(lines),
-            "stderr": handle.read_stderr(lines),
+            "status": status,
+            "output": output if output else "(job still running, output not yet available)" if status == "running" else "",
         }, ensure_ascii=False)
 
     def _cancel_job(self, job_id: str) -> str:
@@ -396,10 +419,10 @@ class JobModule(Module):
                 "status": "already_completed",
             }, ensure_ascii=False)
 
-        handle.terminate()
+        cancelled = handle.cancel()
         return json.dumps({
             "job_id": job_id,
-            "status": "cancelled",
+            "status": "cancelled" if cancelled else "already_completed",
         }, ensure_ascii=False)
 
     def _collect_artifacts(self, job_id: str) -> str:
