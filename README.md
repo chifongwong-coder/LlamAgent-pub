@@ -270,6 +270,7 @@ llamagent/
 │   │   ├── multi_agent/# Role-based delegation
 │   │   ├── mcp/        # Model Context Protocol
 │   │   ├── skill/      # Task-level playbook injection
+│   │   ├── job/        # Managed command execution
 │   │   ├── sandbox/    # Isolated tool execution
 │   │   ├── child_agent/# Constrained sub-agent control
 │   │   └── safety/     # Input filtering + output sanitization
