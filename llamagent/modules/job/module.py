@@ -60,6 +60,7 @@ class JobModule(Module):
                 "Command execution will be unavailable. "
                 "Load SandboxModule before JobModule to enable command execution."
             )
+            return  # Don't register tools — no execution capability
 
         self.service = JobService(max_active=getattr(agent.config, "job_max_active", 10))
 
