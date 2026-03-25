@@ -131,11 +131,14 @@ class TestRolePoliciesToolFiltering:
     """Coder role only gets allowed tools."""
 
     def test_role_policies_tool_filtering(self, bare_agent):
-        """Child with coder role gets only read_file, write_file, execute_command."""
-        # Register several tools on the parent
-        bare_agent.register_tool("read_file", lambda p: "data", "Read")
-        bare_agent.register_tool("write_file", lambda p, d: "ok", "Write")
-        bare_agent.register_tool("execute_command", lambda c: "out", "Exec")
+        """Child with coder role gets only v1.5 allowed tools."""
+        # Register tools matching the v1.5 tool names
+        bare_agent.register_tool("read_files", lambda paths: "data", "Read files")
+        bare_agent.register_tool("write_files", lambda files: "ok", "Write files")
+        bare_agent.register_tool("apply_patch", lambda t, e: "patched", "Patch")
+        bare_agent.register_tool("start_job", lambda cmd: "out", "Job")
+        bare_agent.register_tool("glob_files", lambda p: "files", "Glob")
+        bare_agent.register_tool("search_text", lambda q: "found", "Search text")
         bare_agent.register_tool("web_search", lambda q: "results", "Search")
         bare_agent.register_tool("delete_database", lambda: "gone", "Delete")
 
@@ -146,23 +149,25 @@ class TestRolePoliciesToolFiltering:
         spec = ChildAgentSpec(task="write code", role="coder", policy=policy)
         child = module._create_child_agent(spec)
 
-        # Coder allowlist: read_file, write_file, execute_command
-        assert "read_file" in child._tools
-        assert "write_file" in child._tools
-        assert "execute_command" in child._tools
+        # Coder allowlist: read_files, write_files, apply_patch, start_job, glob_files, search_text
+        assert "read_files" in child._tools
+        assert "write_files" in child._tools
+        assert "apply_patch" in child._tools
+        assert "start_job" in child._tools
 
         # These should NOT be present
         assert "web_search" not in child._tools
         assert "delete_database" not in child._tools
-        # Spawn tools also removed (can_spawn_children=False)
         assert "spawn_child" not in child._tools
 
     def test_researcher_role_filtering(self, bare_agent):
-        """Child with researcher role gets only web-oriented tools."""
+        """Child with researcher role gets only web-oriented + read tools."""
         bare_agent.register_tool("web_search", lambda q: "results", "Search")
         bare_agent.register_tool("web_fetch", lambda u: "page", "Fetch")
         bare_agent.register_tool("search_knowledge", lambda q: "kb", "KB")
-        bare_agent.register_tool("execute_command", lambda c: "out", "Exec")
+        bare_agent.register_tool("search_text", lambda q: "found", "Search text")
+        bare_agent.register_tool("read_files", lambda paths: "data", "Read files")
+        bare_agent.register_tool("start_job", lambda cmd: "out", "Job")
 
         module = ChildAgentModule()
         bare_agent.register_module(module)
@@ -174,7 +179,9 @@ class TestRolePoliciesToolFiltering:
         assert "web_search" in child._tools
         assert "web_fetch" in child._tools
         assert "search_knowledge" in child._tools
-        assert "execute_command" not in child._tools
+        assert "search_text" in child._tools
+        assert "read_files" in child._tools
+        assert "start_job" not in child._tools
 
 
 class TestTaskBoardLifecycle:
