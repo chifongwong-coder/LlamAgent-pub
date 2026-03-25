@@ -41,6 +41,7 @@ class JobHandle:
         self._completed = threading.Event()
         self._thread: threading.Thread | None = None
         self._cancelled = False
+        self._state_lock = threading.Lock()  # Protects state transitions
 
     def start(self, executor_fn) -> None:
         """
@@ -52,13 +53,21 @@ class JobHandle:
                          tool_executor.execute().
         """
         def _run():
+            with self._state_lock:
+                if self._cancelled:
+                    return  # Cancelled before thread started
             try:
-                self._result = executor_fn()
-                self._exit_code = 0
+                result = executor_fn()
+                with self._state_lock:
+                    if not self._cancelled:  # Don't overwrite cancel state
+                        self._result = result
+                        self._exit_code = 0
             except Exception as e:
-                self._error = str(e)
-                self._exit_code = 1
-                logger.warning("Job '%s' execution error: %s", self.job_id, e)
+                with self._state_lock:
+                    if not self._cancelled:
+                        self._error = str(e)
+                        self._exit_code = 1
+                        logger.warning("Job '%s' execution error: %s", self.job_id, e)
             finally:
                 self._completed.set()
 
@@ -76,9 +85,10 @@ class JobHandle:
             return "cancelled"
 
         if not self._completed.is_set():
-            # Check timeout
+            # Check timeout — actively cancel if exceeded
             elapsed = time.time() - self.start_time
             if self.timeout > 0 and elapsed > self.timeout:
+                self.cancel()  # Mark as cancelled so thread knows to discard result
                 return "timeout"
             return "running"
 
@@ -134,10 +144,11 @@ class JobHandle:
         Returns:
             True if marked as cancelled, False if already completed.
         """
-        if self._completed.is_set():
-            return False
-        self._cancelled = True
-        self._completed.set()
-        self._error = "Job cancelled by user"
-        self._exit_code = -1
+        with self._state_lock:
+            if self._completed.is_set():
+                return False
+            self._cancelled = True
+            self._error = "Job cancelled by user"
+            self._exit_code = -1
+        self._completed.set()  # Set AFTER state fields, outside lock to avoid deadlock
         return True

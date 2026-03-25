@@ -38,8 +38,8 @@ class JobModule(Module):
     """
     Job system module: managed command execution with lifecycle control.
 
-    Spawns and manages subprocesses with timeout, output capture, and
-    artifact collection. Supports both synchronous (wait=True) and
+    Delegates command execution to SandboxModule's ToolExecutor backend.
+    Provides lifecycle management (wait, status, tail, cancel, artifacts). Supports both synchronous (wait=True) and
     asynchronous (wait=False) execution modes.
     """
 
@@ -166,7 +166,7 @@ class JobModule(Module):
         agent.register_tool(
             name="cancel_job",
             func=self._cancel_job,
-            description="Terminate a running job by sending SIGTERM",
+            description="Cancel a running job. The job is marked as cancelled and its result is discarded.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -334,16 +334,17 @@ class JobModule(Module):
 
     def _build_execution_policy(self, timeout: float, cwd: str):
         """Build an ExecutionPolicy for command execution via sandbox backend."""
-        try:
-            from llamagent.modules.sandbox.policy import ExecutionPolicy
-            return ExecutionPolicy(
-                runtime="shell",
-                isolation="none",
-                timeout_seconds=timeout,
-                session_mode="one_shot",
-            )
-        except ImportError:
-            return None
+        from llamagent.modules.sandbox.policy import ExecutionPolicy
+        # NOTE: isolation="none" is INTENTIONALLY wrong for now (Bug 1+2).
+        # ToolExecutor routes isolation="none" to direct func() call, skipping backend.
+        # This needs redesign — see discussion about ToolExecutor API mismatch
+        # with shell command execution. Tracked as a known issue.
+        return ExecutionPolicy(
+            runtime="shell",
+            isolation="none",
+            timeout_seconds=timeout,
+            session_mode="one_shot",
+        )
 
     def _wait_job(self, job_id: str) -> str:
         """Wait for an async job to complete and return its output."""
