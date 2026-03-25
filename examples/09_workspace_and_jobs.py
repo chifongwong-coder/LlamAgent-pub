@@ -21,6 +21,7 @@ import tempfile
 from llamagent import SmartAgent, Config
 from llamagent.modules.tools import ToolsModule
 from llamagent.modules.job import JobModule
+from llamagent.modules.sandbox import SandboxModule
 
 
 # =============================================================
@@ -184,7 +185,12 @@ def part3_job_execution(agent):
     print("Part 3: Job Execution")
     print("=" * 60)
 
-    # Register JobModule
+    # JobModule requires SandboxModule for command execution (secure by default).
+    # SandboxModule provides agent.tool_executor which routes commands through
+    # the sandbox backend (LocalProcessBackend).
+    sandbox_mod = SandboxModule(auto_assign=True)
+    agent.register_module(sandbox_mod)
+
     job_mod = JobModule()
     agent.register_module(job_mod)
 
@@ -192,8 +198,7 @@ def part3_job_execution(agent):
     print("\n-- start_job (wait=True): synchronous 'echo hello' --")
     result = call_tool(agent, "start_job", command="echo hello from llamagent", wait=True)
     print(f"  Status: {result['status']}")
-    print(f"  Return code: {result.get('return_code', '?')}")
-    print(f"  Stdout: {result.get('stdout', '').strip()}")
+    print(f"  Output: {result.get('output', '').strip()}")
 
     # --- start_job with wait=False: asynchronous execution ---
     print("\n-- start_job (wait=False): async 'sleep 1 && echo done' --")
@@ -213,15 +218,15 @@ def part3_job_execution(agent):
     # --- tail_job: view partial output while running ---
     print("\n-- tail_job: view output so far --")
     result = call_tool(agent, "tail_job", job_id=job_id, lines=10)
-    stdout_so_far = result.get("stdout", "")
-    print(f"  Stdout so far: {stdout_so_far!r}")
+    output_so_far = result.get("output", "")
+    print(f"  Output so far: {output_so_far!r}")
 
     # --- wait_job: wait for completion ---
     print("\n-- wait_job: wait for async job to complete --")
     result = call_tool(agent, "wait_job", job_id=job_id)
     print(f"  Status: {result['status']}")
     print(f"  Return code: {result.get('return_code', '?')}")
-    print(f"  Stdout: {result.get('stdout', '').strip()}")
+    print(f"  Output: {result.get('output', '').strip()}")
 
 
 # =============================================================

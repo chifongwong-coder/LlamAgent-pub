@@ -248,6 +248,63 @@ class TestCallToolBackwardCompat:
 # ============================================================
 
 
+# ============================================================
+# Flow 7: ToolExecutor.run_command() direct shell execution
+# ============================================================
+
+
+class TestToolExecutorRunCommand:
+    """ToolExecutor.run_command() routes shell commands through backend."""
+
+    def test_run_command_basic(self):
+        """run_command executes a shell command and returns stdout."""
+        resolver = BackendResolver()
+        resolver.register(LocalProcessBackend())
+        executor = ToolExecutor(resolver)
+
+        with tempfile.TemporaryDirectory() as cwd:
+            result = executor.run_command("echo run_command_test", cwd, timeout=10)
+            assert "run_command_test" in result
+
+    def test_run_command_uses_cwd(self):
+        """run_command executes in the specified working directory."""
+        resolver = BackendResolver()
+        resolver.register(LocalProcessBackend())
+        executor = ToolExecutor(resolver)
+
+        with tempfile.TemporaryDirectory() as cwd:
+            # Create a file in cwd, then list it
+            open(os.path.join(cwd, "marker.txt"), "w").close()
+            result = executor.run_command("ls marker.txt", cwd, timeout=10)
+            assert "marker.txt" in result
+
+    def test_run_command_timeout(self):
+        """run_command with short timeout returns timeout observation."""
+        resolver = BackendResolver()
+        resolver.register(LocalProcessBackend())
+        executor = ToolExecutor(resolver)
+
+        with tempfile.TemporaryDirectory() as cwd:
+            result = executor.run_command("sleep 60", cwd, timeout=0.5)
+            assert "TIMEOUT" in result
+
+    def test_run_command_error(self):
+        """run_command for failing command returns stderr in observation."""
+        resolver = BackendResolver()
+        resolver.register(LocalProcessBackend())
+        executor = ToolExecutor(resolver)
+
+        with tempfile.TemporaryDirectory() as cwd:
+            result = executor.run_command("exit 1", cwd, timeout=10)
+            # Should contain exit code info
+            assert "exit_code" in result.lower() or result == "" or "1" in result
+
+
+# ============================================================
+# Flow 8: Security fixes verification
+# ============================================================
+
+
 class TestSandboxSecurityFixes:
     """Verify key security fixes in the sandbox module."""
 

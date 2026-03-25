@@ -41,6 +41,7 @@ class JobHandle:
         self._completed = threading.Event()
         self._thread: threading.Thread | None = None
         self._cancelled = False
+        self._timed_out = False  # Distinct from cancelled — stable terminal state
         self._state_lock = threading.Lock()  # Protects state transitions
 
     def start(self, executor_fn) -> None:
@@ -81,6 +82,10 @@ class JobHandle:
         Returns:
             "running", "completed", "failed", "timeout", or "cancelled"
         """
+        # Timeout is a distinct terminal state — check before cancelled
+        if self._timed_out:
+            return "timeout"
+
         if self._cancelled:
             return "cancelled"
 
@@ -88,7 +93,8 @@ class JobHandle:
             # Check timeout — actively cancel if exceeded
             elapsed = time.time() - self.start_time
             if self.timeout > 0 and elapsed > self.timeout:
-                self.cancel()  # Mark as cancelled so thread knows to discard result
+                self._timed_out = True
+                self.cancel()  # Stop the thread from overwriting state
                 return "timeout"
             return "running"
 
