@@ -180,17 +180,17 @@ def part5_multiple_children():
         """Search the web."""
         return f"Web results for '{query}': Found 10 relevant articles."
 
-    def read_file(path: str) -> str:
-        """Read a file."""
-        return f"Contents of {path}: [sample data]"
+    def read_files(paths: list) -> str:
+        """Read files."""
+        return f"Contents of {paths}: [sample data]"
 
-    def write_file(path: str, content: str) -> str:
-        """Write a file."""
-        return f"Written {len(content)} chars to {path}"
+    def write_files(files: dict) -> str:
+        """Write files."""
+        return f"Written {len(files)} file(s)"
 
     agent.register_tool("web_search", web_search, "Search the web")
-    agent.register_tool("read_file", read_file, "Read a file")
-    agent.register_tool("write_file", write_file, "Write content to a file")
+    agent.register_tool("read_files", read_files, "Read files")
+    agent.register_tool("write_files", write_files, "Write files")
 
     # Register ChildAgentModule
     child_mod = ChildAgentModule()

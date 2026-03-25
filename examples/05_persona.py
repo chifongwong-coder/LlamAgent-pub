@@ -81,16 +81,16 @@ def part2_tier_visibility():
     # Tools with different tiers
     agent = SmartAgent(config, persona=user)
 
-    def read_file(path: str) -> str:
-        """Read a file (safe operation)."""
-        return f"Contents of {path}"
+    def read_files(paths: list) -> str:
+        """Read files (safe operation)."""
+        return f"Contents of {paths}"
 
     def admin_command(cmd: str) -> str:
         """Run an admin command (admin only)."""
         return f"Executed: {cmd}"
 
     # tier=common: visible to all; tier=admin: admin only
-    agent.register_tool("read_file", read_file, "Read a file", tier="common")
+    agent.register_tool("read_files", read_files, "Read files", tier="common")
     agent.register_tool("admin_command", admin_command, "Admin command", tier="admin")
 
     # Tool visibility is controlled by tier — visibility equals usability
