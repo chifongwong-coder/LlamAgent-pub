@@ -1,134 +1,143 @@
-"""JobHandle: wraps subprocess.Popen with lifecycle management."""
+"""
+JobHandle: wraps a ToolExecutor execution running in a background thread.
+
+No direct subprocess usage — execution is delegated to the sandbox backend
+via agent.tool_executor. JobHandle manages the thread lifecycle and provides
+poll/wait/read_output for the job tools.
+
+Phase 1 limitation: tail_job cannot stream partial output because
+ToolExecutor.execute() is synchronous (returns full result only on completion).
+"""
 
 from __future__ import annotations
 
-import subprocess
+import logging
 import threading
 import time
-from typing import List
+
+logger = logging.getLogger(__name__)
 
 
 class JobHandle:
     """
-    Wraps a subprocess.Popen instance with lifecycle management.
+    Wraps a command execution running in a background thread via ToolExecutor.
 
-    Provides non-blocking stdout/stderr capture via background reader threads,
-    status polling, waiting, and termination.
+    The actual execution is delegated to the sandbox backend (LocalProcessBackend,
+    future DockerBackend, etc.) through ToolExecutor.execute(). This class only
+    manages the thread lifecycle and stores the result.
     """
 
-    def __init__(
-        self,
-        job_id: str,
-        process: subprocess.Popen,
-        cwd: str,
-        command: str,
-        timeout: float,
-    ):
+    def __init__(self, job_id: str, command: str, cwd: str, timeout: float):
         self.job_id = job_id
-        self.process = process
-        self.cwd = cwd
         self.command = command
+        self.cwd = cwd
         self.timeout = timeout
         self.start_time = time.time()
-        self._stdout_lines: List[str] = []
-        self._stderr_lines: List[str] = []
-        self._stdout_lock = threading.Lock()
-        self._stderr_lock = threading.Lock()
 
-        # Start background reader threads for non-blocking I/O
-        self._stdout_reader = threading.Thread(
-            target=self._read_stream,
-            args=(process.stdout, self._stdout_lines, self._stdout_lock),
-            daemon=True,
-        )
-        self._stderr_reader = threading.Thread(
-            target=self._read_stream,
-            args=(process.stderr, self._stderr_lines, self._stderr_lock),
-            daemon=True,
-        )
-        self._stdout_reader.start()
-        self._stderr_reader.start()
+        # Result from tool_executor.execute() — available after thread completes
+        self._result: str | None = None
+        self._error: str | None = None
+        self._exit_code: int | None = None
+        self._completed = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._cancelled = False
 
-    @staticmethod
-    def _read_stream(stream, buffer: List[str], lock: threading.Lock) -> None:
-        """Continuously read lines from a stream into a buffer."""
-        try:
-            for line in stream:
-                with lock:
-                    buffer.append(line)
-        except (ValueError, OSError):
-            # Stream closed
-            pass
+    def start(self, executor_fn) -> None:
+        """
+        Start execution in a background thread.
+
+        Args:
+            executor_fn: Callable that performs the execution and returns
+                         the result string. This is typically a closure over
+                         tool_executor.execute().
+        """
+        def _run():
+            try:
+                self._result = executor_fn()
+                self._exit_code = 0
+            except Exception as e:
+                self._error = str(e)
+                self._exit_code = 1
+                logger.warning("Job '%s' execution error: %s", self.job_id, e)
+            finally:
+                self._completed.set()
+
+        self._thread = threading.Thread(target=_run, daemon=True)
+        self._thread.start()
 
     def poll(self) -> str:
         """
         Check the current status of the job.
 
         Returns:
-            "running", "completed", "failed", or "timeout"
+            "running", "completed", "failed", "timeout", or "cancelled"
         """
-        elapsed = time.time() - self.start_time
-        if self.timeout > 0 and elapsed > self.timeout:
-            # Timeout: terminate the process if still running
-            if self.process.poll() is None:
-                self.terminate()
-            return "timeout"
+        if self._cancelled:
+            return "cancelled"
 
-        rc = self.process.poll()
-        if rc is None:
+        if not self._completed.is_set():
+            # Check timeout
+            elapsed = time.time() - self.start_time
+            if self.timeout > 0 and elapsed > self.timeout:
+                return "timeout"
             return "running"
-        elif rc == 0:
-            return "completed"
-        else:
+
+        if self._error:
             return "failed"
+        return "completed"
 
     def read_output(self, lines: int = 200) -> str:
-        """Return the last N lines from stdout."""
-        with self._stdout_lock:
-            tail = self._stdout_lines[-lines:] if lines > 0 else self._stdout_lines[:]
-        return "".join(tail)
+        """
+        Read job output.
 
-    def read_stderr(self, lines: int = 200) -> str:
-        """Return the last N lines from stderr."""
-        with self._stderr_lock:
-            tail = self._stderr_lines[-lines:] if lines > 0 else self._stderr_lines[:]
-        return "".join(tail)
+        Phase 1 limitation: only available after job completes (ToolExecutor.execute
+        is synchronous, no streaming). Returns empty string while running.
+        """
+        if not self._completed.is_set():
+            return ""
+        result = self._result or self._error or ""
+        if lines > 0:
+            result_lines = result.splitlines(keepends=True)
+            return "".join(result_lines[-lines:])
+        return result
 
     def wait(self, timeout: float | None = None) -> int:
         """
-        Wait for the process to complete.
+        Wait for the job to complete.
 
         Args:
-            timeout: Maximum seconds to wait. None uses the job's configured timeout.
-                     If the remaining budget from the configured timeout is less,
-                     it takes precedence.
+            timeout: Maximum seconds to wait. None uses remaining job timeout budget.
 
         Returns:
-            Process exit code, or -1 on timeout.
+            Exit code (0=success, 1=error, -1=timeout).
         """
         if timeout is None:
-            # Use remaining budget from the configured job timeout
             elapsed = time.time() - self.start_time
             remaining = max(self.timeout - elapsed, 0) if self.timeout > 0 else None
         else:
             remaining = timeout
 
-        try:
-            rc = self.process.wait(timeout=remaining)
-        except subprocess.TimeoutExpired:
-            self.terminate()
-            self._stdout_reader.join(timeout=2)
-            self._stderr_reader.join(timeout=2)
+        completed = self._completed.wait(timeout=remaining)
+        if not completed:
             return -1
 
-        # Wait for reader threads to finish draining
-        self._stdout_reader.join(timeout=2)
-        self._stderr_reader.join(timeout=2)
-        return rc
+        return self._exit_code if self._exit_code is not None else -1
 
-    def terminate(self) -> None:
-        """Send SIGTERM to the process."""
-        try:
-            self.process.terminate()
-        except OSError:
-            pass  # Process already exited
+    def cancel(self) -> bool:
+        """
+        Cancel the job.
+
+        Note: The background thread is running tool_executor.execute() which is
+        blocking. We mark the job as cancelled but cannot forcefully interrupt the
+        thread. The backend's timeout will eventually stop it.
+
+        Returns:
+            True if marked as cancelled, False if already completed.
+        """
+        if self._completed.is_set():
+            return False
+        self._cancelled = True
+        self._completed.set()
+        self._error = "Job cancelled by user"
+        self._exit_code = -1
+        return True
