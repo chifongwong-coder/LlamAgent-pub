@@ -147,6 +147,7 @@ def bare_agent(mock_llm_client):
     agent.playground_dir = os.path.realpath(os.path.join(agent.project_dir, "llama_playground"))
     agent.tool_executor = None
     agent._tools = {}
+    agent._active_packs = set()
     agent._tools_version = 0
 
     from llamagent.core.agent import SimpleReAct

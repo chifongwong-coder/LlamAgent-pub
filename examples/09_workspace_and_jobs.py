@@ -1,14 +1,15 @@
 """
-09 -- Workspace & Jobs: The v1.5 Tool System
+09 -- Workspace & Jobs: The v1.6 Tool System
 
-v1.5 upgrades tools from low-level file operations to a workspace-centric
-workflow. Old tools (read_file, write_file, execute_command) are replaced by
-high-level workspace, project sync, and job tools.
+v1.6 workspace-centric tool system with pack-based conditional exposure.
+Default surface has 12 tools; additional tools are in packs activated by
+skills or runtime state.
 
 Key concepts:
 - Workspace: agent's sandbox area under playground_dir, Zone 1 (free zone)
 - Project sync: apply_patch / sync_workspace_to_project for safe project modifications
 - Jobs: start_job with wait=True (sync) or wait=False (async lifecycle)
+- Packs: conditional tool groups activated by skills or state (e.g., job-followup)
 
 Prerequisites:
     pip install -e .
@@ -159,11 +160,12 @@ def part2_project_sync(agent, tools_mod, tmp_project):
     assert "VERSION = '1.0'" in content, "Revert failed!"
     print("  (confirmed: file restored to original)")
 
-    # --- preview_patch: dry run without writing ---
-    print("\n-- preview_patch: dry run a patch --")
-    result = call_tool(agent, "preview_patch",
+    # --- apply_patch with preview=True: dry run without writing ---
+    print("\n-- apply_patch (preview=True): dry run a patch --")
+    result = call_tool(agent, "apply_patch",
         target="app.py",
-        edits=[{"match": "print('Starting app...')", "replace": "print('App v1.5 starting...')"}],
+        edits=[{"match": "print('Starting app...')", "replace": "print('App v1.6 starting...')"}],
+        preview=True,
     )
     print(f"  Status: {result['status']}")
     print(f"  Edits valid: {result.get('edits_valid', False)}")
@@ -209,17 +211,11 @@ def part3_job_execution(agent):
     job_id = result["job_id"]
     print(f"  Job started, job_id: {job_id}")
 
-    # --- job_status: check status ---
-    print("\n-- job_status: check running job --")
-    result = call_tool(agent, "job_status", job_id=job_id)
+    # --- inspect_job: check status + output (non-blocking) ---
+    print("\n-- inspect_job: check running job --")
+    result = call_tool(agent, "inspect_job", job_id=job_id)
     print(f"  Status: {result['status']}")
     print(f"  Elapsed: {result.get('elapsed_seconds', '?')}s")
-
-    # --- tail_job: view partial output while running ---
-    print("\n-- tail_job: view output so far --")
-    result = call_tool(agent, "tail_job", job_id=job_id, lines=10)
-    output_so_far = result.get("output", "")
-    print(f"  Output so far: {output_so_far!r}")
 
     # --- wait_job: wait for completion ---
     print("\n-- wait_job: wait for async job to complete --")
@@ -260,8 +256,8 @@ if __name__ == "__main__":
     part4_workspace_lifecycle(agent, tools_mod)
 
     print("\n" + "=" * 60)
-    print("Done! v1.5 replaces raw file/exec tools with:")
-    print("  - Workspace tools: write_files, read_files, list_tree, ...")
-    print("  - Project sync:    apply_patch, revert_changes, preview_patch")
-    print("  - Job system:      start_job, job_status, tail_job, wait_job")
+    print("Done! v1.6 workspace-first tools with pack-based exposure:")
+    print("  - Default surface: read_files, write_files, list_tree, search_text, ...")
+    print("  - Project sync:    apply_patch (with preview), revert_changes")
+    print("  - Job system:      start_job, inspect_job, wait_job, cancel_job")
     print("=" * 60)

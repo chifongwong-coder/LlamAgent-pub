@@ -40,6 +40,7 @@ class SkillMeta:
     invocation: str = "both"  # "user-invocable" / "auto-trigger" / "both"
     skill_dir: str = ""
     priority: str = ""  # "project" / "compat" / "user" / "user-compat" / "custom"
+    required_tool_packs: list[str] = field(default_factory=list)  # v1.6: packs to activate
 
 
 class SkillIndex:
@@ -169,6 +170,11 @@ class SkillIndex:
         aliases = [str(a).strip() for a in raw_aliases if a is not None] if isinstance(raw_aliases, list) else []
         aliases = [a for a in aliases if a]
 
+        # Build required_tool_packs list
+        raw_packs = data.get("required_tool_packs", [])
+        required_tool_packs = [str(p).strip() for p in raw_packs if p is not None] if isinstance(raw_packs, list) else []
+        required_tool_packs = [p for p in required_tool_packs if p]
+
         return SkillMeta(
             name=str(name).strip(),
             description=str(description).strip(),
@@ -177,6 +183,7 @@ class SkillIndex:
             invocation=invocation,
             skill_dir=skill_dir,
             priority=priority,
+            required_tool_packs=required_tool_packs,
         )
 
     # ------------------------------------------------------------------

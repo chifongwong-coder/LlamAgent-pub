@@ -1,0 +1,6 @@
+name: toolsmith
+description: Create reusable custom tools for the current project
+tags: [tool, create, custom, adapter, helper, utility, wrapper, script, function, reusable, generate, factory]
+invocation: auto-trigger
+required_tool_packs:
+  - toolsmith

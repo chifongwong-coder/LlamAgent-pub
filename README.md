@@ -196,8 +196,8 @@ reply = agent.chat("Search for recent AI papers and summarize the top 3")
 
 | Module | Description | Key Capability |
 |--------|-------------|----------------|
-| **Tools** | Workspace-centric tool system with project sync | `read_files`, `write_files`, `apply_patch`, `sync_workspace_to_project` |
-| **Job** | Managed command execution via SandboxModule | `start_job(wait=True/False)`, `tail_job`, `cancel_job` |
+| **Tools** | Workspace-centric tool system with pack-based conditional exposure | `read_files`, `write_files`, `apply_patch`, `sync_workspace_to_project` |
+| **Job** | Managed command execution via SandboxModule | `start_job(wait=True/False)`, `inspect_job`, `wait_job`, `cancel_job` |
 | **RAG** | ChromaDB-based semantic search | `search_knowledge`, document loading |
 | **Memory** | Persistent memory with semantic recall | Autonomous / hybrid modes |
 | **Skill** | Task-level playbook injection via on_context | `/skill` command, tag matching, LLM fallback |

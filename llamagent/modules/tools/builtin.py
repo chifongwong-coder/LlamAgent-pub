@@ -17,24 +17,11 @@ from llamagent.modules.tools.registry import tool
 # Web search (LLM-simulated)
 # ============================================================
 
-@tool(
-    name="web_search",
-    description="Search the web for the latest information and return a summary of results",
-    parameters={
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "Search keywords"}
-        },
-        "required": ["query"],
-    },
-    safety_level=1,
-)
 def web_search(query: str) -> str:
-    """Web search (LLM-simulated). In production, replace with SerpAPI / Bing Search etc."""
-    # _llm is injected by ToolsModule.on_attach()
+    """Web search. Not registered by default -- no real search backend configured."""
     llm = getattr(web_search, "_llm", None)
     if llm is None:
-        return json.dumps({"error": "Search function not initialized (missing LLM client)"}, ensure_ascii=False)
+        return json.dumps({"error": "web_search is not available: no real search backend configured"}, ensure_ascii=False)
 
     try:
         result = llm.ask(
@@ -67,6 +54,7 @@ def web_search(query: str) -> str:
         "required": ["url"],
     },
     safety_level=1,
+    pack="web",
 )
 def web_fetch(url: str) -> str:
     """Fetch page content from a specified URL. Requires the requests library."""

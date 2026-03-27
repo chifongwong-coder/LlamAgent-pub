@@ -91,6 +91,10 @@ class SkillModule(Module):
             resolved = os.path.realpath(custom_dir)
             paths.append((resolved, "custom"))
 
+        # Builtin skills (lowest priority — project/user skills override these)
+        builtin_dir = os.path.join(os.path.dirname(__file__), "builtin_skills")
+        paths.append((builtin_dir, "builtin"))
+
         return paths
 
     # ============================================================
@@ -166,6 +170,12 @@ class SkillModule(Module):
         # --- Injection ---
         if not activated:
             return context
+
+        # Activate required tool packs for matched skills
+        for meta in activated:
+            if meta.required_tool_packs:
+                for pack_name in meta.required_tool_packs:
+                    self.agent._active_packs.add(pack_name)
 
         blocks = []
         for meta in activated:

@@ -36,6 +36,7 @@ class ToolInfo:
     tier: str = "common"                # Visibility tier: "default" | "common" | "admin" | "agent"
     safety_level: int = 1               # Safety level: 1=read-only 2=has side effects 3=high risk
     creator_id: str | None = None       # Creator persona_id (only set for agent-tier tools)
+    pack: str | None = None             # v1.6: pack name (None = default public surface, always visible)
 
 
 class ToolRegistry:
@@ -57,6 +58,7 @@ class ToolRegistry:
         tier: str = "common",
         safety_level: int = 1,
         creator_id: str | None = None,
+        pack: str | None = None,
     ) -> None:
         """
         Register a tool.
@@ -78,6 +80,7 @@ class ToolRegistry:
             tier=tier,
             safety_level=safety_level,
             creator_id=creator_id,
+            pack=pack,
         )
 
     def remove(self, name: str) -> bool:
@@ -200,6 +203,7 @@ def tool(
     parameters: dict | None = None,
     tier: str = "common",
     safety_level: int = 1,
+    pack: str | None = None,
 ):
     """
     @tool decorator: registers a function into the global tool registry.
@@ -216,7 +220,7 @@ def tool(
         tool_desc = description or func.__doc__ or "No description"
         global_registry.register(
             tool_name, func, tool_desc, parameters,
-            tier=tier, safety_level=safety_level,
+            tier=tier, safety_level=safety_level, pack=pack,
         )
         func._tool_name = tool_name
         return func

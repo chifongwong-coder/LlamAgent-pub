@@ -19,7 +19,8 @@ from conftest import make_llm_response
 # ============================================================
 
 def _create_skill(base_dir, name, description, tags=None, aliases=None,
-                  invocation="both", skill_content="## Goal\nTest skill."):
+                  invocation="both", skill_content="## Goal\nTest skill.",
+                  required_tool_packs=None):
     """Create a skill directory with config.yaml + SKILL.md."""
     skill_dir = os.path.join(base_dir, name)
     os.makedirs(skill_dir, exist_ok=True)
@@ -31,6 +32,8 @@ def _create_skill(base_dir, name, description, tags=None, aliases=None,
         config += f"aliases: [{', '.join(aliases)}]\n"
     if invocation != "both":
         config += f"invocation: {invocation}\n"
+    if required_tool_packs:
+        config += f"required_tool_packs: [{', '.join(required_tool_packs)}]\n"
 
     with open(os.path.join(skill_dir, "config.yaml"), "w") as f:
         f.write(config)
@@ -51,6 +54,7 @@ def _make_agent_with_skills(bare_agent, tmp_path, skills_data):
             tags=sd.get("tags"), aliases=sd.get("aliases"),
             invocation=sd.get("invocation", "both"),
             skill_content=sd.get("content", f"## Goal\n{sd['name']} playbook."),
+            required_tool_packs=sd.get("required_tool_packs"),
         )
 
     bare_agent.project_dir = str(tmp_path)
@@ -281,3 +285,95 @@ class TestInjectionFormat:
         bare_agent.register_module(mod)
         result = mod.on_context("any query", "original")
         assert result == "original"
+
+
+# ============================================================
+# v1.6: Pack activation via required_tool_packs
+# ============================================================
+
+class TestSkillPackActivation:
+    """Skill with required_tool_packs activates packs on match."""
+
+    def test_skill_activates_pack_on_tag_match(self, bare_agent, tmp_path):
+        """When a skill with required_tool_packs matches, the packs are activated."""
+        mod = _make_agent_with_skills(bare_agent, tmp_path, [
+            {"name": "my-toolsmith", "description": "Create tools",
+             "tags": ["tool", "create"],
+             "required_tool_packs": ["toolsmith"],
+             "content": "Use create_tool to build helpers."},
+        ])
+
+        assert "toolsmith" not in bare_agent._active_packs
+
+        result = mod.on_context("create a tool", "")
+        assert "[Active Skill: my-toolsmith]" in result
+        assert "toolsmith" in bare_agent._active_packs
+
+    def test_skill_without_packs_does_not_affect_active_packs(self, bare_agent, tmp_path):
+        """Normal skill without required_tool_packs does not modify _active_packs."""
+        mod = _make_agent_with_skills(bare_agent, tmp_path, [
+            {"name": "deploy", "description": "Deploy workflow",
+             "tags": ["deploy"],
+             "content": "Deploy playbook."},
+        ])
+
+        mod.on_context("deploy the app", "")
+        assert len(bare_agent._active_packs) == 0
+
+    def test_slash_skill_activates_pack(self, bare_agent, tmp_path):
+        """A-level /skill command also activates required_tool_packs."""
+        mod = _make_agent_with_skills(bare_agent, tmp_path, [
+            {"name": "web-access", "description": "Fetch web pages",
+             "tags": ["web"],
+             "required_tool_packs": ["web"],
+             "content": "Use web_fetch to get pages."},
+        ])
+
+        query = mod.on_input("/skill web-access fetch this page")
+        result = mod.on_context(query, "")
+        assert "web" in bare_agent._active_packs
+
+
+# ============================================================
+# v1.6: Builtin skills scanning
+# ============================================================
+
+class TestBuiltinSkills:
+    """Builtin skills from package directory are scanned and available."""
+
+    def test_builtin_skills_loaded(self, bare_agent, tmp_path):
+        """Builtin skills (toolsmith, web-access, etc.) are loaded from package directory."""
+        bare_agent.project_dir = str(tmp_path)
+        bare_agent.config.skill_dirs = []
+        bare_agent.config.skill_max_active = 2
+        bare_agent.config.skill_llm_fallback = False
+
+        mod = SkillModule()
+        bare_agent.register_module(mod)
+
+        # Check that builtin skills are indexed
+        assert mod.index.lookup("toolsmith") is not None
+        assert mod.index.lookup("web-access") is not None
+        assert mod.index.lookup("workspace-ops") is not None
+        assert mod.index.lookup("lightweight-collab") is not None
+
+    def test_project_skill_overrides_builtin(self, bare_agent, tmp_path):
+        """Project-level skill with same name overrides builtin."""
+        # Create a project-level skill named "toolsmith" with different content
+        skills_dir = os.path.join(str(tmp_path), ".llamagent", "skills")
+        _create_skill(skills_dir, "toolsmith",
+                      "Custom project toolsmith",
+                      tags=["tool"], skill_content="Custom toolsmith playbook.")
+
+        bare_agent.project_dir = str(tmp_path)
+        bare_agent.config.skill_dirs = []
+        bare_agent.config.skill_max_active = 2
+        bare_agent.config.skill_llm_fallback = False
+
+        mod = SkillModule()
+        bare_agent.register_module(mod)
+
+        meta = mod.index.lookup("toolsmith")
+        assert meta is not None
+        assert meta.description == "Custom project toolsmith"
+        assert meta.priority == "project"
