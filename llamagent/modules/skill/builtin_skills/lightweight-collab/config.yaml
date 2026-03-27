@@ -1,0 +1,6 @@
+name: lightweight-collab
+description: Use lightweight one-shot collaboration without spawning full child agents
+tags: [delegate, collaborate, ask, consult, role, agent, teamwork, assist]
+invocation: auto-trigger
+required_tool_packs:
+  - multi-agent

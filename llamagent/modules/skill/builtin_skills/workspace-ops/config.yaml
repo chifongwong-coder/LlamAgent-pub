@@ -1,0 +1,6 @@
+name: workspace-ops
+description: Organize workspace files - move, copy, delete, glob
+tags: [move, copy, delete, rename, clean, organize, tidy, reorganize, remove, duplicate, glob, find, pattern]
+invocation: auto-trigger
+required_tool_packs:
+  - workspace-maintenance

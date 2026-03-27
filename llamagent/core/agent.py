@@ -267,6 +267,9 @@ class SmartAgent:
         #               "tier": str, "safety_level": int}}
         self._tools: dict[str, dict[str, Any]] = {}
 
+        # v1.6: pack-based conditional tool exposure
+        self._active_packs: set[str] = set()
+
         # Tool registry version number, incremented on each register_tool/remove_tool, used for cache invalidation
         self._tools_version: int = 0
 
@@ -351,6 +354,7 @@ class SmartAgent:
         execution_policy=None,
         creator_id: str | None = None,
         path_extractor: Callable[[dict], list[str]] | None = None,
+        pack: str | None = None,
     ) -> None:
         """
         Register a tool in the registry.
@@ -380,6 +384,7 @@ class SmartAgent:
             "execution_policy": execution_policy,
             "creator_id": creator_id,
             "path_extractor": path_extractor,
+            "pack": pack,
         }
         self._tools_version += 1
         logger.debug("Tool registered: %s (tier=%s, safety_level=%d)", name, tier, safety_level)
@@ -467,6 +472,11 @@ class SmartAgent:
                 current_pid = self.persona.persona_id if self.persona else "default"
                 if tool.get("creator_id") != current_pid:
                     continue
+
+            # v1.6: pack-based filtering — tools with a pack are only visible when that pack is active
+            pack = tool.get("pack")
+            if pack is not None and pack not in self._active_packs:
+                continue
 
             schema = {
                 "type": "function",

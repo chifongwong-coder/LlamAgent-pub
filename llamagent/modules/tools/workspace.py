@@ -191,6 +191,31 @@ class WorkspaceService:
         return resolved_path == root or resolved_path.startswith(root + os.sep)
 
     # ================================================================
+    # Workspace-only restriction
+    # ================================================================
+
+    def resolve_path_workspace_only(self, raw_path: str) -> str:
+        """
+        Resolve a path and verify it stays within workspace root.
+
+        Like resolve_path(), but rejects paths that resolve outside the
+        workspace (including project: prefix, project dir absolute paths,
+        and external paths). Used by write operations to enforce
+        workspace-first workflow.
+
+        Raises:
+            ValueError: If the resolved path is outside workspace root.
+        """
+        resolved = self.resolve_path(raw_path)
+        if not self.ensure_in_workspace(resolved):
+            raise ValueError(
+                f"Write operations are restricted to workspace. "
+                f"Path '{raw_path}' resolves outside workspace root. "
+                f"Use apply_patch or sync_workspace_to_project for project modifications."
+            )
+        return resolved
+
+    # ================================================================
     # Lifecycle
     # ================================================================
 

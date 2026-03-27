@@ -92,6 +92,7 @@ class MultiAgentModule(Module):
             },
             tier="default",
             safety_level=1,
+            pack="multi-agent",
         )
 
         self.agent.register_tool(
@@ -117,6 +118,7 @@ class MultiAgentModule(Module):
             },
             tier="default",
             safety_level=2,
+            pack="multi-agent",
         )
 
         self.agent.register_tool(
@@ -143,6 +145,7 @@ class MultiAgentModule(Module):
             },
             tier="default",
             safety_level=2,
+            pack="multi-agent",
         )
 
     # ============================================================

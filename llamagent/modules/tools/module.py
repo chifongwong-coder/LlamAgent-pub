@@ -6,13 +6,16 @@ Responsibilities:
 - Meta-tools: create_tool / list_my_tools / delete_tool / query_toolbox
 - Admin tools: create_common_tool / list_all_agent_tools / promote_tool
 - Tool persistence: JSON persistence for role custom tools and admin common tools
-- v1.5 workspace tools: WorkspaceService + ProjectSyncService + 16 new tools
-- v1.5 workspace guidelines injection via on_context
+- v1.6 workspace tools: WorkspaceService + ProjectSyncService (default + pack)
+- v1.6 pack mechanism: state-driven + skill-driven conditional tool exposure
+- v1.6 workspace guidelines + capability hint block injection via on_context
 """
 
+import base64
 import glob
 import json
 import logging
+import mimetypes
 import os
 import shutil
 import tempfile
@@ -34,6 +37,56 @@ WORKSPACE_GUIDE = """\
   Use "project:" prefix to access project files (e.g., "project:src/main.py").
 - For command execution, use start_job. Set wait=True for quick commands, wait=False for long tasks."""
 
+# Known text file extensions for automatic type detection in read_files
+_TEXT_EXTENSIONS = frozenset({
+    ".txt", ".md", ".py", ".js", ".ts", ".json", ".yaml", ".yml",
+    ".toml", ".ini", ".csv", ".tsv", ".html", ".xml", ".sql", ".log",
+    ".sh", ".c", ".cpp", ".h", ".java", ".go", ".rs", ".rb", ".php",
+    ".css", ".scss", ".jsx", ".tsx", ".vue", ".svelte", ".env", ".cfg",
+    ".conf", ".properties", ".gradle", ".makefile", ".dockerfile",
+    ".bat", ".ps1", ".r", ".scala", ".kt", ".swift", ".m", ".mm",
+    ".pl", ".pm", ".lua", ".zig", ".nim", ".ex", ".exs", ".erl",
+    ".hs", ".ml", ".tf", ".hcl", ".proto", ".graphql", ".rst",
+    ".tex", ".bib", ".gitignore", ".dockerignore", ".editorconfig",
+})
+
+
+def _is_text_file(filepath: str) -> bool:
+    """Check if a file is likely text based on extension, then content probe."""
+    ext = os.path.splitext(filepath)[1].lower()
+    # Known text extension
+    if ext in _TEXT_EXTENSIONS:
+        return True
+    # Known binary extensions (skip probe)
+    if ext in (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp",
+               ".pdf", ".zip", ".gz", ".tar", ".bz2", ".7z", ".rar",
+               ".exe", ".dll", ".so", ".dylib", ".bin", ".o", ".a",
+               ".woff", ".woff2", ".ttf", ".otf", ".eot",
+               ".mp3", ".mp4", ".wav", ".avi", ".mov", ".mkv",
+               ".sqlite", ".db", ".pyc", ".pyo", ".class", ".jar",
+               ".xls", ".xlsx", ".doc", ".docx", ".ppt", ".pptx"):
+        return False
+    # No extension or unknown: probe first 8KB
+    try:
+        with open(filepath, "rb") as f:
+            chunk = f.read(8192)
+        # Null bytes strongly indicate binary
+        if b"\x00" in chunk:
+            return False
+        return True
+    except OSError:
+        return False
+
+
+CAPABILITY_HINT_BLOCK = """\
+[Available Tool Packs]
+These tool packs are hidden by default but can be activated when needed:
+- web: Fetch web page content (when task involves URLs or web pages)
+- toolsmith: Create and manage custom tools (when explicitly requested)
+- workspace-maintenance: Move/copy/delete/glob workspace files (when organizing workspace)
+- multi-agent: Lightweight role-based delegation (when collaboration is needed)
+- job-followup: Inspect/wait/cancel running jobs (auto-activated when jobs exist)"""
+
 
 class ToolsModule(Module):
     """Tools module: four-tier tool system + role-based permission management."""
@@ -52,7 +105,7 @@ class ToolsModule(Module):
         super().on_attach(agent)
         self._is_admin = bool(agent.persona and agent.persona.is_admin)
 
-        # --- 1. Load built-in tools (globally shared: web_search, web_fetch) ---
+        # --- 1. Load built-in tools (globally shared: web_fetch; web_search unregistered) ---
         import llamagent.modules.tools.builtin as builtin
         self.common_registry = global_registry
         builtin.web_search._llm = agent.llm
@@ -124,6 +177,7 @@ class ToolsModule(Module):
                 parameters=info.parameters, tier=info.tier,
                 safety_level=info.safety_level,
                 path_extractor=None,  # web_search/web_fetch have no path extractors
+                pack=info.pack,
             )
         for _name, info in self.agent_registry._tools.items():
             if _name in self.agent._tools:
@@ -133,15 +187,31 @@ class ToolsModule(Module):
                 parameters=info.parameters, tier=info.tier,
                 safety_level=info.safety_level,
                 creator_id=info.creator_id,
+                pack=info.pack,
             )
 
     # ============================================================
-    # Pipeline hook: workspace guidelines injection (v1.5)
+    # Pipeline hooks
     # ============================================================
 
+    def on_input(self, user_input: str) -> str:
+        """Reset pack state at the start of each turn."""
+        self.agent._active_packs.clear()
+        return user_input
+
     def on_context(self, query: str, context: str) -> str:
-        """Inject workspace behavioral guidelines into LLM context."""
-        return f"{context}\n\n{WORKSPACE_GUIDE}" if context else WORKSPACE_GUIDE
+        """Evaluate state-driven packs and inject guidelines into LLM context."""
+        # Step 2: evaluate state-driven packs
+        self._evaluate_state_packs()
+        # Inject workspace guide + capability hints
+        guide = WORKSPACE_GUIDE + "\n\n" + CAPABILITY_HINT_BLOCK
+        return f"{context}\n\n{guide}" if context else guide
+
+    def _evaluate_state_packs(self):
+        """Activate packs based on current agent state."""
+        job_mod = self.agent.get_module("job")
+        if job_mod and getattr(job_mod, "service", None) and job_mod.service.list_jobs():
+            self.agent._active_packs.add("job-followup")
 
     def on_shutdown(self) -> None:
         """Clean up workspace session directory on agent shutdown."""
@@ -197,6 +267,7 @@ class ToolsModule(Module):
                 "root": {"type": "string", "description": "Root directory (default: workspace root)", "default": "."},
             }, "required": ["pattern"]},
             tier="common", safety_level=1,
+            pack="workspace-maintenance",
             path_extractor=lambda args: [ws.resolve_path(args.get("root", "."))],
         )
 
@@ -238,72 +309,103 @@ class ToolsModule(Module):
             path_extractor=lambda args: ws.resolve_paths(args["paths"]) if args.get("paths") else [],
         )
 
-        def _read_files(paths: list, with_line_numbers: bool = True) -> str:
+        def _read_files(paths: list, ranges: dict = None, with_line_numbers: bool = True, mode: str = "auto") -> str:
+            """Read files with automatic text/binary detection.
+
+            mode: "auto" (detect by extension/content), "text" (force text), "binary" (return base64).
+            """
             budget = getattr(self.agent.config, "max_observation_tokens", 2000)
             per_file = max(200, budget // max(len(paths), 1))
             results = []
             for p in paths:
                 resolved = ws.resolve_path(p)
                 try:
-                    with open(resolved, "r", encoding="utf-8", errors="ignore") as f:
-                        lines = f.readlines()
-                    content_lines = []
-                    char_count = 0
-                    truncated = False
-                    for i, line in enumerate(lines, 1):
-                        if char_count + len(line) > per_file:
-                            truncated = True
-                            break
-                        prefix = f"{i:>4}\t" if with_line_numbers else ""
-                        content_lines.append(f"{prefix}{line.rstrip()}")
-                        char_count += len(line)
-                    results.append({
-                        "path": p, "content": "\n".join(content_lines),
-                        "lines": len(lines), "truncated": truncated,
-                    })
+                    # Determine if file is text or binary
+                    force_binary = (mode == "binary")
+                    is_text = (mode == "text") or (not force_binary and _is_text_file(resolved))
+
+                    if force_binary:
+                        # Binary mode: return metadata + base64 content
+                        st = os.stat(resolved)
+                        max_binary_size = 50 * 1024 * 1024  # 50 MB
+                        if st.st_size > max_binary_size:
+                            results.append({
+                                "path": p, "error": f"File too large for binary read ({st.st_size} bytes, limit {max_binary_size})",
+                            })
+                            continue
+                        mime_type = mimetypes.guess_type(resolved)[0] or "application/octet-stream"
+                        with open(resolved, "rb") as f:
+                            raw = f.read()
+                        results.append({
+                            "path": p, "binary": True,
+                            "size": st.st_size, "mime": mime_type,
+                            "content_base64": base64.b64encode(raw).decode("ascii"),
+                        })
+                    elif not is_text:
+                        # Binary file in auto mode: return metadata only (no content dump)
+                        st = os.stat(resolved)
+                        mime_type = mimetypes.guess_type(resolved)[0] or "application/octet-stream"
+                        results.append({
+                            "path": p, "binary": True,
+                            "size": st.st_size, "mime": mime_type,
+                        })
+                    else:
+                        # Text file: read with line numbers and truncation
+                        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+                            all_lines = f.readlines()
+
+                        # Check if a specific range is requested for this file
+                        range_spec = (ranges or {}).get(p)
+                        if range_spec:
+                            parts = range_spec.split("-", 1)
+                            start = int(parts[0])
+                            end = int(parts[1]) if len(parts) > 1 else len(all_lines)
+                            selected = all_lines[max(0, start - 1):end]
+                            content_lines = []
+                            for i, line in enumerate(selected, start):
+                                prefix = f"{i:>4}\t" if with_line_numbers else ""
+                                content_lines.append(f"{prefix}{line.rstrip()}")
+                            results.append({
+                                "path": p, "content": "\n".join(content_lines),
+                                "lines": len(all_lines), "range": range_spec,
+                                "truncated": False,
+                            })
+                        else:
+                            content_lines = []
+                            char_count = 0
+                            truncated = False
+                            for i, line in enumerate(all_lines, 1):
+                                if char_count + len(line) > per_file:
+                                    truncated = True
+                                    break
+                                prefix = f"{i:>4}\t" if with_line_numbers else ""
+                                content_lines.append(f"{prefix}{line.rstrip()}")
+                                char_count += len(line)
+                            results.append({
+                                "path": p, "content": "\n".join(content_lines),
+                                "lines": len(all_lines), "truncated": truncated,
+                            })
                 except Exception as e:
                     results.append({"path": p, "error": str(e)})
             return json.dumps({"status": "success", "files": results}, ensure_ascii=False)
 
         self.agent.register_tool(
             name="read_files", func=_read_files,
-            description="Read one or more files with line numbers. Paths relative to workspace; use 'project:' prefix for project files.",
+            description=(
+                "Read one or more files. Text files return content with line numbers; "
+                "binary files return metadata (size, mime type). "
+                "Paths relative to workspace; use 'project:' prefix for project files. "
+                "Use 'ranges' to read specific line ranges. "
+                "Use mode='binary' to get base64 content of binary files."
+            ),
             parameters={"type": "object", "properties": {
                 "paths": {"type": "array", "items": {"type": "string"}, "description": "File paths to read"},
-                "with_line_numbers": {"type": "boolean", "description": "Include line numbers", "default": True},
+                "ranges": {"type": "object", "description": "Optional mapping of file path to 'start-end' line range string (e.g., {'main.py': '10-50'})"},
+                "with_line_numbers": {"type": "boolean", "description": "Include line numbers for text files", "default": True},
+                "mode": {"type": "string", "description": "Read mode: 'auto' (detect type), 'text' (force text), 'binary' (return base64)", "default": "auto"},
             }, "required": ["paths"]},
             tier="common", safety_level=1,
             path_extractor=lambda args: ws.resolve_paths(args.get("paths", [])),
-        )
-
-        def _read_ranges(file: str, ranges: list) -> str:
-            resolved = ws.resolve_path(file)
-            try:
-                with open(resolved, "r", encoding="utf-8", errors="ignore") as f:
-                    all_lines = f.readlines()
-                results = []
-                for r in ranges:
-                    start = r.get("start", 1)
-                    end = r.get("end", len(all_lines))
-                    selected = all_lines[max(0, start - 1):end]
-                    content = "".join(f"{i:>4}\t{line}" for i, line in enumerate(selected, start))
-                    results.append({"start": start, "end": end, "content": content.rstrip()})
-                return json.dumps({"status": "success", "file": file, "ranges": results}, ensure_ascii=False)
-            except Exception as e:
-                return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
-
-        self.agent.register_tool(
-            name="read_ranges", func=_read_ranges,
-            description="Read specific line ranges from a file. Paths relative to workspace; use 'project:' prefix for project files.",
-            parameters={"type": "object", "properties": {
-                "file": {"type": "string", "description": "File path"},
-                "ranges": {"type": "array", "items": {"type": "object", "properties": {
-                    "start": {"type": "integer", "description": "Start line (1-based)"},
-                    "end": {"type": "integer", "description": "End line (inclusive)"},
-                }}, "description": "List of line ranges to read"},
-            }, "required": ["file", "ranges"]},
-            tier="common", safety_level=1,
-            path_extractor=lambda args: [ws.resolve_path(args.get("file", ""))],
         )
 
         def _stat_paths(paths: list) -> str:
@@ -327,20 +429,31 @@ class ToolsModule(Module):
                 "paths": {"type": "array", "items": {"type": "string"}, "description": "Paths to stat"},
             }, "required": ["paths"]},
             tier="common", safety_level=1,
+            pack="workspace-maintenance",
             path_extractor=lambda args: ws.resolve_paths(args.get("paths", [])),
         )
 
         # --- Modification tools (safety_level=2) ---
 
-        def _write_files(files: dict) -> str:
+        def _write_files(files: dict, mode: str = "text") -> str:
+            """Write files to workspace. mode='text' (default) or 'binary' (base64-encoded content)."""
             written = []
             errors = []
             for path, content in files.items():
-                resolved = ws.resolve_path(path)
+                try:
+                    resolved = ws.resolve_path_workspace_only(path)
+                except ValueError as e:
+                    errors.append({"path": path, "error": str(e)})
+                    continue
                 try:
                     os.makedirs(os.path.dirname(resolved), exist_ok=True)
-                    with open(resolved, "w", encoding="utf-8") as f:
-                        f.write(content)
+                    if mode == "binary":
+                        raw = base64.b64decode(content)
+                        with open(resolved, "wb") as f:
+                            f.write(raw)
+                    else:
+                        with open(resolved, "w", encoding="utf-8") as f:
+                            f.write(content)
                     written.append(path)
                 except Exception as e:
                     errors.append({"path": path, "error": str(e)})
@@ -348,9 +461,13 @@ class ToolsModule(Module):
 
         self.agent.register_tool(
             name="write_files", func=_write_files,
-            description="Write one or more files to workspace. Keys are file paths, values are content strings.",
+            description=(
+                "Write one or more files to workspace. Keys are file paths, values are content strings. "
+                "Use mode='binary' to write base64-encoded binary content."
+            ),
             parameters={"type": "object", "properties": {
-                "files": {"type": "object", "description": "Mapping of file path -> content string"},
+                "files": {"type": "object", "description": "Mapping of file path -> content string (or base64 for binary mode)"},
+                "mode": {"type": "string", "description": "Write mode: 'text' (default) or 'binary' (base64-encoded)", "default": "text"},
             }, "required": ["files"]},
             tier="common", safety_level=2,
             path_extractor=lambda args: ws.resolve_paths(list(args.get("files", {}).keys())),
@@ -373,11 +490,15 @@ class ToolsModule(Module):
                 "content": {"type": "string", "description": "File content", "default": ""},
             }},
             tier="common", safety_level=1,
+            pack="workspace-maintenance",
         )
 
         def _move_path(src: str, dst: str) -> str:
-            resolved_src = ws.resolve_path(src)
-            resolved_dst = ws.resolve_path(dst)
+            try:
+                resolved_src = ws.resolve_path_workspace_only(src)
+                resolved_dst = ws.resolve_path_workspace_only(dst)
+            except ValueError as e:
+                return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
             try:
                 shutil.move(resolved_src, resolved_dst)
                 return json.dumps({"status": "success", "src": src, "dst": dst}, ensure_ascii=False)
@@ -392,12 +513,16 @@ class ToolsModule(Module):
                 "dst": {"type": "string", "description": "Destination path"},
             }, "required": ["src", "dst"]},
             tier="common", safety_level=2,
+            pack="workspace-maintenance",
             path_extractor=lambda args: [ws.resolve_path(args.get("src", "")), ws.resolve_path(args.get("dst", ""))],
         )
 
         def _copy_path(src: str, dst: str) -> str:
-            resolved_src = ws.resolve_path(src)
-            resolved_dst = ws.resolve_path(dst)
+            try:
+                resolved_src = ws.resolve_path_workspace_only(src)
+                resolved_dst = ws.resolve_path_workspace_only(dst)
+            except ValueError as e:
+                return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
             try:
                 if os.path.isdir(resolved_src):
                     shutil.copytree(resolved_src, resolved_dst)
@@ -416,11 +541,15 @@ class ToolsModule(Module):
                 "dst": {"type": "string", "description": "Destination path"},
             }, "required": ["src", "dst"]},
             tier="common", safety_level=2,
+            pack="workspace-maintenance",
             path_extractor=lambda args: [ws.resolve_path(args.get("src", "")), ws.resolve_path(args.get("dst", ""))],
         )
 
         def _delete_path(path: str) -> str:
-            resolved = ws.resolve_path(path)
+            try:
+                resolved = ws.resolve_path_workspace_only(path)
+            except ValueError as e:
+                return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
             try:
                 if os.path.isdir(resolved):
                     shutil.rmtree(resolved)
@@ -439,6 +568,7 @@ class ToolsModule(Module):
                 "path": {"type": "string", "description": "Path to delete"},
             }, "required": ["path"]},
             tier="common", safety_level=2,
+            pack="workspace-maintenance",
             path_extractor=lambda args: [ws.resolve_path(args.get("path", ""))],
         )
 
@@ -447,16 +577,19 @@ class ToolsModule(Module):
     # ============================================================
 
     def _register_project_sync_tools(self):
-        """Register project sync tools (apply_patch, preview_patch, etc.)."""
+        """Register project sync tools (apply_patch, sync, revert)."""
         ps = self.project_sync_service
 
-        def _apply_patch(target: str, edits: list) -> str:
-            result = ps.apply_patch(target, edits)
+        def _apply_patch(target: str, edits: list, preview: bool = False) -> str:
+            if preview:
+                result = ps.preview_patch(target, edits)
+            else:
+                result = ps.apply_patch(target, edits)
             return json.dumps(result, ensure_ascii=False)
 
         self.agent.register_tool(
             name="apply_patch", func=_apply_patch,
-            description="Apply structured search/replace edits to a project file. Atomic: all edits succeed or none are written. Target path is relative to project root.",
+            description="Apply structured search/replace edits to a project file. Atomic: all edits succeed or none are written. Target path is relative to project root. Set preview=true to validate edits without writing.",
             parameters={"type": "object", "properties": {
                 "target": {"type": "string", "description": "Target file path relative to project root"},
                 "edits": {"type": "array", "items": {"type": "object", "properties": {
@@ -464,44 +597,10 @@ class ToolsModule(Module):
                     "replace": {"type": "string", "description": "Replacement text"},
                     "expected_count": {"type": "integer", "description": "Expected match count (default: 1)", "default": 1},
                 }, "required": ["match", "replace"]}, "description": "List of search/replace operations"},
+                "preview": {"type": "boolean", "description": "If true, validate edits without writing to disk", "default": False},
             }, "required": ["target", "edits"]},
             tier="common", safety_level=2,
             path_extractor=lambda args: [ps.resolve_project_path(args.get("target", ""))],
-        )
-
-        def _preview_patch(target: str, edits: list) -> str:
-            result = ps.preview_patch(target, edits)
-            return json.dumps(result, ensure_ascii=False)
-
-        self.agent.register_tool(
-            name="preview_patch", func=_preview_patch,
-            description="Preview the result of applying edits without writing. Target path is relative to project root.",
-            parameters={"type": "object", "properties": {
-                "target": {"type": "string", "description": "Target file path relative to project root"},
-                "edits": {"type": "array", "items": {"type": "object", "properties": {
-                    "match": {"type": "string", "description": "Exact text to find"},
-                    "replace": {"type": "string", "description": "Replacement text"},
-                    "expected_count": {"type": "integer", "description": "Expected match count (default: 1)", "default": 1},
-                }, "required": ["match", "replace"]}, "description": "List of search/replace operations"},
-            }, "required": ["target", "edits"]},
-            tier="common", safety_level=1,
-            path_extractor=lambda args: [ps.resolve_project_path(args.get("target", ""))],
-        )
-
-        def _replace_block(file: str, old: str, new: str) -> str:
-            result = ps.replace_block(file, old, new)
-            return json.dumps(result, ensure_ascii=False)
-
-        self.agent.register_tool(
-            name="replace_block", func=_replace_block,
-            description="Replace a text block in a project file. Shorthand for apply_patch with a single edit. Target relative to project root.",
-            parameters={"type": "object", "properties": {
-                "file": {"type": "string", "description": "Target file path relative to project root"},
-                "old": {"type": "string", "description": "Text to find (must match exactly once)"},
-                "new": {"type": "string", "description": "Replacement text"},
-            }, "required": ["file", "old", "new"]},
-            tier="common", safety_level=2,
-            path_extractor=lambda args: [ps.resolve_project_path(args.get("file", ""))],
         )
 
         def _sync_workspace_to_project(paths: list = None, mode: str = "auto") -> str:
@@ -560,6 +659,7 @@ class ToolsModule(Module):
             },
             tier="default",
             safety_level=2,
+            pack="toolsmith",
         )
 
         self.agent_registry.register(
@@ -569,6 +669,7 @@ class ToolsModule(Module):
             parameters={"type": "object", "properties": {}},
             tier="default",
             safety_level=1,
+            pack="toolsmith",
         )
 
         self.agent_registry.register(
@@ -582,6 +683,7 @@ class ToolsModule(Module):
             },
             tier="default",
             safety_level=2,
+            pack="toolsmith",
         )
 
         self.agent_registry.register(
@@ -591,6 +693,7 @@ class ToolsModule(Module):
             parameters={"type": "object", "properties": {}},
             tier="default",
             safety_level=1,
+            pack="toolsmith",
         )
 
         # --- Admin-only (admin tier) ---
@@ -610,6 +713,7 @@ class ToolsModule(Module):
                 },
                 tier="admin",
                 safety_level=2,
+                pack="toolsmith",
             )
 
             self.agent_registry.register(
@@ -619,6 +723,7 @@ class ToolsModule(Module):
                 parameters={"type": "object", "properties": {}},
                 tier="admin",
                 safety_level=1,
+                pack="toolsmith",
             )
 
             self.agent_registry.register(
@@ -635,6 +740,7 @@ class ToolsModule(Module):
                 },
                 tier="admin",
                 safety_level=2,
+                pack="toolsmith",
             )
 
     # ============================================================

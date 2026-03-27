@@ -1,8 +1,9 @@
 """
-JobModule flow tests: managed command execution with lifecycle control.
+JobModule flow tests: v1.6 managed command execution with lifecycle control.
 
-Tests cover tool registration, synchronous and asynchronous job execution,
-status polling, cancellation, error handling, and shutdown behavior.
+Tests cover tool registration (4 tools), pack declarations, synchronous and
+asynchronous job execution, inspect_job unified query, cancellation, pack
+activation on start_job, error handling, and shutdown behavior.
 """
 
 import json
@@ -66,18 +67,35 @@ def _call_tool_json(agent, name, **kwargs):
 # ============================================================
 
 class TestJobToolRegistration:
-    """JobModule registers all six job tools on attach."""
+    """JobModule registers 4 tools: start_job (default) + 3 pack tools."""
 
     def test_job_module_registers_all_tools(self, bare_agent, tmp_path):
-        """All 6 job tools appear in agent._tools after registration."""
+        """All 4 job tools appear in agent._tools after registration."""
         _make_agent_with_jobs(bare_agent, tmp_path)
 
-        expected_tools = [
-            "start_job", "wait_job", "job_status",
-            "tail_job", "cancel_job", "collect_artifacts",
-        ]
+        expected_tools = ["start_job", "inspect_job", "wait_job", "cancel_job"]
         for tool_name in expected_tools:
             assert tool_name in bare_agent._tools, f"job tool '{tool_name}' not registered"
+
+    def test_start_job_has_no_pack(self, bare_agent, tmp_path):
+        """start_job is in the default public surface (no pack)."""
+        _make_agent_with_jobs(bare_agent, tmp_path)
+        assert bare_agent._tools["start_job"].get("pack") is None
+
+    def test_followup_tools_have_pack(self, bare_agent, tmp_path):
+        """inspect_job, wait_job, cancel_job are in the job-followup pack."""
+        _make_agent_with_jobs(bare_agent, tmp_path)
+
+        for tool_name in ["inspect_job", "wait_job", "cancel_job"]:
+            assert bare_agent._tools[tool_name].get("pack") == "job-followup"
+
+    def test_old_tools_removed(self, bare_agent, tmp_path):
+        """Old tools (job_status, tail_job, collect_artifacts) are no longer registered."""
+        _make_agent_with_jobs(bare_agent, tmp_path)
+
+        removed = ["job_status", "tail_job", "collect_artifacts"]
+        for tool_name in removed:
+            assert tool_name not in bare_agent._tools
 
 
 # ============================================================
@@ -97,44 +115,62 @@ class TestSyncExecution:
 
 
 # ============================================================
-# Asynchronous execution
+# Asynchronous execution + inspect_job
 # ============================================================
 
 class TestAsyncExecution:
-    """start_job with wait=False returns job_id for later polling."""
+    """start_job with wait=False returns job_id for later inspection."""
 
-    def test_start_job_wait_false_then_wait(self, bare_agent, tmp_path):
-        """Async start returns job_id; wait_job returns completed output."""
+    def test_start_job_wait_false_then_inspect(self, bare_agent, tmp_path):
+        """Async start returns job_id; inspect_job returns status and output."""
         _make_agent_with_jobs(bare_agent, tmp_path)
 
-        # Start async
+        # Need to activate pack since inspect_job is in job-followup pack
+        bare_agent._active_packs.add("job-followup")
+
         start_result = _call_tool_json(
             bare_agent, "start_job", command="echo async_output", wait=False,
         )
         assert start_result["status"] == "started"
         job_id = start_result["job_id"]
-        assert job_id
 
-        # Wait for completion
+        # Wait for completion first
         wait_result = _call_tool_json(bare_agent, "wait_job", job_id=job_id)
         assert wait_result["status"] in ("completed", "success")
-        assert "async_output" in wait_result.get("output", "")
 
-    def test_job_status(self, bare_agent, tmp_path):
-        """job_status reports 'running' for a still-active job."""
+        # Then inspect the completed job
+        inspect_result = _call_tool_json(bare_agent, "inspect_job", job_id=job_id)
+        assert inspect_result["status"] in ("completed", "success")
+        assert "async_output" in inspect_result.get("output", "")
+        assert "elapsed_seconds" in inspect_result
+        assert "artifacts" in inspect_result
+
+
+# ============================================================
+# Pack activation
+# ============================================================
+
+class TestJobPackActivation:
+    """start_job activates job-followup pack for same-turn visibility."""
+
+    def test_start_job_sync_activates_pack(self, bare_agent, tmp_path):
+        """Synchronous start_job adds job-followup to _active_packs."""
         _make_agent_with_jobs(bare_agent, tmp_path)
 
-        start_result = _call_tool_json(
-            bare_agent, "start_job", command="sleep 2", wait=False,
-        )
-        job_id = start_result["job_id"]
+        assert "job-followup" not in bare_agent._active_packs
+        _call_tool_json(bare_agent, "start_job", command="echo test", wait=True)
+        assert "job-followup" in bare_agent._active_packs
 
-        # Check status immediately — should be running
-        status_result = _call_tool_json(bare_agent, "job_status", job_id=job_id)
-        assert status_result["status"] == "running"
+    def test_start_job_async_activates_pack(self, bare_agent, tmp_path):
+        """Asynchronous start_job adds job-followup to _active_packs."""
+        _make_agent_with_jobs(bare_agent, tmp_path)
 
-        # Clean up: cancel the long-running job
-        _call_tool(bare_agent, "cancel_job", job_id=job_id)
+        assert "job-followup" not in bare_agent._active_packs
+        result = _call_tool_json(bare_agent, "start_job", command="sleep 1", wait=False)
+        assert "job-followup" in bare_agent._active_packs
+
+        # Clean up
+        _call_tool(bare_agent, "cancel_job", job_id=result["job_id"])
 
 
 # ============================================================
@@ -155,7 +191,6 @@ class TestJobCancellation:
 
         cancel_result = _call_tool_json(bare_agent, "cancel_job", job_id=job_id)
         assert cancel_result["status"] == "cancelled"
-        assert cancel_result["job_id"] == job_id
 
 
 # ============================================================
@@ -189,5 +224,4 @@ class TestJobShutdown:
             bare_agent, "start_job", command="sleep 5", wait=False,
         )
 
-        # Shutdown should terminate the job gracefully
         mod.on_shutdown()

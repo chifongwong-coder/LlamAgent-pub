@@ -1,13 +1,11 @@
 """
 JobModule: managed command execution with lifecycle control.
 
-Registers six tools for the agent:
-- start_job:          Start a command (synchronous or asynchronous)
-- wait_job:           Wait for an async job to complete
-- job_status:         Check the current status of a job
-- tail_job:           Read recent output from a job
-- cancel_job:         Cancel a running job
-- collect_artifacts:  List files created/modified during a job
+Registers four tools for the agent:
+- start_job:     Start a command (synchronous or asynchronous)
+- inspect_job:   Non-blocking job inspection (status, output, artifacts)
+- wait_job:      Wait for an async job to complete
+- cancel_job:    Cancel a running job
 
 Hard dependency: SandboxModule (provides agent.tool_executor for execution).
 Without SandboxModule, command execution is unavailable (secure by default).
@@ -39,8 +37,8 @@ class JobModule(Module):
     Job system module: managed command execution with lifecycle control.
 
     Delegates command execution to SandboxModule's ToolExecutor backend.
-    Provides lifecycle management (wait, status, tail, cancel, artifacts). Supports both synchronous (wait=True) and
-    asynchronous (wait=False) execution modes.
+    Provides lifecycle management (inspect, wait, cancel).
+    Supports both synchronous (wait=True) and asynchronous (wait=False) execution modes.
     """
 
     name = "job"
@@ -50,7 +48,7 @@ class JobModule(Module):
         self.service: JobService | None = None
 
     def on_attach(self, agent) -> None:
-        """Initialize JobService and register all six job tools."""
+        """Initialize JobService and register all four job tools."""
         super().on_attach(agent)
 
         # Hard dependency: SandboxModule must provide tool_executor
@@ -103,7 +101,27 @@ class JobModule(Module):
             path_extractor=lambda args: [self._resolve_cwd(args.get("cwd", "workspace"))],
         )
 
-        # --- wait_job (sl=1, common) ---
+        # --- inspect_job (sl=1, common, pack=job-followup) ---
+        agent.register_tool(
+            name="inspect_job",
+            func=self._inspect_job,
+            description="Non-blocking job inspection: returns status, output excerpt, and artifact summary",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "job_id": {
+                        "type": "string",
+                        "description": "The job ID to inspect",
+                    },
+                },
+                "required": ["job_id"],
+            },
+            tier="common",
+            safety_level=1,
+            pack="job-followup",
+        )
+
+        # --- wait_job (sl=1, common, pack=job-followup) ---
         agent.register_tool(
             name="wait_job",
             func=self._wait_job,
@@ -120,51 +138,10 @@ class JobModule(Module):
             },
             tier="common",
             safety_level=1,
+            pack="job-followup",
         )
 
-        # --- job_status (sl=1, common) ---
-        agent.register_tool(
-            name="job_status",
-            func=self._job_status,
-            description="Check the current status of a job (running/completed/failed/timeout)",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "job_id": {
-                        "type": "string",
-                        "description": "The job ID to check",
-                    },
-                },
-                "required": ["job_id"],
-            },
-            tier="common",
-            safety_level=1,
-        )
-
-        # --- tail_job (sl=1, common) ---
-        agent.register_tool(
-            name="tail_job",
-            func=self._tail_job,
-            description="Read the last N lines of stdout and stderr from a job",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "job_id": {
-                        "type": "string",
-                        "description": "The job ID to read output from",
-                    },
-                    "lines": {
-                        "type": "integer",
-                        "description": "Number of recent lines to return (default: 200)",
-                    },
-                },
-                "required": ["job_id"],
-            },
-            tier="common",
-            safety_level=1,
-        )
-
-        # --- cancel_job (sl=2, common) ---
+        # --- cancel_job (sl=2, common, pack=job-followup) ---
         agent.register_tool(
             name="cancel_job",
             func=self._cancel_job,
@@ -181,25 +158,7 @@ class JobModule(Module):
             },
             tier="common",
             safety_level=2,
-        )
-
-        # --- collect_artifacts (sl=1, common) ---
-        agent.register_tool(
-            name="collect_artifacts",
-            func=self._collect_artifacts,
-            description="List files in the job's working directory that were created or modified during job execution",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "job_id": {
-                        "type": "string",
-                        "description": "The job ID whose artifacts to collect",
-                    },
-                },
-                "required": ["job_id"],
-            },
-            tier="common",
-            safety_level=1,
+            pack="job-followup",
         )
 
     def on_shutdown(self) -> None:
@@ -307,6 +266,7 @@ class JobModule(Module):
             if orig_len > max_len:
                 result = result[:max_len] + f"\n...(output truncated, total {orig_len} characters)"
 
+            self.agent._active_packs.add("job-followup")
             return json.dumps({
                 "status": "success",
                 "command": command,
@@ -323,10 +283,45 @@ class JobModule(Module):
                     "reason": str(e),
                 }, ensure_ascii=False)
 
+            self.agent._active_packs.add("job-followup")
             return json.dumps({
                 "job_id": handle.job_id,
                 "status": "started",
             }, ensure_ascii=False)
+
+    def _inspect_job(self, job_id: str) -> str:
+        """Non-blocking job inspection: status, output excerpt, and artifacts."""
+        handle = self.service.get_job(job_id)
+        if handle is None:
+            return json.dumps({
+                "status": "error",
+                "reason": f"Job '{job_id}' not found",
+            }, ensure_ascii=False)
+
+        status = handle.poll()
+        elapsed = time.time() - handle.start_time
+
+        # Output: last 50 lines
+        output = handle.read_output(50)
+        if not output and status == "running":
+            output = "(job still running, output not yet available)"
+
+        # Exit code (only meaningful when completed)
+        exit_code = getattr(handle, "_exit_code", None)
+
+        # Artifacts
+        artifacts = self._collect_artifact_list(handle)
+
+        result = {
+            "job_id": handle.job_id,
+            "status": status,
+            "command": handle.command,
+            "elapsed_seconds": round(elapsed, 1),
+            "exit_code": exit_code,
+            "output": output,
+            "artifacts": artifacts,
+        }
+        return json.dumps(result, ensure_ascii=False)
 
     def _wait_job(self, job_id: str) -> str:
         """Wait for an async job to complete and return its output."""
@@ -353,39 +348,6 @@ class JobModule(Module):
             "output": output,
         }, ensure_ascii=False)
 
-    def _job_status(self, job_id: str) -> str:
-        """Check the current status of a job."""
-        handle = self.service.get_job(job_id)
-        if handle is None:
-            return json.dumps({
-                "status": "error",
-                "reason": f"Job '{job_id}' not found",
-            }, ensure_ascii=False)
-
-        elapsed = time.time() - handle.start_time
-        return json.dumps({
-            "job_id": handle.job_id,
-            "status": handle.poll(),
-            "elapsed_seconds": round(elapsed, 1),
-        }, ensure_ascii=False)
-
-    def _tail_job(self, job_id: str, lines: int = 200) -> str:
-        """Read recent output from a job."""
-        handle = self.service.get_job(job_id)
-        if handle is None:
-            return json.dumps({
-                "status": "error",
-                "reason": f"Job '{job_id}' not found",
-            }, ensure_ascii=False)
-
-        output = handle.read_output(lines)
-        status = handle.poll()
-        return json.dumps({
-            "job_id": handle.job_id,
-            "status": status,
-            "output": output if output else "(job still running, output not yet available)" if status == "running" else "",
-        }, ensure_ascii=False)
-
     def _cancel_job(self, job_id: str) -> str:
         """Terminate a running job."""
         handle = self.service.get_job(job_id)
@@ -408,15 +370,17 @@ class JobModule(Module):
             "status": "cancelled" if cancelled else "already_completed",
         }, ensure_ascii=False)
 
-    def _collect_artifacts(self, job_id: str) -> str:
-        """List files created or modified in the job's cwd during execution."""
-        handle = self.service.get_job(job_id)
-        if handle is None:
-            return json.dumps({
-                "status": "error",
-                "reason": f"Job '{job_id}' not found",
-            }, ensure_ascii=False)
+    # ================================================================
+    # Private helpers
+    # ================================================================
 
+    def _collect_artifact_list(self, handle) -> list[dict]:
+        """
+        Collect files created or modified in the job's cwd during execution.
+
+        Returns a list of dicts with path, size, and mtime fields,
+        sorted by modification time (most recent first).
+        """
         cwd = handle.cwd
         start_time = handle.start_time
         artifacts = []
@@ -440,11 +404,7 @@ class JobModule(Module):
 
         # Sort by modification time (most recent first)
         artifacts.sort(key=lambda a: a["mtime"], reverse=True)
-
-        return json.dumps({
-            "job_id": handle.job_id,
-            "artifacts": artifacts,
-        }, ensure_ascii=False)
+        return artifacts
 
     # ================================================================
     # Profile resolution
