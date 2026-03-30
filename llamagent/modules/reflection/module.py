@@ -53,14 +53,16 @@ class ReflectionModule(Module):
 
         self.engine = ReflectionEngine(llm=agent.llm, config=agent.config)
 
-        # Lesson store: graceful degradation when chromadb is not installed
+        # Lesson store: use shared retrieval pipeline via factory
         try:
-            store = LessonStore(persist_dir=agent.config.chroma_dir)
-            # Check if chromadb is actually available (LessonStore checks internally)
-            if store._available:
-                self.lesson_store = store
-            else:
-                self.lesson_store = None
+            from llamagent.modules.retrieval.factory import create_pipeline
+            pipeline = create_pipeline(
+                config=agent.config,
+                collection_name="lessons",
+                enable_lexical=False,
+                enable_reranker=False,
+            )
+            self.lesson_store = LessonStore(pipeline=pipeline)
         except Exception as e:
             logger.info("Lesson store initialization skipped: %s", e)
             self.lesson_store = None
