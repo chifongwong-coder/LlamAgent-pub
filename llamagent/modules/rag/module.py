@@ -4,11 +4,18 @@ RAG Module: provides knowledge retrieval augmentation based on private documents
 Tool-based (Agentic RAG) mode:
 - on_attach registers the search_knowledge tool; the model autonomously decides when to retrieve
 - on_context only injects a knowledge base usage guide (guiding the model to use the tool, not auto-retrieving)
+- Uses the shared retrieval layer (RetrievalPipeline) for vector, lexical, and hybrid search
 - Graceful degradation when chromadb is not installed
 """
 
+import logging
+import os
+
 from llamagent.core.agent import Module
+from llamagent.modules.rag.chunker import DocumentChunker
 from llamagent.modules.rag.retriever import RAGRetriever
+
+logger = logging.getLogger(__name__)
 
 # Knowledge base usage guide injected into context, letting the model know it has retrieval capabilities
 RAG_GUIDE = """\
@@ -23,7 +30,7 @@ class RAGModule(Module):
     RAG Knowledge Retrieval Module.
 
     Tool-based integration (Agentic RAG):
-    - on_attach: initialize RAGRetriever + register search_knowledge tool
+    - on_attach: initialize RetrievalPipeline + DocumentChunker + RAGRetriever + register search_knowledge tool
     - on_context: inject knowledge base usage guide (no longer auto-retrieves)
     """
 
@@ -34,17 +41,56 @@ class RAGModule(Module):
         self.retriever: RAGRetriever | None = None
 
     def on_attach(self, agent):
-        """Initialize the retriever + register search_knowledge tool."""
+        """Initialize the retrieval pipeline, chunker, retriever, and register tools."""
         super().on_attach(agent)
         cfg = agent.config
+
+        # Build the retrieval pipeline components
+        pipeline = self._build_pipeline(agent)
+        if pipeline is None:
+            logger.warning("[RAG] Pipeline initialization failed; RAG will be unavailable")
+
+        # Create chunker and retriever
+        chunker = DocumentChunker(chunk_size=cfg.chunk_size)
         self.retriever = RAGRetriever(
-            persist_dir=cfg.chroma_dir,
+            pipeline=pipeline,
+            chunker=chunker,
             top_k=cfg.rag_top_k,
-            chunk_size=cfg.chunk_size,
+            mode=cfg.rag_retrieval_mode,
         )
 
         # Register search_knowledge tool
         self._register_tools()
+
+    def _build_pipeline(self, agent):
+        """
+        Build the RetrievalPipeline via factory.
+
+        Returns None if required backends are not installed (graceful degradation).
+        RAG uses full hybrid retrieval (vector + lexical + optional reranker).
+        """
+        try:
+            from llamagent.modules.retrieval.factory import create_pipeline
+        except ImportError:
+            logger.warning(
+                "[RAG] Retrieval layer not available. "
+                "Ensure llamagent.modules.retrieval is properly installed."
+            )
+            return None
+
+        cfg = agent.config
+        try:
+            return create_pipeline(
+                config=cfg,
+                collection_name="llamagent_docs",
+                enable_lexical=True,
+                lexical_name="rag_fts",
+                llm=agent.llm,
+                enable_reranker=getattr(cfg, "rag_rerank_enabled", False),
+            )
+        except Exception as e:
+            logger.warning("[RAG] Failed to build retrieval pipeline: %s", e)
+            return None
 
     def _register_tools(self):
         """Register search_knowledge to the Agent (tier=default)."""
@@ -117,13 +163,13 @@ class RAGModule(Module):
     def load_document(self, path: str) -> int:
         """Load a single document into the knowledge base. Returns the number of chunks."""
         if self.retriever is None:
-            print("[RAG] Module has not been initialized")
+            logger.warning("[RAG] Module has not been initialized")
             return 0
         return self.retriever.load_document(path)
 
     def load_directory(self, path: str) -> int:
         """Batch load documents from a directory into the knowledge base. Returns the total number of chunks."""
         if self.retriever is None:
-            print("[RAG] Module has not been initialized")
+            logger.warning("[RAG] Module has not been initialized")
             return 0
         return self.retriever.load_directory(path)

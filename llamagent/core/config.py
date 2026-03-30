@@ -96,8 +96,22 @@ class Config:
         # Maximum tokens for a single tool return result; truncated if exceeded
         self.max_observation_tokens: int = 2000
 
+        # ==================== Retrieval (shared) ====================
+        # Embedding provider: "chromadb" (default) / future: "openai", "bge", etc.
+        self.embedding_provider: str = os.getenv("EMBEDDING_PROVIDER", "chromadb")
+        # Embedding model name (provider-specific; empty = provider default)
+        self.embedding_model: str = os.getenv("EMBEDDING_MODEL", "")
+        # Retrieval layer persistence directory (shared by Memory, RAG, Reflection)
+        # Each backend implementation manages its own files under this directory.
+        self.retrieval_persist_dir: str = os.getenv(
+            "RETRIEVAL_PERSIST_DIR",
+            os.getenv("CHROMA_DIR", str(BASE_DIR / "data" / "chroma")),  # backward compat
+        )
+        # Backward compatibility alias
+        self.chroma_dir: str = self.retrieval_persist_dir
+
         # ==================== Memory ====================
-        # Memory mode: "off" (disabled) / "autonomous" (model-driven) / "hybrid" (autonomous + forced save per turn)
+        # Memory write mode: "off" / "autonomous" / "hybrid"
         self.memory_mode: str = os.getenv("MEMORY_MODE", "off")
         if self.memory_mode not in ("off", "autonomous", "hybrid"):
             logger.warning(
@@ -106,18 +120,31 @@ class Config:
             )
             self.memory_mode = "off"
 
+        # Memory read mode: "off" / "tool" / "auto"
+        self.memory_recall_mode: str = os.getenv("MEMORY_RECALL_MODE", "tool")
+        if self.memory_recall_mode not in ("off", "tool", "auto"):
+            logger.warning(
+                "memory_recall_mode='%s' is invalid, falling back to 'tool'. Valid values: off / tool / auto",
+                self.memory_recall_mode,
+            )
+            self.memory_recall_mode = "tool"
+
+        # Memory fact extraction fallback: "text" (store as plain text) / "drop" (discard)
+        self.memory_fact_fallback: str = os.getenv("MEMORY_FACT_FALLBACK", "text")
+        # Auto recall settings
+        self.memory_recall_top_k: int = _safe_int("MEMORY_RECALL_TOP_K", 5)
+        self.memory_auto_recall_max_inject: int = _safe_int("MEMORY_AUTO_RECALL_MAX_INJECT", 3)
+        self.memory_auto_recall_threshold: float = _safe_float("MEMORY_AUTO_RECALL_THRESHOLD", 0.35)
+
         # ==================== RAG ====================
-        # ChromaDB persistence directory
-        # Environment variable: CHROMA_DIR
-        self.chroma_dir: str = os.getenv("CHROMA_DIR", str(BASE_DIR / "data" / "chroma"))
-
         # Number of retrieval results to return
-        # Environment variable: RAG_TOP_K
         self.rag_top_k: int = _safe_int("RAG_TOP_K", 3)
-
         # Document chunk size
-        # Environment variable: CHUNK_SIZE
         self.chunk_size: int = _safe_int("CHUNK_SIZE", 500)
+        # Retrieval mode: "vector" / "lexical" / "hybrid"
+        self.rag_retrieval_mode: str = os.getenv("RAG_RETRIEVAL_MODE", "hybrid")
+        # Enable LLM-based reranking after retrieval
+        self.rag_rerank_enabled: bool = os.getenv("RAG_RERANK", "true").lower() == "true"
 
         # ==================== Persona ====================
         # Persona definition JSON file path

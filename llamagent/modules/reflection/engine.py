@@ -3,7 +3,7 @@ Reflection engine and lesson store.
 
 Core components:
 - ReflectionEngine: evaluate response quality, analyze root causes of failures
-- LessonStore: ChromaDB-based lesson persistence (optional dependency, graceful degradation when not installed)
+- LessonStore: lesson persistence via shared RetrievalPipeline (graceful degradation when not available)
 
 Responsibility boundaries:
 - The reflection module is only responsible for evaluation and lesson management, not retries
@@ -196,57 +196,19 @@ Answer concisely, return JSON:
 
 class LessonStore:
     """
-    Lesson persistence store: semantic retrieval based on ChromaDB.
+    Lesson persistence store via shared retrieval pipeline.
 
     Not isolated by persona (all roles share the lesson store), collection name is fixed as "lessons".
-    Silently degrades when chromadb is not installed; lesson saving and retrieval become unavailable.
+    Silently degrades when the retrieval layer is not available.
     """
 
-    def __init__(self, persist_dir: str = "data/chroma"):
+    def __init__(self, pipeline=None):
         """
         Args:
-            persist_dir: ChromaDB persistence directory
-
-        Raises:
-            ImportError: Raised when chromadb is not installed (caught by caller)
+            pipeline: RetrievalPipeline instance (from factory). None = unavailable.
         """
-        self.persist_dir = persist_dir
-        self._client = None
-        self._collection = None
-        self._available = False
-
-        # Lazy initialization: connect to ChromaDB only on first use
-        try:
-            import chromadb  # noqa: F401
-            self._available = True
-        except ImportError:
-            logger.info("chromadb not installed, lesson store functionality unavailable")
-
-    def _ensure_client(self) -> bool:
-        """
-        Lazy initialization of ChromaDB client.
-
-        Returns:
-            Whether initialization was successful
-        """
-        if self._collection is not None:
-            return True
-
-        if not self._available:
-            return False
-
-        try:
-            import chromadb
-            self._client = chromadb.PersistentClient(path=self.persist_dir)
-            self._collection = self._client.get_or_create_collection(name="lessons")
-            return True
-        except ImportError:
-            self._available = False
-            logger.info("chromadb not installed, lesson store functionality unavailable")
-            return False
-        except Exception as e:
-            logger.warning("ChromaDB initialization failed: %s", e)
-            return False
+        self._pipeline = pipeline
+        self._available = pipeline is not None
 
     def save_lesson(
         self,
@@ -266,7 +228,7 @@ class LessonStore:
             improvement:       Improvement strategy (empty means no effective improvement available)
             tags:              Tag list
         """
-        if not self._ensure_client():
+        if not self._available:
             logger.debug("Lesson store unavailable, skipping save")
             return
 
@@ -280,7 +242,7 @@ class LessonStore:
             f"{task}:{error_description}:{datetime.now().isoformat()}".encode()
         ).hexdigest()
 
-        # Metadata (ChromaDB requires values to be str/int/float/bool)
+        # Metadata (open dict — all values must be str/int/float/bool for ChromaDB compat)
         metadata = {
             "task": task[:500],
             "error_description": error_description[:500],
@@ -291,11 +253,7 @@ class LessonStore:
         }
 
         try:
-            self._collection.upsert(
-                ids=[lesson_id],
-                documents=[lesson_text],
-                metadatas=[metadata],
-            )
+            self._pipeline.save(lesson_id, lesson_text, metadata)
             logger.info("Lesson saved: %s", error_description[:60])
         except Exception as e:
             logger.warning("Failed to save lesson: %s", e)
@@ -312,44 +270,32 @@ class LessonStore:
             List of lessons, each containing task / error_description / root_cause /
             improvement / tags / relevance_score / created_at
         """
-        if not self._ensure_client():
+        if not self._available:
             return []
 
         try:
-            count = self._collection.count()
-            if count == 0:
-                return []
-
-            results = self._collection.query(
-                query_texts=[query],
-                n_results=min(top_k, count),
-            )
+            results = self._pipeline.search(query, top_k, mode="vector")
         except Exception as e:
             logger.warning("Lesson retrieval failed: %s", e)
             return []
 
         lessons = []
-        if results and results.get("metadatas"):
-            for i, metadata in enumerate(results["metadatas"][0]):
-                distance = (
-                    results["distances"][0][i]
-                    if results.get("distances")
-                    else 0
-                )
-                try:
-                    tags = json.loads(metadata.get("tags", "[]"))
-                except (json.JSONDecodeError, TypeError):
-                    tags = []
+        for r in results:
+            metadata = r.get("metadata", {})
+            try:
+                tags = json.loads(metadata.get("tags", "[]"))
+            except (json.JSONDecodeError, TypeError):
+                tags = []
 
-                lessons.append({
-                    "task": metadata.get("task", ""),
-                    "error_description": metadata.get("error_description", ""),
-                    "root_cause": metadata.get("root_cause", ""),
-                    "improvement": metadata.get("improvement", ""),
-                    "tags": tags,
-                    "relevance_score": round(1 / (1 + distance), 4),
-                    "created_at": metadata.get("created_at", ""),
-                })
+            lessons.append({
+                "task": metadata.get("task", ""),
+                "error_description": metadata.get("error_description", ""),
+                "root_cause": metadata.get("root_cause", ""),
+                "improvement": metadata.get("improvement", ""),
+                "tags": tags,
+                "relevance_score": r.get("score", 0),
+                "created_at": metadata.get("created_at", ""),
+            })
 
         return lessons
 

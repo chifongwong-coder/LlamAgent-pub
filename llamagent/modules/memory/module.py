@@ -1,113 +1,219 @@
 """
-MemoryModule: lets the model autonomously decide when to save and retrieve memories via tools.
+MemoryModule: structured long-term memory with fact extraction, merging, and auto-recall.
 
-Three modes:
-- off:         Memory disabled, no tools registered (model cannot see save_memory / recall_memory)
-- autonomous:  Fully autonomous -- model calls save_memory / recall_memory via function calling
-- hybrid:      autonomous + forced write fallback -- LLM auto-summarizes after each turn, saves if valuable
+v1.7 rewrite: replaces the v1.0 plain-text memory with a structured fact system.
 
-The model calls via function calling:
-- save_memory:   Save important information to long-term memory (ChromaDB vector store)
-- recall_memory: Semantic search for relevant information from long-term memory
+Write modes (memory_mode):
+- off:         Memory disabled, no save tool registered
+- autonomous:  Model calls save_memory via function calling
+- hybrid:      autonomous + on_output auto-extracts facts via compile_hybrid()
+
+Read modes (memory_recall_mode):
+- off:         No recall tool registered, no auto recall
+- tool:        Model calls recall_memory via function calling
+- auto:        Automatic context injection on every turn (threshold-gated) + tool available
+
+The module uses:
+- FactCompiler: LLM-based extraction of structured MemoryFacts
+- FactMerger: deduplication via (kind, subject, attribute) key matching
+- MemoryStore: persistence via RetrievalPipeline (ChromaDB vector backend)
 """
 
+import logging
+import math
+import time
+from datetime import datetime
+
 from llamagent.core.agent import Module
-from llamagent.modules.memory.backend import ChromaMemoryBackend
+from llamagent.modules.memory.compiler import FactCompiler
+from llamagent.modules.memory.fact import CompileResult, MemoryFact
+from llamagent.modules.memory.merger import FactMerger, MergeAction
 from llamagent.modules.memory.store import MemoryStore
 
-# Memory usage guide injected into context, letting the model know it has this capability
+logger = logging.getLogger(__name__)
+
+# Memory usage guide injected into context
 MEMORY_GUIDE = """\
 [Memory] You have long-term memory and can remember information across conversations.
-- Use the save_memory tool to save noteworthy content
-- Use the recall_memory tool to recall past information
-- Do not save casual chat or meaningless content; only save truly valuable information"""
+- Use the save_memory tool to save noteworthy content (user preferences, important facts, \
+key conclusions, decisions, instructions).
+- Use the recall_memory tool to recall past information when relevant.
+- Do not save casual chat or meaningless content; only save truly valuable information."""
 
-# In hybrid mode, system prompt used in on_output to determine if the conversation is worth saving
-HYBRID_SUMMARY_PROMPT = """\
-Determine whether the following conversation contains information worth remembering long-term (user preferences, important facts, key conclusions, work information, etc.).
-Return has_value=false for casual chat or content without substance.
+# Shortened guide when only save is available (recall_mode = off)
+MEMORY_GUIDE_SAVE_ONLY = """\
+[Memory] You have long-term memory and can remember information across conversations.
+- Use the save_memory tool to save noteworthy content (user preferences, important facts, \
+key conclusions, decisions, instructions).
+- Do not save casual chat or meaningless content; only save truly valuable information."""
 
-Please respond in JSON format:
-{
-  "has_value": true/false,
-  "summary": "One or two sentences summarizing the key information (leave empty if has_value=false)",
-  "category": "user_preference / fact / task_result / instruction (leave empty if has_value=false)"
-}"""
+# Shortened guide when only recall is available (memory_mode = off)
+MEMORY_GUIDE_RECALL_ONLY = """\
+[Memory] You have long-term memory with stored information from previous conversations.
+- Use the recall_memory tool to recall past information when relevant."""
 
-# Valid memory modes
-_VALID_MODES = ("off", "autonomous", "hybrid")
+# Auto-recall context block template
+_AUTO_RECALL_BLOCK = """\
+[Memory] Relevant memories for this conversation:
+{memories}"""
+
+# Valid modes
+_VALID_WRITE_MODES = ("off", "autonomous", "hybrid")
+_VALID_READ_MODES = ("off", "tool", "auto")
+
+# Short greeting patterns to skip in auto-recall
+_GREETING_PATTERNS = frozenset({
+    "hi", "hello", "hey", "yo", "sup", "good morning", "good afternoon",
+    "good evening", "good night", "thanks", "thank you", "bye", "goodbye",
+    "see you", "ok", "okay", "yes", "no", "sure", "yep", "nope",
+})
+
+# Kind priority bonuses for scoring (higher = more relevant by default)
+_KIND_PRIORITY = {
+    "instruction": 0.10,
+    "preference": 0.08,
+    "decision": 0.05,
+    "project_fact": 0.03,
+    "profile": 0.02,
+    "episode": 0.00,
+}
 
 
-def _get_memory_mode(config) -> str:
-    """
-    Get the memory mode from Config.
-
-    Prioritizes config.memory_mode (target architecture three-tier string),
-    falls back to config.memory_enabled (legacy bool) for backward compatibility.
-    """
-    # Prefer memory_mode (if Config has been upgraded)
-    mode = getattr(config, "memory_mode", None)
-    if mode is not None:
-        if mode in _VALID_MODES:
-            return mode
-        print(f"[Memory] Unknown memory_mode='{mode}', falling back to 'off'")
-        return "off"
-
-    # Fallback: infer from legacy memory_enabled (bool)
-    enabled = getattr(config, "memory_enabled", False)
-    return "autonomous" if enabled else "off"
+def _is_short_greeting(text: str) -> bool:
+    """Check if text is a short greeting that should skip auto-recall."""
+    cleaned = text.strip().lower().rstrip("!?.,:;")
+    if len(cleaned) < 2:
+        return True
+    return cleaned in _GREETING_PATTERNS
 
 
 class MemoryModule(Module):
     """
-    Memory Module: registers memory tools, letting the model autonomously manage long-term memory.
+    Memory Module v1.7: structured fact extraction, merging, and auto-recall.
 
-    Behavioral differences across three modes:
-    - off:         Initialize store, no tools registered, on_context/on_output do nothing
-    - autonomous:  Initialize store + register tools, on_context injects memory guide
-    - hybrid:      Same as autonomous + on_output forces summary and save each turn
+    Behavioral matrix:
+    - memory_mode controls writing: off / autonomous / hybrid
+    - memory_recall_mode controls reading: off / tool / auto
+    - Tools are registered independently based on each mode
     """
 
     name: str = "memory"
-    description: str = "Long-term memory: can remember important information and recall it when needed"
+    description: str = "Long-term memory: structured facts with extraction, merging, and auto-recall"
 
     def __init__(self):
         self.store: MemoryStore | None = None
-        self.enabled: bool = False
-        self._mode: str = "off"
-        self._pending_query: str | None = None  # Stores query temporarily in hybrid mode
+        self.compiler: FactCompiler | None = None
+        self.merger: FactMerger | None = None
+        self._write_mode: str = "off"
+        self._read_mode: str = "off"
+        self._available: bool = False
+        self._pending_query: str | None = None  # For hybrid mode on_output
+
+    # ============================================================
+    # Lifecycle
+    # ============================================================
 
     def on_attach(self, agent):
-        """Initialize store + decide whether to register memory tools based on mode."""
+        """Initialize retrieval pipeline, compiler, merger, and register tools."""
         super().on_attach(agent)
 
-        # Resolve memory mode
-        self._mode = _get_memory_mode(agent.config)
-        self.enabled = self._mode != "off"
+        # Resolve modes from config
+        self._write_mode = getattr(agent.config, "memory_mode", "off")
+        if self._write_mode not in _VALID_WRITE_MODES:
+            logger.warning(
+                "[Memory] Unknown memory_mode='%s', falling back to 'off'",
+                self._write_mode,
+            )
+            self._write_mode = "off"
 
-        # Isolate collection by persona
+        self._read_mode = getattr(agent.config, "memory_recall_mode", "tool")
+        if self._read_mode not in _VALID_READ_MODES:
+            logger.warning(
+                "[Memory] Unknown memory_recall_mode='%s', falling back to 'tool'",
+                self._read_mode,
+            )
+            self._read_mode = "tool"
+
+        # If both modes are off, nothing to do
+        if self._write_mode == "off" and self._read_mode == "off":
+            logger.info("[Memory] Both write and read modes are off; memory disabled")
+            self._available = False
+            return
+
+        # Build retrieval pipeline with graceful degradation
+        pipeline = self._build_pipeline(agent)
+
+        if pipeline is not None:
+            self.store = MemoryStore(pipeline=pipeline)
+            self._available = True
+        else:
+            # Degraded: store exists but has no backend
+            self.store = MemoryStore()
+            self._available = False
+            logger.warning(
+                "[Memory] Storage unavailable (chromadb not installed?). "
+                "Tools will return friendly error messages."
+            )
+
+        # Build compiler (needs LLM for fact extraction)
+        if self._write_mode != "off":
+            try:
+                self.compiler = FactCompiler(agent.llm)
+            except Exception as e:
+                logger.warning("[Memory] Failed to create FactCompiler: %s", e)
+                self.compiler = None
+
+        # Build merger (needs store for key lookups)
+        if self.store is not None:
+            self.merger = FactMerger(self.store)
+
+        # Register tools based on modes
+        if self._write_mode != "off":
+            self._register_save_tool()
+        if self._read_mode != "off":
+            self._register_recall_tool()
+
+    def _build_pipeline(self, agent):
+        """
+        Build a RetrievalPipeline for memory storage via factory.
+
+        Returns None on failure (e.g. chromadb not installed).
+        Memory uses vector-only retrieval (no lexical/reranker).
+        """
+        try:
+            from llamagent.modules.retrieval.factory import create_pipeline
+        except ImportError:
+            logger.warning("[Memory] Retrieval module not available")
+            return None
+
+        # Determine collection name (isolated by persona)
         if agent.persona:
             collection = f"memory_{agent.persona.persona_id}"
         else:
             collection = "llamagent_memory"
 
-        backend = ChromaMemoryBackend(
-            persist_dir=agent.config.chroma_dir,
-            collection_name=collection,
-        )
-        self.store = MemoryStore(backend=backend)
+        try:
+            return create_pipeline(
+                config=agent.config,
+                collection_name=collection,
+                enable_lexical=False,
+                enable_reranker=False,
+            )
+        except Exception as e:
+            logger.warning("[Memory] Failed to build retrieval pipeline: %s", e)
+            return None
 
-        # In off mode, don't register tools; model cannot see save_memory / recall_memory
-        if self.enabled:
-            self._register_tools()
+    # ============================================================
+    # Tool registration
+    # ============================================================
 
-    def _register_tools(self):
-        """Register save_memory and recall_memory to the Agent (tier=default)."""
+    def _register_save_tool(self):
+        """Register the save_memory tool (when memory_mode != 'off')."""
         self.agent.register_tool(
             name="save_memory",
             func=self._tool_save_memory,
             description=(
-                "Save important information to long-term memory. "
+                "Save important information to long-term memory as structured facts. "
                 "Use cases: user mentions personal preferences, important facts, work information, "
                 "explicitly asks to remember something, or the conversation produces conclusions worth keeping."
             ),
@@ -120,7 +226,10 @@ class MemoryModule(Module):
                     },
                     "category": {
                         "type": "string",
-                        "description": "Category: user_preference / fact / task_result / instruction",
+                        "description": (
+                            "Category hint: preference / profile / project_fact / "
+                            "instruction / decision / episode"
+                        ),
                     },
                 },
                 "required": ["content"],
@@ -129,6 +238,8 @@ class MemoryModule(Module):
             safety_level=2,
         )
 
+    def _register_recall_tool(self):
+        """Register the recall_memory tool (when memory_recall_mode != 'off')."""
         self.agent.register_tool(
             name="recall_memory",
             func=self._tool_recall_memory,
@@ -152,35 +263,66 @@ class MemoryModule(Module):
         )
 
     # ============================================================
-    # Tool implementation
+    # Tool implementations
     # ============================================================
 
     def _tool_save_memory(self, content: str, category: str = "general") -> str:
-        """Actual execution logic for the save_memory tool."""
-        if not self.enabled or self.store is None:
-            return "Memory functionality is currently disabled."
+        """Save memory tool: compile text into facts, then merge each into the store."""
+        if not self._available or self.store is None:
+            return "Memory storage is currently unavailable. Information was not saved."
+
+        if self.compiler is None:
+            # No compiler available: fall back to plain text save
+            return self._save_fallback(content, category)
+
         try:
-            self.store.save_memory(content, category)
-            return f"Remembered: {content}"
+            result = self.compiler.compile(content)
         except Exception as e:
-            return f"Failed to save memory: {e}"
+            logger.warning("[Memory] Compile failed: %s", e)
+            return self._save_fallback(content, category)
+
+        if not result.success or not result.facts:
+            return self._handle_compile_failure(result, content, category)
+
+        return self._process_facts(result.facts)
 
     def _tool_recall_memory(self, query: str) -> str:
-        """Actual execution logic for the recall_memory tool."""
-        if self.store is None:
-            return "Memory functionality has not been initialized."
+        """Recall memory tool: search facts with scoring bonuses."""
+        if not self._available or self.store is None:
+            return "Memory storage is currently unavailable."
+
+        top_k = getattr(self.agent.config, "memory_recall_top_k", 5)
+
         try:
-            results = self.store.recall(query, top_k=5)
+            results = self.store.search_facts(query, top_k=top_k, status_filter="active")
         except Exception as e:
             return f"Failed to retrieve memories: {e}"
 
         if not results:
             return "No relevant memories found."
 
+        # Apply scoring bonuses and sort
+        scored = self._apply_scoring(results)
+
+        # Update access timestamps
+        for item in scored:
+            fact_id = item.get("metadata", {}).get("fact_id", item.get("id", ""))
+            if fact_id:
+                try:
+                    self.store.update_fact_accessed(fact_id)
+                except Exception:
+                    pass  # Best-effort access tracking
+
+        # Format results
         lines = ["Found the following relevant memories:"]
-        for r in results:
-            score = r["score"]
-            lines.append(f"- (relevance {score}) {r['content']}")
+        for item in scored:
+            meta = item.get("metadata", {})
+            score = item.get("final_score", item.get("score", 0))
+            kind = meta.get("kind", "")
+            value = meta.get("value", item.get("text", ""))
+            kind_tag = f"[{kind}] " if kind else ""
+            lines.append(f"- (relevance {score:.3f}) {kind_tag}{value}")
+
         return "\n".join(lines)
 
     # ============================================================
@@ -189,86 +331,333 @@ class MemoryModule(Module):
 
     def on_context(self, query: str, context: str) -> str:
         """
-        Inject memory usage guide, letting the model know it has memory capabilities.
+        Inject memory guide and perform auto-recall if enabled.
 
-        - off mode: return the original context as-is
-        - autonomous mode: inject MEMORY_GUIDE
-        - hybrid mode: inject MEMORY_GUIDE + store query temporarily (for on_output use)
+        - Injects the appropriate MEMORY_GUIDE based on active tools
+        - If memory_recall_mode == "auto": perform threshold-gated auto recall
+        - In hybrid mode: store query for on_output use
         """
-        if not self.enabled:
+        has_save = self._write_mode != "off"
+        has_recall = self._read_mode != "off"
+
+        if not has_save and not has_recall:
             return context
 
-        # In hybrid mode, store query temporarily for summary judgment in on_output
-        if self._mode == "hybrid":
+        # Store query for hybrid on_output
+        if self._write_mode == "hybrid":
             self._pending_query = query
 
-        return f"{context}\n\n{MEMORY_GUIDE}" if context else MEMORY_GUIDE
+        # Choose the appropriate guide
+        if has_save and has_recall:
+            guide = MEMORY_GUIDE
+        elif has_save:
+            guide = MEMORY_GUIDE_SAVE_ONLY
+        else:
+            guide = MEMORY_GUIDE_RECALL_ONLY
+
+        # Auto-recall injection
+        auto_block = ""
+        if self._read_mode == "auto" and self._available:
+            auto_block = self._do_auto_recall(query)
+
+        # Assemble context
+        parts = []
+        if context:
+            parts.append(context)
+        parts.append(guide)
+        if auto_block:
+            parts.append(auto_block)
+
+        return "\n\n".join(parts)
 
     def on_output(self, response: str) -> str:
         """
-        In hybrid mode, force summarize and save key information from the current turn.
+        In hybrid mode, auto-extract facts from the conversation turn.
 
-        Does not modify the response content; returns it as-is.
-        Does nothing in autonomous / off modes.
+        Uses compile_hybrid() for a single LLM call combining should_store decision
+        and fact extraction. Does not modify the response.
         """
-        if self._mode != "hybrid":
+        if self._write_mode != "hybrid":
             return response
 
-        # Retrieve the query stored temporarily in on_context
         query = self._pending_query
-        self._pending_query = None  # Clear to avoid reuse
+        self._pending_query = None
 
-        if not query or not response or self.store is None:
+        if not query or not response:
             return response
 
-        # Call LLM to determine if this turn's conversation is worth saving
+        if not self._available or self.store is None or self.compiler is None:
+            return response
+
         try:
-            llm = self.agent.llm
-            result = llm.ask_json(
-                prompt=f"User: {query}\nAssistant: {response}",
-                system=HYBRID_SUMMARY_PROMPT,
+            result = self.compiler.compile_hybrid(query, response)
+        except Exception as e:
+            logger.warning("[Memory] Hybrid compilation failed: %s", e)
+            return response
+
+        if not result.should_store:
+            return response
+
+        # Process extracted facts
+        if result.facts:
+            self._process_facts(result.facts)
+        elif result.summary:
+            # No structured facts but has summary: save as episode fact
+            fallback_mode = getattr(self.agent.config, "memory_fact_fallback", "text")
+            if fallback_mode == "text":
+                try:
+                    import uuid
+                    from llamagent.modules.memory.fact import MemoryFact
+                    episode = MemoryFact(
+                        fact_id=uuid.uuid4().hex,
+                        kind="episode",
+                        subject="conversation",
+                        attribute="hybrid_summary",
+                        value=result.summary,
+                        source_text=result.summary,
+                    )
+                    self.store.save_fact(episode)
+                except Exception as e:
+                    logger.warning("[Memory] Hybrid fallback save failed: %s", e)
+
+        return response
+
+    # ============================================================
+    # Internal helpers
+    # ============================================================
+
+    def _do_auto_recall(self, query: str) -> str:
+        """
+        Perform auto-recall for the current query.
+
+        Skips short greetings. Searches memory, applies threshold gate,
+        and returns a formatted block for context injection.
+        """
+        if not self.store or not self.store.available:
+            return ""
+
+        # Skip short greetings
+        if _is_short_greeting(query):
+            return ""
+
+        max_inject = getattr(self.agent.config, "memory_auto_recall_max_inject", 3)
+        threshold = getattr(self.agent.config, "memory_auto_recall_threshold", 0.35)
+        top_k = getattr(self.agent.config, "memory_recall_top_k", 5)
+
+        try:
+            results = self.store.search_facts(query, top_k=top_k, status_filter="active")
+        except Exception as e:
+            logger.warning("[Memory] Auto-recall search failed: %s", e)
+            return ""
+
+        if not results:
+            return ""
+
+        # Apply scoring and threshold gate
+        scored = self._apply_scoring(results)
+
+        # Filter by threshold
+        above_threshold = [
+            item for item in scored
+            if item.get("final_score", item.get("score", 0)) >= threshold
+        ]
+
+        if not above_threshold:
+            return ""
+
+        # Limit to max_inject
+        injected = above_threshold[:max_inject]
+
+        # Update access timestamps (best-effort)
+        for item in injected:
+            fact_id = item.get("metadata", {}).get("fact_id", item.get("id", ""))
+            if fact_id:
+                try:
+                    self.store.update_fact_accessed(fact_id)
+                except Exception:
+                    pass
+
+        # Format the auto-recall block
+        memory_lines = []
+        for item in injected:
+            meta = item.get("metadata", {})
+            kind = meta.get("kind", "")
+            value = meta.get("value", item.get("text", ""))
+            kind_tag = f"[{kind}] " if kind else ""
+            memory_lines.append(f"- {kind_tag}{value}")
+
+        memories_text = "\n".join(memory_lines)
+        return _AUTO_RECALL_BLOCK.format(memories=memories_text)
+
+    def _apply_scoring(self, results: list[dict]) -> list[dict]:
+        """
+        Apply scoring bonuses (recency, strength, kind priority) to search results.
+
+        Returns results sorted by final_score descending.
+        """
+        now_ts = time.time()
+        scored = []
+
+        for item in results:
+            base_score = item.get("score", 0.0)
+            meta = item.get("metadata", {})
+
+            # Recency bonus: decays over time (max +0.05 for items from last hour)
+            recency_bonus = 0.0
+            updated_at = meta.get("updated_at", "")
+            if updated_at:
+                try:
+                    updated_ts = datetime.fromisoformat(updated_at).timestamp()
+                    age_hours = max(0, (now_ts - updated_ts) / 3600)
+                    # Exponential decay: 0.05 * e^(-age/168) (168h = 1 week)
+                    recency_bonus = 0.05 * math.exp(-age_hours / 168)
+                except (ValueError, TypeError, OSError):
+                    pass
+
+            # Strength bonus
+            strength = float(meta.get("strength", 1.0))
+            strength_bonus = (strength - 1.0) * 0.02  # Slight boost for reinforced facts
+
+            # Kind priority bonus
+            kind = meta.get("kind", "episode")
+            kind_bonus = _KIND_PRIORITY.get(kind, 0.0)
+
+            final_score = base_score + recency_bonus + strength_bonus + kind_bonus
+
+            enriched = item.copy()
+            enriched["final_score"] = round(final_score, 4)
+            scored.append(enriched)
+
+        # Sort by final_score descending
+        scored.sort(key=lambda x: x["final_score"], reverse=True)
+        return scored
+
+    def _process_facts(self, facts: list[MemoryFact]) -> str:
+        """
+        Merge and save a list of extracted facts.
+
+        Returns a human-readable summary of what was saved.
+        """
+        saved = []
+        skipped = 0
+        updated = 0
+
+        for fact in facts:
+            if self.merger is not None:
+                try:
+                    action = self.merger.merge(fact)
+                except Exception as e:
+                    logger.warning("[Memory] Merge failed for fact: %s", e)
+                    action = MergeAction(action="insert", fact=fact)
+            else:
+                action = MergeAction(action="insert", fact=fact)
+
+            if action.action == "skip":
+                # Reinforce existing fact: update access time and strength
+                self.store.update_fact_accessed(action.fact.fact_id)
+                skipped += 1
+                continue
+
+            if action.action == "update" and action.superseded:
+                # Mark old fact as superseded
+                try:
+                    self.store.update_fact_status(
+                        action.superseded.fact_id, "superseded"
+                    )
+                except Exception as e:
+                    logger.warning("[Memory] Failed to supersede old fact: %s", e)
+                updated += 1
+
+            # Save the new/updated fact
+            try:
+                self.store.save_fact(action.fact)
+                saved.append(action.fact.value)
+            except Exception as e:
+                logger.warning("[Memory] Failed to save fact: %s", e)
+
+        # Build summary message
+        parts = []
+        if saved:
+            parts.append(f"Saved {len(saved)} fact(s): {'; '.join(saved[:3])}")
+            if len(saved) > 3:
+                parts.append(f"(and {len(saved) - 3} more)")
+        if updated:
+            parts.append(f"Updated {updated} existing fact(s)")
+        if skipped:
+            parts.append(f"Skipped {skipped} duplicate(s)")
+
+        if not parts:
+            return "No facts were saved from the provided content."
+        return ". ".join(parts) + "."
+
+    def _save_fallback(self, content: str, category: str) -> str:
+        """Save content as plain text when compiler is unavailable or fails."""
+        fallback_mode = getattr(self.agent.config, "memory_fact_fallback", "text")
+
+        if fallback_mode == "drop":
+            return (
+                "Could not extract structured facts from the content. "
+                "Information was not saved (fact extraction required)."
             )
 
-            # Parse result; save if valuable
-            has_value = result.get("has_value", False)
-            if has_value:
-                summary = result.get("summary", "")
-                category = result.get("category", "conversation")
-                if summary:
-                    self.store.save_memory(summary, category=category)
+        # fallback_mode == "text": save as plain text
+        try:
+            self.store.save_memory(content, category=category)
+            return f"Remembered (as text): {content}"
         except Exception as e:
-            # Hybrid summary failure should not affect the normal response
-            print(f"[Memory] Hybrid auto-summary failed: {e}")
+            return f"Failed to save memory: {e}"
 
-        return response  # Return as-is without modifying the output
+    def _handle_compile_failure(
+        self, result: CompileResult, content: str, category: str
+    ) -> str:
+        """Handle a failed compile result according to the fallback config."""
+        return self._save_fallback(content, category)
 
     # ============================================================
     # Programmatic interface (external use)
     # ============================================================
 
+    @property
+    def enabled(self) -> bool:
+        """Check if memory has any active functionality."""
+        return self._write_mode != "off" or self._read_mode != "off"
+
     def toggle(self, enabled: bool | None = None) -> bool:
-        """Toggle memory on/off. Returns the state after toggling."""
+        """
+        Toggle memory on/off. Returns the state after toggling.
+
+        When toggling off, sets both modes to "off".
+        When toggling on, restores to autonomous/tool defaults.
+        """
         if enabled is None:
-            self.enabled = not self.enabled
+            enabled = not self.enabled
+
+        if enabled:
+            if self._write_mode == "off":
+                self._write_mode = "autonomous"
+            if self._read_mode == "off":
+                self._read_mode = "tool"
         else:
-            self.enabled = enabled
+            self._write_mode = "off"
+            self._read_mode = "off"
+
         return self.enabled
 
     def remember(self, content: str, category: str = "manual"):
-        """Manually save a memory entry."""
-        if self.store is None:
-            print("[Memory] Module has not been initialized")
+        """Manually save a memory entry (bypasses compiler, saves as plain text)."""
+        if self.store is None or not self.store.available:
+            logger.warning("[Memory] Module has not been initialized or storage unavailable")
             return
         self.store.save_memory(content, category)
 
     def recall(self, query: str, top_k: int = 5) -> list[dict]:
         """Manually search memories."""
-        if self.store is None:
+        if self.store is None or not self.store.available:
             return []
-        return self.store.recall(query, top_k)
+        return self.store.search_facts(query, top_k)
 
     def forget_all(self):
         """Clear all memories."""
         if self.store is None:
             return
-        self.store.clear_long_term()
+        self.store.clear()
