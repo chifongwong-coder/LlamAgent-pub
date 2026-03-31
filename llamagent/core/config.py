@@ -1,7 +1,10 @@
 """
-Configuration management: unified configuration center with environment variable overrides.
+Configuration management: unified configuration center.
+
+Priority chain: Environment variables > YAML file > Code defaults.
 
 All LlamAgent runtime parameters are managed centrally in the Config class.
+Modules access config via flat attributes (config.xxx) regardless of the source.
 Model auto-detection priority: MODEL_NAME env var > API Key detection (DeepSeek > OpenAI > Anthropic) > Ollama fallback.
 """
 
@@ -44,171 +47,391 @@ def _safe_float(key: str, default: float) -> float:
         return default
 
 
+# ======================================================================
+# YAML path -> flat attribute mapping
+# ======================================================================
+
+# Each entry: (yaml_key_path_tuple, flat_attribute_name, type)
+# type is used for basic casting when reading from YAML
+_YAML_MAP = [
+    (("model", "name"), "model", str),
+    (("model", "max_context_tokens"), "max_context_tokens", int),
+    (("model", "api_retry_count"), "api_retry_count", int),
+    (("agent", "system_prompt"), "system_prompt", str),
+    (("agent", "context_window_size"), "context_window_size", int),
+    (("agent", "context_compress_threshold"), "context_compress_threshold", float),
+    (("agent", "compress_keep_turns"), "compress_keep_turns", int),
+    (("agent", "react", "max_steps"), "max_react_steps", int),
+    (("agent", "react", "max_duplicate_actions"), "max_duplicate_actions", int),
+    (("agent", "react", "timeout"), "react_timeout", float),
+    (("agent", "max_observation_tokens"), "max_observation_tokens", int),
+    (("retrieval", "persist_dir"), "retrieval_persist_dir", str),
+    (("retrieval", "embedding", "provider"), "embedding_provider", str),
+    (("retrieval", "embedding", "model"), "embedding_model", str),
+    (("memory", "write_mode"), "memory_mode", str),
+    (("memory", "recall_mode"), "memory_recall_mode", str),
+    (("memory", "fact_fallback"), "memory_fact_fallback", str),
+    (("memory", "auto_recall", "top_k"), "memory_recall_top_k", int),
+    (("memory", "auto_recall", "max_inject"), "memory_auto_recall_max_inject", int),
+    (("memory", "auto_recall", "threshold"), "memory_auto_recall_threshold", float),
+    (("rag", "top_k"), "rag_top_k", int),
+    (("rag", "chunk_size"), "chunk_size", int),
+    (("rag", "retrieval_mode"), "rag_retrieval_mode", str),
+    (("rag", "rerank_enabled"), "rag_rerank_enabled", bool),
+    (("persona", "file"), "persona_file", str),
+    (("tools", "agent_tools_dir"), "agent_tools_dir", str),
+    (("planning", "max_plan_adjustments"), "max_plan_adjustments", int),
+    (("reflection", "enabled"), "reflection_enabled", bool),
+    (("reflection", "score_threshold"), "reflection_score_threshold", float),
+    (("safety", "permission_level"), "permission_level", int),
+    (("skill", "dirs"), "skill_dirs", list),
+    (("skill", "max_active"), "skill_max_active", int),
+    (("skill", "llm_fallback"), "skill_llm_fallback", bool),
+    (("job", "default_timeout"), "job_default_timeout", float),
+    (("job", "max_active"), "job_max_active", int),
+    (("job", "profiles"), "job_profiles", dict),
+    (("output", "dir"), "output_dir", str),
+]
+
+# Build a set of valid YAML key paths for unknown-key detection
+_VALID_YAML_PATHS = set()
+for _path, _attr, _type in _YAML_MAP:
+    for i in range(len(_path)):
+        _VALID_YAML_PATHS.add(_path[:i + 1])
+
+
 class Config:
     """
     Global configuration, each instance holds its own state independently.
 
-    Configuration parameters are grouped by function: model, agent, memory, RAG, persona, tools, planning, reflection, safety, output.
-    Parameters that support environment variable overrides have the corresponding env var name noted in comments.
+    Priority chain: Environment variables > YAML file > Code defaults.
+
+    Usage:
+        config = Config()                          # env + defaults
+        config = Config(config_path="prod.yaml")   # env > yaml > defaults
     """
 
-    def __init__(self):
-        # ==================== Model ====================
-        # Model identifier. Detection priority: MODEL_NAME env > API Key detection > Ollama fallback
-        # Environment variable: MODEL_NAME
-        self.model: str = os.getenv("MODEL_NAME") or self._detect_model()
+    def __init__(self, config_path: str | None = None):
+        # Step 1: Set code defaults
+        self._set_defaults()
 
-        # Model context window size, auto-detected via litellm, can also be manually overridden
-        self.max_context_tokens: int = self._detect_max_context_tokens()
+        # Step 2: Load YAML overrides (if available)
+        yaml_path = self._resolve_yaml_path(config_path)
+        if yaml_path:
+            self._load_yaml(yaml_path)
 
-        # LLM API call retry count on failure (retries N times after failure, N+1 total calls)
+        # Step 3: Apply environment variable overrides (highest priority)
+        self._apply_env_overrides()
+
+        # Step 4: Post-processing (validation, aliases, auto-detection)
+        self._post_process()
+
+    # ==================================================================
+    # Step 1: Code defaults
+    # ==================================================================
+
+    def _set_defaults(self):
+        """Set all configuration fields to their default values."""
+        # Model
+        self.model: str = ""  # empty = auto-detect in _post_process
+        self.max_context_tokens: int = 0  # 0 = auto-detect in _post_process
         self.api_retry_count: int = 1
 
-        # ==================== Agent ====================
-        # Default identity prompt when no Persona is set
+        # Agent
         self.system_prompt: str = (
             "You are LlamAgent, a super capable llama AI assistant. "
             "You are smart, reliable, and happy to help, with an occasional llama-like charm. "
             "Reply concisely and clearly. If you are unsure, be honest about it."
         )
-
-        # Number of conversation turns to retain in context; oldest turns are discarded when exceeded
         self.context_window_size: int = 20
-
-        # Ratio of conversation tokens to max_context_tokens; compression is triggered when exceeded
         self.context_compress_threshold: float = 0.7
-
-        # Number of recent turns to keep uncompressed during partial compression
         self.compress_keep_turns: int = 3
-
-        # Maximum number of ReAct loop steps
-        # Environment variable: MAX_REACT_STEPS
-        self.max_react_steps: int = _safe_int("MAX_REACT_STEPS", 10)
-
-        # Abort if the same action (identical tool name + arguments) repeats more than this count
-        # Environment variable: MAX_DUPLICATE_ACTIONS
-        self.max_duplicate_actions: int = _safe_int("MAX_DUPLICATE_ACTIONS", 2)
-
-        # Time limit per ReAct step in seconds; PlanReAct times each step independently
-        # Environment variable: REACT_TIMEOUT
-        self.react_timeout: float = _safe_float("REACT_TIMEOUT", 210.0)
-
-        # Maximum tokens for a single tool return result; truncated if exceeded
+        self.max_react_steps: int = 10
+        self.max_duplicate_actions: int = 2
+        self.react_timeout: float = 210.0
         self.max_observation_tokens: int = 2000
 
-        # ==================== Retrieval (shared) ====================
-        # Embedding provider: "chromadb" (default) / future: "openai", "bge", etc.
-        self.embedding_provider: str = os.getenv("EMBEDDING_PROVIDER", "chromadb")
-        # Embedding model name (provider-specific; empty = provider default)
-        self.embedding_model: str = os.getenv("EMBEDDING_MODEL", "")
-        # Retrieval layer persistence directory (shared by Memory, RAG, Reflection)
-        # Each backend implementation manages its own files under this directory.
-        self.retrieval_persist_dir: str = os.getenv(
-            "RETRIEVAL_PERSIST_DIR",
-            os.getenv("CHROMA_DIR", str(BASE_DIR / "data" / "chroma")),  # backward compat
-        )
-        # Backward compatibility alias
-        self.chroma_dir: str = self.retrieval_persist_dir
+        # Retrieval (shared)
+        self.embedding_provider: str = "chromadb"
+        self.embedding_model: str = ""
+        self.retrieval_persist_dir: str = str(BASE_DIR / "data" / "chroma")
 
-        # ==================== Memory ====================
-        # Memory write mode: "off" / "autonomous" / "hybrid"
-        self.memory_mode: str = os.getenv("MEMORY_MODE", "off")
+        # Memory
+        self.memory_mode: str = "off"
+        self.memory_recall_mode: str = "tool"
+        self.memory_fact_fallback: str = "text"
+        self.memory_recall_top_k: int = 5
+        self.memory_auto_recall_max_inject: int = 3
+        self.memory_auto_recall_threshold: float = 0.35
+
+        # RAG
+        self.rag_top_k: int = 3
+        self.chunk_size: int = 500
+        self.rag_retrieval_mode: str = "hybrid"
+        self.rag_rerank_enabled: bool = True
+
+        # Persona
+        self.persona_file: str = str(BASE_DIR / "data" / "personas.json")
+
+        # Tools
+        self.agent_tools_dir: str = str(BASE_DIR / "data" / "agent_tools")
+
+        # Planning
+        self.max_plan_adjustments: int = 7
+
+        # Reflection
+        self.reflection_enabled: bool = False
+        self.reflection_score_threshold: float = 7.0
+
+        # Safety
+        self.permission_level: int = 1
+
+        # Skill
+        self.skill_dirs: list[str] = []
+        self.skill_max_active: int = 2
+        self.skill_llm_fallback: bool = False
+
+        # Job
+        self.job_default_timeout: float = 300.0
+        self.job_max_active: int = 10
+        self.job_profiles: dict = {}
+
+        # Workspace (runtime field, not encouraged in YAML)
+        self.workspace_id: str | None = None
+
+        # Output
+        self.output_dir: str = str(BASE_DIR / "output")
+
+    # ==================================================================
+    # Step 2: YAML loading
+    # ==================================================================
+
+    def _resolve_yaml_path(self, explicit_path: str | None) -> str | None:
+        """
+        Determine which YAML config file to load.
+
+        If explicit_path is given and fails, raise an error (don't silently degrade).
+        If auto-discovering, return the first found or None.
+        """
+        # Explicit path: must work or fail loudly
+        if explicit_path is not None:
+            if not os.path.isfile(explicit_path):
+                raise FileNotFoundError(
+                    f"Config file not found: {explicit_path}"
+                )
+            return explicit_path
+
+        # Environment variable
+        env_path = os.getenv("LLAMAGENT_CONFIG")
+        if env_path:
+            if os.path.isfile(env_path):
+                return env_path
+            logger.warning("LLAMAGENT_CONFIG='%s' not found, ignoring", env_path)
+
+        # Auto-discover (first found wins, single file, no merge)
+        candidates = [
+            str(BASE_DIR / "llamagent.yaml"),
+            str(BASE_DIR / ".llamagent" / "config.yaml"),
+            os.path.expanduser("~/.llamagent/config.yaml"),
+        ]
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                logger.info("Using config: %s", candidate)
+                return candidate
+
+        return None  # No YAML found, use env + defaults
+
+    def _load_yaml(self, path: str):
+        """Load a YAML config file and apply values to flat attributes."""
+        try:
+            import yaml
+        except ImportError:
+            if path == os.getenv("LLAMAGENT_CONFIG") or path in [
+                str(BASE_DIR / "llamagent.yaml"),
+                str(BASE_DIR / ".llamagent" / "config.yaml"),
+                os.path.expanduser("~/.llamagent/config.yaml"),
+            ]:
+                # Auto-discovered: silently skip
+                logger.debug("pyyaml not installed, skipping YAML config")
+                return
+            # Explicit path: fail loudly
+            raise ImportError(
+                "pyyaml is required to load YAML config files. "
+                "Install: pip install pyyaml"
+            )
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+        except Exception as e:
+            raise ValueError(f"Failed to parse YAML config '{path}': {e}") from e
+
+        if not isinstance(data, dict):
+            logger.warning("YAML config '%s' is not a dict, ignoring", path)
+            return
+
+        # Apply mapped values
+        for yaml_path, attr_name, expected_type in _YAML_MAP:
+            value = self._get_nested(data, yaml_path)
+            if value is not None:
+                # Basic type casting for safety
+                try:
+                    if expected_type == bool and isinstance(value, str):
+                        value = value.lower() in ("true", "1", "yes")
+                    elif expected_type in (int, float, str) and not isinstance(value, expected_type):
+                        value = expected_type(value)
+                except (ValueError, TypeError):
+                    logger.warning(
+                        "YAML config: cannot convert '%s' to %s for '%s', skipping",
+                        value, expected_type.__name__, ".".join(yaml_path),
+                    )
+                    continue
+                setattr(self, attr_name, value)
+
+        # Warn about unknown keys
+        self._check_unknown_keys(data)
+
+    @staticmethod
+    def _get_nested(data: dict, path: tuple) -> object:
+        """Get a value from a nested dict by key path. Returns None if not found."""
+        current = data
+        for key in path:
+            if not isinstance(current, dict) or key not in current:
+                return None
+            current = current[key]
+        return current
+
+    def _check_unknown_keys(self, data: dict, prefix: tuple = ()):
+        """Warn about YAML keys not in the mapping table."""
+        for key, value in data.items():
+            current_path = prefix + (key,)
+            if current_path not in _VALID_YAML_PATHS:
+                logger.warning(
+                    "Unknown YAML config key: '%s' (ignored)",
+                    ".".join(current_path),
+                )
+            elif isinstance(value, dict):
+                self._check_unknown_keys(value, current_path)
+
+    # ==================================================================
+    # Step 3: Environment variable overrides
+    # ==================================================================
+
+    def _apply_env_overrides(self):
+        """Apply environment variable overrides (highest priority)."""
+        # Model
+        env_model = os.getenv("MODEL_NAME")
+        if env_model:
+            self.model = env_model
+
+        # Agent / React
+        self.max_react_steps = _safe_int("MAX_REACT_STEPS", self.max_react_steps)
+        self.max_duplicate_actions = _safe_int("MAX_DUPLICATE_ACTIONS", self.max_duplicate_actions)
+        self.react_timeout = _safe_float("REACT_TIMEOUT", self.react_timeout)
+
+        # Retrieval
+        env_persist = os.getenv("RETRIEVAL_PERSIST_DIR")
+        env_chroma = os.getenv("CHROMA_DIR")
+        if env_persist:
+            self.retrieval_persist_dir = env_persist  # new name wins
+        elif env_chroma:
+            self.retrieval_persist_dir = env_chroma  # backward compat fallback
+
+        env_embedding_provider = os.getenv("EMBEDDING_PROVIDER")
+        if env_embedding_provider:
+            self.embedding_provider = env_embedding_provider
+        env_embedding_model = os.getenv("EMBEDDING_MODEL")
+        if env_embedding_model is not None:
+            self.embedding_model = env_embedding_model
+
+        # Memory
+        env_memory_mode = os.getenv("MEMORY_MODE")
+        if env_memory_mode:
+            self.memory_mode = env_memory_mode
+        env_recall_mode = os.getenv("MEMORY_RECALL_MODE")
+        if env_recall_mode:
+            self.memory_recall_mode = env_recall_mode
+        env_fact_fallback = os.getenv("MEMORY_FACT_FALLBACK")
+        if env_fact_fallback:
+            self.memory_fact_fallback = env_fact_fallback
+        self.memory_recall_top_k = _safe_int("MEMORY_RECALL_TOP_K", self.memory_recall_top_k)
+        self.memory_auto_recall_max_inject = _safe_int("MEMORY_AUTO_RECALL_MAX_INJECT", self.memory_auto_recall_max_inject)
+        self.memory_auto_recall_threshold = _safe_float("MEMORY_AUTO_RECALL_THRESHOLD", self.memory_auto_recall_threshold)
+
+        # RAG
+        self.rag_top_k = _safe_int("RAG_TOP_K", self.rag_top_k)
+        self.chunk_size = _safe_int("CHUNK_SIZE", self.chunk_size)
+        env_rag_mode = os.getenv("RAG_RETRIEVAL_MODE")
+        if env_rag_mode:
+            self.rag_retrieval_mode = env_rag_mode
+        env_rerank = os.getenv("RAG_RERANK")
+        if env_rerank is not None:
+            self.rag_rerank_enabled = env_rerank.lower() in ("true", "1", "yes")
+
+        # Persona
+        env_persona = os.getenv("PERSONA_FILE")
+        if env_persona:
+            self.persona_file = env_persona
+
+        # Tools
+        env_tools_dir = os.getenv("AGENT_TOOLS_DIR")
+        if env_tools_dir:
+            self.agent_tools_dir = env_tools_dir
+
+        # Planning
+        self.max_plan_adjustments = _safe_int("MAX_PLAN_ADJUSTMENTS", self.max_plan_adjustments)
+
+        # Reflection
+        self.reflection_score_threshold = _safe_float("REFLECTION_SCORE_THRESHOLD", self.reflection_score_threshold)
+
+        # Safety
+        self.permission_level = _safe_int("PERMISSION_LEVEL", self.permission_level)
+
+        # Skill
+        env_skill_dirs = os.getenv("SKILL_DIRS")
+        if env_skill_dirs:
+            self.skill_dirs = [d.strip() for d in env_skill_dirs.split(",") if d.strip()]
+
+        # Job
+        self.job_default_timeout = _safe_float("JOB_DEFAULT_TIMEOUT", self.job_default_timeout)
+        self.job_max_active = _safe_int("JOB_MAX_ACTIVE", self.job_max_active)
+
+        # Output
+        env_output = os.getenv("OUTPUT_DIR")
+        if env_output:
+            self.output_dir = env_output
+
+    # ==================================================================
+    # Step 4: Post-processing
+    # ==================================================================
+
+    def _post_process(self):
+        """Validation, auto-detection, and alias setup."""
+        # Model auto-detection (if not set by YAML or env)
+        if not self.model:
+            self.model = self._detect_model()
+
+        # Context window auto-detection (if not set)
+        if self.max_context_tokens <= 0:
+            self.max_context_tokens = self._detect_max_context_tokens()
+
+        # Validation
         if self.memory_mode not in ("off", "autonomous", "hybrid"):
             logger.warning(
-                "memory_mode='%s' is invalid, falling back to 'off'. Valid values: off / autonomous / hybrid",
+                "memory_mode='%s' is invalid, falling back to 'off'",
                 self.memory_mode,
             )
             self.memory_mode = "off"
 
-        # Memory read mode: "off" / "tool" / "auto"
-        self.memory_recall_mode: str = os.getenv("MEMORY_RECALL_MODE", "tool")
         if self.memory_recall_mode not in ("off", "tool", "auto"):
             logger.warning(
-                "memory_recall_mode='%s' is invalid, falling back to 'tool'. Valid values: off / tool / auto",
+                "memory_recall_mode='%s' is invalid, falling back to 'tool'",
                 self.memory_recall_mode,
             )
             self.memory_recall_mode = "tool"
 
-        # Memory fact extraction fallback: "text" (store as plain text) / "drop" (discard)
-        self.memory_fact_fallback: str = os.getenv("MEMORY_FACT_FALLBACK", "text")
-        # Auto recall settings
-        self.memory_recall_top_k: int = _safe_int("MEMORY_RECALL_TOP_K", 5)
-        self.memory_auto_recall_max_inject: int = _safe_int("MEMORY_AUTO_RECALL_MAX_INJECT", 3)
-        self.memory_auto_recall_threshold: float = _safe_float("MEMORY_AUTO_RECALL_THRESHOLD", 0.35)
-
-        # ==================== RAG ====================
-        # Number of retrieval results to return
-        self.rag_top_k: int = _safe_int("RAG_TOP_K", 3)
-        # Document chunk size
-        self.chunk_size: int = _safe_int("CHUNK_SIZE", 500)
-        # Retrieval mode: "vector" / "lexical" / "hybrid"
-        self.rag_retrieval_mode: str = os.getenv("RAG_RETRIEVAL_MODE", "hybrid")
-        # Enable LLM-based reranking after retrieval
-        self.rag_rerank_enabled: bool = os.getenv("RAG_RERANK", "true").lower() == "true"
-
-        # ==================== Persona ====================
-        # Persona definition JSON file path
-        # Environment variable: PERSONA_FILE
-        self.persona_file: str = os.getenv("PERSONA_FILE", str(BASE_DIR / "data" / "personas.json"))
-
-        # ==================== Tools ====================
-        # Custom tools storage directory
-        # Environment variable: AGENT_TOOLS_DIR
-        self.agent_tools_dir: str = os.getenv(
-            "AGENT_TOOLS_DIR", str(BASE_DIR / "data" / "agent_tools")
-        )
-
-        # ==================== Planning ====================
-        # Maximum number of plan adjustments during PlanReAct execution
-        # Environment variable: MAX_PLAN_ADJUSTMENTS
-        self.max_plan_adjustments: int = _safe_int("MAX_PLAN_ADJUSTMENTS", 7)
-
-        # ==================== Reflection ====================
-        # Reflection evaluation toggle
-        self.reflection_enabled: bool = False
-
-        # Scores below this threshold trigger lesson saving (and re-planning under PlanReAct)
-        # Environment variable: REFLECTION_SCORE_THRESHOLD
-        self.reflection_score_threshold: float = _safe_float("REFLECTION_SCORE_THRESHOLD", 7.0)
-
-        # ==================== Safety ====================
-        # Fallback permission level when no Persona is set (when Persona exists, persona.permission_level takes precedence)
-        # Environment variable: PERMISSION_LEVEL
-        self.permission_level: int = _safe_int("PERMISSION_LEVEL", 1)
-
-        # ==================== Skill ====================
-        # Additional skill directory paths (appended after default scan paths)
-        # Environment variable: SKILL_DIRS (comma-separated)
-        _skill_dirs_raw = os.getenv("SKILL_DIRS", "")
-        self.skill_dirs: list[str] = [d.strip() for d in _skill_dirs_raw.split(",") if d.strip()]
-
-        # Maximum number of skills to inject per conversation turn
-        self.skill_max_active: int = 2
-
-        # Enable C-level LLM fallback: when B-level tag matching finds no candidates,
-        # send all skill metadata to LLM for semantic matching (default: off)
-        # No environment variable — set programmatically only
-        self.skill_llm_fallback: bool = False
-
-        # ==================== Job ====================
-        # Default timeout for job execution (seconds)
-        self.job_default_timeout: float = _safe_float("JOB_DEFAULT_TIMEOUT", 300.0)
-
-        # Maximum concurrent active jobs
-        self.job_max_active: int = _safe_int("JOB_MAX_ACTIVE", 10)
-
-        # Job profiles: mapping of profile name -> config dict (timeout, etc.)
-        # Registered programmatically; "default" uses job_default_timeout
-        self.job_profiles: dict = {}
-
-        # ==================== Workspace ====================
-        # Workspace ID (optional, for API session reuse; None = lazy-generated on first use)
-        self.workspace_id: str | None = None
-
-        # ==================== Output ====================
-        # File output directory
-        # Environment variable: OUTPUT_DIR
-        self.output_dir: str = os.getenv("OUTPUT_DIR", str(BASE_DIR / "output"))
+        # Backward compatibility alias
+        self.chroma_dir = self.retrieval_persist_dir
 
     # ------------------------------------------------------------------
     # Model detection
