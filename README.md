@@ -1,293 +1,188 @@
-# LlamAgent
+<p align="center">
+  <h1 align="center">LlamAgent</h1>
+  <p align="center"><strong>Start with nothing. Add only what you need.</strong></p>
+</p>
 
-**The Agent Framework That Grows With You**
+<p align="center">
+  <a href="#quick-start">Quick Start</a> |
+  <a href="#modules">Modules</a> |
+  <a href="#examples">Examples</a> |
+  <a href="https://github.com/llamagent/llamagent/wiki">Docs</a>
+</p>
 
-Most agent frameworks hand you a monolith and say "good luck." You get a hundred features you didn't ask for, dependencies you can't untangle, and abstractions that fight you the moment you step off the golden path.
+---
 
-LlamAgent takes the opposite approach: **start with nothing, add only what you need.**
-
-A bare `SmartAgent` is a fully functional conversational AI — no modules, no setup, just `agent.chat("hello")` and you're talking. But here's where it gets interesting: every capability is a **pluggable module** that snaps in with a single line of code.
+A bare `SmartAgent` is a fully functional AI chatbot. Every capability — tools, memory, planning, safety — is a **pluggable module** that snaps in with one line:
 
 ```python
-agent.register_module(ToolsModule())      # Now it has workspace file tools
-agent.register_module(SandboxModule())    # Now it can execute code in isolation
-agent.register_module(JobModule())        # Now it can run shell commands
-agent.register_module(SkillModule())      # Now it follows project-specific playbooks
-agent.register_module(PlanningModule())    # Now it can decompose complex tasks
-agent.register_module(SafetyModule())      # Now it filters dangerous input and masks sensitive output
+from llamagent import SmartAgent, Config
+
+agent = SmartAgent(Config())
+agent.chat("Hello!")  # Works immediately — no setup needed
 ```
 
-Each module interacts through a **hook pipeline** inspired by the onion model — `on_input` and `on_context` fire forward, `on_output` fires in reverse. Safety catches threats on the way in and scrubs secrets on the way out. RAG injects knowledge. Memory recalls past conversations. Skills inject task playbooks. Reflection evaluates quality. No module knows about any other module. They compose, they don't couple.
+Need more power? Add modules:
 
-## The Brain: ReAct + PlanReAct
-
-Under the hood, LlamAgent ships with two execution strategies. **SimpleReAct** handles straightforward requests — the classic Think → Act → Observe loop. But when you load the Planning module, the engine upgrades to **PlanReAct**, which automatically judges task complexity via a single LLM call:
-
-- **Simple task?** → Fast-track to ReAct. No overhead.
-- **Complex task?** → Decompose into a DAG of 3-8 steps with dependencies, then execute them in topological order.
-
-The planner doesn't just execute blindly. It has **three replan pathways** sharing a single adjustment counter:
-1. **Model-initiated** — the agent calls a `replan` tool mid-execution when it realizes the plan needs changing
-2. **Failure-triggered** — a step fails, the planner automatically restructures around it
-3. **Quality-driven** — after all steps complete, the Reflection engine scores the result; below threshold, it replans and tries again
-
-Deadlock? Detected automatically. Circular dependencies? Caught at plan validation via Kahn's algorithm. The agent doesn't spin — it adapts.
-
-## The Toolbox: Four Tiers of Access Control
-
-Tools aren't just functions you register. LlamAgent implements a **four-tier tool system** — `default`, `common`, `admin`, and `agent` — where **visibility equals usability**. If an agent can see a tool, it can call it. An admin persona sees everything. A regular persona sees the standard toolset. The agent can even **create its own tools** at runtime, with a minimal builtins blacklist to prevent code nesting.
-
-**Workspace-first workflow** (v1.5): The agent works in an isolated workspace directory (Zone 1, free zone), then explicitly syncs changes to the project via `apply_patch` or `sync_workspace_to_project`. Command execution goes through the `SandboxModule` backend — no sandbox loaded means no shell access (secure by default).
-
-## Three-Zone Safety: Sandbox the Environment, Not the Operations
-
-LlamAgent v1.3 protects against LLM hallucination errors — not by restricting what tools can do, but by restricting **where** they can operate:
-
-| Zone | Read (sl=1) | Write/Execute (sl=2) |
-|------|-------------|---------------------|
-| **Playground** (`llama_playground/`) | Allow | Allow |
-| **Project directory** | Allow | Confirm with user |
-| **Outside project** | Confirm with user | Deny |
-
-The playground is a free zone — the agent can read, write, and execute anything inside it. Project files require user confirmation for destructive operations. Anything outside the project is locked down.
-
-Each tool declares a **path_extractor** that tells the framework how to find file paths in its arguments. Tools without path extractors get automatic detection based on parameter names. The `SafetyModule` provides optional input filtering and output sanitization on top.
-
-## Child Agents + Sandbox
-
-**Child Agent Control** — The parent agent can spawn constrained child agents for subtasks. Each child inherits the parent's LLM and zone boundaries, but operates under strict limits: filtered tool access (allowlist/denylist), budget limits (max LLM calls, time, steps), and no recursive spawning by default.
-
-**Sandbox Execution** — The `SandboxModule` routes tools through isolated execution backends and provides `tool_executor` for the `JobModule`'s shell command execution. Phase 1 ships with `LocalProcessBackend` (subprocess-based); the protocol is designed for drop-in Docker/gVisor backends later. No SandboxModule = no command execution (secure by default).
-
-## Skills: Playbooks, Not Just Prompts
-
-Most frameworks stuff everything into the system prompt. LlamAgent separates **what the agent can do** (tools) from **how the agent should do it** (skills).
-
-A skill is a directory containing a `config.yaml` (metadata + tags) and a `SKILL.md` (pure natural language playbook). Skills live in `.llamagent/skills/` and are loaded on demand — the framework scans metadata at startup, but only reads the full playbook when a skill is activated.
-
-```
-.llamagent/skills/
-  db-migration/
-    config.yaml     # name, description, tags: [migration, alembic]
-    SKILL.md        # Step-by-step migration workflow
-  code-review/
-    config.yaml     # name, description, tags: [review, pr]
-    SKILL.md        # Review checklist and guidelines
+```python
+agent.register_module(ToolsModule())      # File operations, project sync
+agent.register_module(MemoryModule())     # Long-term structured memory
+agent.register_module(PlanningModule())   # DAG-based task decomposition
 ```
 
-**Three-level activation:**
-- **`/skill deploy`** — Explicit command, deterministic activation
-- **Tag matching** — Query words are normalized (plurals, tenses) and matched against skill tags. One match activates directly; multiple matches trigger LLM disambiguation
-- **LLM fallback** (optional) — When tags miss, the LLM scans all skill metadata for semantic matches
+## Why LlamAgent?
 
-The activated playbook is injected into the LLM context as a `[Active Skill]` block — one turn at a time, never persisted to history. Next turn, the system re-evaluates from scratch.
+**Truly modular** — 12 independent modules, zero coupling between them. Load only what your task needs. A chatbot, a code assistant, a research agent — same framework, different module sets.
 
-## Any LLM. Any Interface. Zero Lock-in.
+**Any LLM, zero lock-in** — OpenAI, Anthropic, DeepSeek, Ollama, or any [LiteLLM](https://github.com/BerriAI/litellm)-supported backend. Auto-detects available API keys. No key? Falls back to local Ollama.
 
-LlamAgent talks to **any LLM backend** through [LiteLLM](https://github.com/BerriAI/litellm) — OpenAI, Anthropic, DeepSeek, Mistral, or a free local Ollama model running on your laptop. No API key? No problem. It auto-detects what's available and falls back gracefully.
+**Smart tool exposure** — Not all tools need to be visible all the time. The pack system dynamically shows the right tools at the right moment — triggered by task context, skills, or runtime state. Small models see a clean 12-tool surface, not a wall of 40 schemas.
 
-Ship your agent however you want:
-- **CLI** — Interactive setup wizard (module presets, persona config, save/load personas), Rich-rendered output, slash commands. Ctrl+C exits the current agent and returns to setup.
-- **Web UI** — Single-page Gradio interface with a graphical configuration panel (dropdowns, checkboxes, radio buttons for modules and persona), chat area activates after building the agent. Supports document upload for RAG.
-- **API Server** — FastAPI with RESTful endpoints (chat, status, modules, upload), WebSocket streaming, session management, rate limiting, and Swagger docs at `/docs`.
+**Workspace-first safety** — The agent works in an isolated workspace. Project modifications go through explicit sync channels with full changeset tracking and one-click revert. Three-zone protection (playground / project / external) prevents accidental damage without blocking productivity.
 
-## Built to Be Understood
+**Memory that actually works** — Not text blobs in a vector DB. LlamAgent extracts structured facts from conversations, deduplicates them, resolves conflicts when information changes, and auto-recalls relevant memories each turn. Read and write modes are independently configurable.
 
-LlamAgent isn't a research prototype or a framework-of-frameworks. It's **production-aware code written to be read.** Every module follows the same pattern. Every hook has a clear contract. The entire framework is 41 source files with no magic, no metaclasses, and no surprises.
+**Retrieval done right** — Hybrid search combines vector similarity with keyword matching (BM25), then reranks results with an LLM. Structure-aware document chunking understands Markdown headers, code functions, and paragraph boundaries. The entire retrieval layer is backend-agnostic — swap embedding models or vector databases without touching module code.
 
-## Architecture
+**Skills, not just prompts** — Separate *what the agent can do* (tools) from *how it should do it* (skills). Skills are natural-language playbooks that activate on demand through tag matching, and they can dynamically unlock additional tool packs when needed.
 
-```
-                    +-------------------------------------------+
-                    |               Interfaces                  |
-                    |         CLI  /  Web UI  /  API            |
-                    +--------------------|----------------------+
-                                         |
-                    +--------------------|----------------------+
-                    |              SmartAgent                   |
-                    |                                           |
-                    |  on_input -> on_context -> execute        |
-                    |                             -> on_output  |
-                    +--------------------|----------------------+
-                                         |
-                    +--------------------|----------------------+
-                    |            Pluggable Modules              |
-                    |                                           |
-                    |  Tools - Job - RAG - Memory - Skill       |
-                    |  Reasoning - Reflection - Multi-Agent     |
-                    |  MCP - Safety - Sandbox - Child Agent     |
-                    +-------------------------------------------+
-```
+**Plan, execute, adapt** — Simple questions get fast single-loop answers. Complex tasks are automatically decomposed into dependency-aware step plans. If a step fails, the planner restructures. If quality is low, reflection triggers replanning. The agent doesn't spin — it adapts.
+
+## Modules
+
+| Module | What it does |
+|--------|-------------|
+| **Tools** | Read, write, search files. Workspace isolation with project sync and changeset tracking. |
+| **Memory** | Structured fact memory — extract, deduplicate, resolve conflicts, auto-recall. Read/write decoupling. |
+| **RAG** | Load documents (code, markdown, text), hybrid search (vector + BM25), LLM reranking. |
+| **Job** | Run shell commands (sync/async) via sandbox. Inspect, wait, cancel running jobs. |
+| **Skill** | Task-level playbook injection. Tag matching, LLM fallback, dynamic tool pack activation. |
+| **Reasoning** | SimpleReAct for quick tasks. PlanReAct with DAG decomposition for complex multi-step work. |
+| **Reflection** | Score results, extract lessons from failures, trigger replanning when quality is low. |
+| **Safety** | Input filtering, output sanitization, three-zone path protection. |
+| **Sandbox** | Isolated execution backends for high-risk tools. Secure by default — no sandbox, no shell. |
+| **Child Agent** | Spawn constrained sub-agents with budgets, tool allowlists, and independent workspaces. |
+| **Multi-Agent** | Role-based delegation — writer, coder, analyst, researcher. |
+| **MCP** | Connect to external Model Context Protocol servers. |
+
+Modules share a **retrieval layer** with swappable embedding models and vector backends — no module-level lock-in.
 
 ## Quick Start
 
-### Installation
+### Install
 
 ```bash
-# Clone the repository
 git clone https://github.com/llamagent/llamagent.git
 cd llamagent
-
-# Install with pip
 pip install -e .
 
-# Or install with extras
-pip install -e ".[all]"     # everything
-pip install -e ".[cli]"     # rich terminal output
+# Optional extras
+pip install -e ".[rag]"     # ChromaDB for memory & RAG
+pip install -e ".[cli]"     # Rich terminal output
 pip install -e ".[web]"     # Gradio web interface
 pip install -e ".[api]"     # FastAPI server
-pip install -e ".[rag]"     # ChromaDB for RAG & memory
-pip install -e ".[mcp]"     # Model Context Protocol
+pip install -e ".[all]"     # Everything
 ```
 
-### Configure your LLM
+### Configure
 
 ```bash
+# Option A: Environment variables
 cp .env.example .env
-# Edit .env — pick one:
-#   Option A: Set MODEL_NAME directly (e.g., deepseek/deepseek-chat)
-#   Option B: Set an API key (DEEPSEEK_API_KEY, OPENAI_API_KEY, etc.)
-#   Option C: Leave empty — defaults to local Ollama
+# Set MODEL_NAME, or an API key, or leave empty for local Ollama
+
+# Option B: YAML config (layered: env vars > YAML > defaults)
+cp llamagent.yaml.example llamagent.yaml
 ```
 
 ### Run
 
 ```bash
-# CLI with interactive setup (module presets, persona config)
-python -m llamagent
-
-# CLI with specific modules (skip interactive setup)
-python -m llamagent --modules tools,rag,memory
-
-# CLI pure chat mode (no modules, skip setup)
-python -m llamagent --no-modules
-
-# Web UI (Gradio, graphical config panel + chat)
-python -m llamagent --mode web
-
-# API server (FastAPI, Swagger docs at /docs)
-python -m llamagent --mode api
+python -m llamagent                          # Interactive CLI
+python -m llamagent --modules tools,rag      # Specific modules only
+python -m llamagent --mode web               # Gradio Web UI
+python -m llamagent --mode api               # FastAPI server
+python -m llamagent --config prod.yaml       # Custom config file
 ```
 
 ### Use as a library
 
 ```python
 from llamagent import SmartAgent, Config
-
-# Minimal — just chat
-agent = SmartAgent(Config())
-reply = agent.chat("What is the capital of France?")
-print(reply)
-
-# With modules
 from llamagent.modules.tools import ToolsModule
 from llamagent.modules.sandbox import SandboxModule
 from llamagent.modules.job import JobModule
 from llamagent.modules.reasoning import PlanningModule
 
-agent.register_module(ToolsModule())       # Workspace file tools
-agent.register_module(SandboxModule())     # Sandbox execution backend
-agent.register_module(JobModule())         # Shell command execution
-agent.register_module(PlanningModule())    # Task planning
-reply = agent.chat("Search for recent AI papers and summarize the top 3")
+agent = SmartAgent(Config())
+agent.register_module(ToolsModule())
+agent.register_module(SandboxModule())
+agent.register_module(JobModule())
+agent.register_module(PlanningModule())
+
+reply = agent.chat("Analyze the codebase and write a summary report")
 ```
 
-## Modules
-
-| Module | Description | Key Capability |
-|--------|-------------|----------------|
-| **Tools** | Workspace-centric tool system with pack-based conditional exposure | `read_files`, `write_files`, `apply_patch`, `sync_workspace_to_project` |
-| **Job** | Managed command execution via SandboxModule | `start_job(wait=True/False)`, `inspect_job`, `wait_job`, `cancel_job` |
-| **RAG** | ChromaDB-based semantic search | `search_knowledge`, document loading |
-| **Memory** | Persistent memory with semantic recall | Autonomous / hybrid modes |
-| **Skill** | Task-level playbook injection via on_context | `/skill` command, tag matching, LLM fallback |
-| **Reasoning** | ReAct + PlanReAct with DAG-based task planning | Complexity routing, replan on failure |
-| **Reflection** | Quality evaluation and lesson learning | Score-based replan trigger |
-| **Multi-Agent** | Role-based task delegation | Writer, coder, analyst, researcher |
-| **MCP** | Model Context Protocol client | Connect to external MCP servers |
-| **Sandbox** | Isolated execution for high-risk tools | Auto-assign policies, timeout protection |
-| **Child Agent** | Spawn constrained sub-agents with budgets | Role-based tools, budget limits, task board |
-| **Safety** | Input filtering + output sanitization | Injection detection, API key masking |
-
-## Module Hook Pipeline
-
-Modules interact with the agent through a hook pipeline:
+## How It Works
 
 ```
 User Input
-    │
-    ▼
-on_input()      ← forward order  (safety filtering, preprocessing)
-    │
-    ▼
-on_context()    ← forward order  (RAG retrieval, memory recall, skill playbook, lesson injection)
-    │
-    ▼
-execute()       ← strategy       (SimpleReAct or PlanReAct)
-    │
-    ▼
-on_output()     ← reverse order  (output masking, reflection)
-    │
-    ▼
+    |
+    v
+on_input()      Safety filtering, pack state reset
+    |
+    v
+on_context()    Memory recall, knowledge retrieval, skill injection
+    |
+    v
+execute()       ReAct loop or PlanReAct (think -> act -> observe)
+    |
+    v
+on_output()     Output masking, reflection scoring
+    |
+    v
 Response
 ```
 
-## Configuration
-
-All settings can be overridden via environment variables. See [`.env.example`](.env.example) for the full list.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MODEL_NAME` | auto-detect | LLM model identifier |
-| `DEEPSEEK_API_KEY` | — | DeepSeek API key |
-| `OPENAI_API_KEY` | — | OpenAI API key |
-| `ANTHROPIC_API_KEY` | — | Anthropic API key |
-| `MEMORY_MODE` | `off` | Memory mode: `off` / `autonomous` / `hybrid` |
-| `PERMISSION_LEVEL` | `1` | Default persona permission level |
-| `MAX_REACT_STEPS` | `10` | Max ReAct loop iterations |
-| `SKILL_DIRS` | — | Extra skill directory paths (comma-separated) |
-| `WEB_UI_PORT` | `7860` | Gradio web UI port |
-| `API_PORT` | `8000` | FastAPI server port |
+Modules interact through **hooks** — forward on input/context, reverse on output. No module imports another. They compose, they don't couple.
 
 ## Examples
 
-See the [`examples/`](examples/) directory for runnable tutorials:
+See [`examples/`](examples/) for runnable tutorials:
 
-- **[01_quick_start.py](examples/01_quick_start.py)** — Create an agent and chat
-- **[02_tools.py](examples/02_tools.py)** — Register tools and use function calling
-- **[03_modules.py](examples/03_modules.py)** — Load modules and understand the hook pipeline
-- **[04_reasoning.py](examples/04_reasoning.py)** — ReAct loops and task planning
-- **[05_persona.py](examples/05_persona.py)** — Create personas with roles and permissions
-- **[06_sandbox.py](examples/06_sandbox.py)** — Sandbox execution for high-risk tools
-- **[07_child_agent.py](examples/07_child_agent.py)** — Spawn constrained child agents
-- **[08_skill.py](examples/08_skill.py)** — Define and use task-level skill playbooks
-- **[09_workspace_and_jobs.py](examples/09_workspace_and_jobs.py)** — Workspace tools, project sync, and job execution
+| # | File | What you'll learn |
+|---|------|------------------|
+| 01 | `quick_start.py` | Create an agent and chat |
+| 02 | `tools.py` | Register tools, function calling, zone safety |
+| 03 | `modules.py` | Load modules, hook pipeline |
+| 04 | `reasoning.py` | ReAct loops, task planning |
+| 05 | `persona.py` | Roles, permissions, personas |
+| 06 | `sandbox.py` | Isolated execution |
+| 07 | `child_agent.py` | Constrained sub-agents |
+| 08 | `skill.py` | Task playbooks |
+| 09 | `workspace_and_jobs.py` | Workspace tools, project sync, jobs |
 
 ## Project Structure
 
 ```
 llamagent/
-├── llamagent/
-│   ├── core/           # Agent, Config, LLM, Persona
-│   ├── modules/
-│   │   ├── tools/      # Tool registry + built-in tools
-│   │   ├── rag/        # Retrieval-Augmented Generation
-│   │   ├── memory/     # Persistent memory
-│   │   ├── reasoning/  # ReAct + PlanReAct
-│   │   ├── reflection/ # Quality evaluation
-│   │   ├── multi_agent/# Role-based delegation
-│   │   ├── mcp/        # Model Context Protocol
-│   │   ├── skill/      # Task-level playbook injection
-│   │   ├── job/        # Managed command execution
-│   │   ├── sandbox/    # Isolated tool execution
-│   │   ├── child_agent/# Constrained sub-agent control
-│   │   └── safety/     # Input filtering + output sanitization
-│   └── interfaces/     # CLI, Web UI, API server
-├── examples/           # Tutorial scripts
-├── tests/              # Test suite
-├── requirements.txt
-├── pyproject.toml
-└── .env.example
+├── core/              Agent, Config, LLM, Persona
+├── modules/
+│   ├── retrieval/     Shared search infrastructure (embedding, vector, lexical)
+│   ├── tools/         Workspace tools + project sync + pack system
+│   ├── memory/        Structured fact memory
+│   ├── rag/           Document loading + hybrid retrieval
+│   ├── job/           Command execution lifecycle
+│   ├── skill/         Playbook injection + pack triggering
+│   ├── reasoning/     ReAct + PlanReAct strategies
+│   ├── reflection/    Quality evaluation + lesson learning
+│   ├── safety/        Input/output guards + zone system
+│   ├── sandbox/       Execution isolation backends
+│   ├── child_agent/   Sub-agent control with budgets
+│   ├── multi_agent/   Role-based delegation
+│   └── mcp/           Model Context Protocol
+├── interfaces/        CLI, Web UI, API server
+├── examples/          Tutorial scripts
+└── tests/             540+ tests
 ```
 
 ## License

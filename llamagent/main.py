@@ -84,6 +84,7 @@ def load_module(name: str):
 def create_agent(
     module_names: list[str] | None = None,
     persona_name: str | None = None,
+    config_path: str | None = None,
 ) -> SmartAgent:
     """
     Create an Agent and load the specified modules.
@@ -99,7 +100,7 @@ def create_agent(
     Returns:
         A configured SmartAgent instance
     """
-    config = Config()
+    config = Config(config_path=config_path)
 
     # If a persona is specified, try to load it from the persona file
     persona = None
@@ -194,6 +195,12 @@ Examples:
         help="Specify persona name (must be predefined in the persona file)",
     )
 
+    # Config file
+    parser.add_argument(
+        "--config", type=str, default=None,
+        help="Path to YAML config file (default: auto-discover llamagent.yaml)",
+    )
+
     # Port (used by Web / API modes)
     parser.add_argument(
         "--port", type=int, default=None,
@@ -202,6 +209,10 @@ Examples:
 
     args = parser.parse_args()
     module_names = _parse_module_names(args)
+
+    # Set config path for downstream Config() calls
+    if args.config:
+        os.environ["LLAMAGENT_CONFIG"] = args.config
 
     # Launch the corresponding interface based on mode
     if args.mode == "cli":
