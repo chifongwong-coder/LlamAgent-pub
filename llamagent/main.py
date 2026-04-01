@@ -33,16 +33,16 @@ from llamagent.core import SmartAgent, Config, Persona, PersonaManager
 
 AVAILABLE_MODULES = {
     "safety": "llamagent.modules.safety.SafetyModule",
-    "tools": "llamagent.modules.tools.ToolsModule",
-    "job": "llamagent.modules.job.JobModule",
+    "sandbox": "llamagent.modules.sandbox.SandboxModule",       # Before job (provides tool_executor)
+    "tools": "llamagent.modules.tools.ToolsModule",             # Before skill (pack reset)
+    "job": "llamagent.modules.job.JobModule",                   # After sandbox (hard dependency)
     "rag": "llamagent.modules.rag.RAGModule",
     "memory": "llamagent.modules.memory.MemoryModule",
-    "skill": "llamagent.modules.skill.SkillModule",
+    "skill": "llamagent.modules.skill.SkillModule",             # After tools (pack activation)
     "reflection": "llamagent.modules.reflection.ReflectionModule",
     "planning": "llamagent.modules.reasoning.PlanningModule",
     "mcp": "llamagent.modules.mcp.MCPModule",
     "multi_agent": "llamagent.modules.multi_agent.MultiAgentModule",
-    "sandbox": "llamagent.modules.sandbox.SandboxModule",
     "child_agent": "llamagent.modules.child_agent.ChildAgentModule",
 }
 
