@@ -32,6 +32,7 @@ def _create_test_agent(mock_llm_client):
     config.output_dir = "/tmp/llamagent_test_output"
     config.persona_file = "/tmp/llamagent_test_personas.json"
     config.agent_tools_dir = "/tmp/llamagent_test_tools"
+    config.hooks_config = None
 
     agent = SmartAgent.__new__(SmartAgent)
     agent.config = config
@@ -49,6 +50,9 @@ def _create_test_agent(mock_llm_client):
     agent._tools = {}
     agent._active_packs = set()
     agent._tools_version = 0
+    agent._hooks = {}
+    agent._session_started = False
+    agent._in_hook = False
 
     from llamagent.core.agent import SimpleReAct
     agent._execution_strategy = SimpleReAct()

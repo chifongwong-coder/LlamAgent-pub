@@ -6,8 +6,8 @@ After loading modules via register_module(), the Agent gains tool calling, RAG, 
 
 Core components:
 - SmartAgent:         Main Agent class containing the chat() entry point and run_react() engine
-- Module:             Pluggable module base class that interacts with the Agent via pipeline hooks
-- ExecutionStrategy:  Pluggable execution strategy interface, replacing the deprecated on_execute hook
+- Module:             Pluggable module base class that interacts with the Agent via pipeline callbacks
+- ExecutionStrategy:  Pluggable execution strategy interface, replacing the deprecated on_execute callback
 """
 
 from __future__ import annotations
@@ -20,6 +20,18 @@ from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
 from llamagent.core.config import Config
+from llamagent.core.hooks import (
+    CallableHandler,
+    HookCallback,
+    HookContext,
+    HookEvent,
+    HookHandler,
+    HookMatcher,
+    HookRegistration,
+    HookResult,
+    ShellHandler,
+    _SKIPPABLE_EVENTS,
+)
 from llamagent.core.llm import LLMClient
 
 logger = logging.getLogger(__name__)
@@ -83,7 +95,7 @@ class SimpleReAct(ExecutionStrategy):
     """
 
     def execute(self, query: str, context: str, agent: SmartAgent) -> str:
-        # Backward compatibility: check if any module intercepts via on_execute hook
+        # Backward compatibility: check if any module intercepts via on_execute callback
         for mod in agent.modules.values():
             if type(mod).on_execute is not Module.on_execute:
                 result = mod.on_execute(query, context)
@@ -112,14 +124,14 @@ class Module:
     """
     Module base class; all pluggable modules inherit from this class.
 
-    Modules interact with the Agent pipeline by overriding hook methods.
-    All hook base implementations are no-ops; modules override as needed.
+    Modules interact with the Agent pipeline by overriding callback methods.
+    All callback base implementations are no-ops; modules override as needed.
 
-    Lifecycle Hooks (called once each):
+    Lifecycle Callbacks (called once each):
     - on_attach(agent)    Called on registration, used for initialization
     - on_shutdown()       Called on Agent exit, used to release resources
 
-    Pipeline Hooks (called each conversation turn):
+    Pipeline Callbacks (called each conversation turn):
     - on_input(user_input) -> str        Input preprocessing
     - on_context(query, context) -> str  Context enhancement
     - on_output(response) -> str         Output post-processing
@@ -131,7 +143,7 @@ class Module:
     name: str = "base"
     description: str = ""
 
-    # --- Lifecycle Hooks ---
+    # --- Lifecycle Callbacks ---
 
     def on_attach(self, agent: SmartAgent) -> None:
         """
@@ -159,11 +171,11 @@ class Module:
         """
         pass
 
-    # --- Pipeline Hooks ---
+    # --- Pipeline Callbacks ---
 
     def on_input(self, user_input: str) -> str:
         """
-        Input preprocessing hook.
+        Input preprocessing callback.
 
         Called in module registration order (forward). Returning an empty string is treated as a safety interception.
         """
@@ -171,7 +183,7 @@ class Module:
 
     def on_context(self, query: str, context: str) -> str:
         """
-        Context enhancement hook.
+        Context enhancement callback.
 
         Called in module registration order (forward). Each module appends context in sequence.
         """
@@ -179,17 +191,17 @@ class Module:
 
     def on_output(self, response: str) -> str:
         """
-        Output post-processing hook.
+        Output post-processing callback.
 
         Called in **reverse** module registration order (onion model).
         """
         return response
 
-    # --- Deprecated Hooks (backward compatible, will be removed in future versions) ---
+    # --- Deprecated Callbacks (backward compatible, will be removed in future versions) ---
 
     def on_execute(self, query: str, context: str) -> str | None:
         """
-        [Deprecated] Execution interception hook; returning non-None skips default execution.
+        [Deprecated] Execution interception callback; returning non-None skips default execution.
 
         In the target architecture, this is replaced by ExecutionStrategy. This method is retained
         only for backward compatibility with modules that have not yet migrated (e.g., reasoning module).
@@ -272,6 +284,14 @@ class SmartAgent:
 
         # Tool registry version number, incremented on each register_tool/remove_tool, used for cache invalidation
         self._tools_version: int = 0
+
+        # v1.8: event hook system
+        self._hooks: dict[HookEvent, list[HookRegistration]] = {}
+        self._session_started: bool = False
+        self._in_hook: bool = False  # Reentry protection
+
+        # Register YAML-configured hooks
+        self._register_yaml_hooks()
 
     # ============================================================
     # Module management
@@ -408,9 +428,10 @@ class SmartAgent:
 
     def call_tool(self, name: str, args: dict) -> str:
         """
-        Registry tool call: lookup + permission check + execution.
+        Registry tool call: lookup + hook + permission check + execution.
 
-        Tool not found and permission denied are both returned as strings, serving as tool observations fed back to the model.
+        Tool not found and permission denied are both returned as strings,
+        serving as tool observations fed back to the model.
 
         Args:
             name: Tool name
@@ -425,26 +446,47 @@ class SmartAgent:
             available = list(self._tools.keys())
             return f"Tool '{name}' does not exist. Available tools: {available}"
 
-        # 2. Zone checking
+        # 2. PRE_TOOL_USE hook (can block or modify args)
+        hook_data = {"tool_name": name, "args": dict(args), "tool_info": tool}
+        hook_result = self.emit_hook(HookEvent.PRE_TOOL_USE, hook_data)
+        if hook_result == HookResult.SKIP:
+            return hook_data.get("skip_reason", f"Tool '{name}' blocked by hook.")
+        args = hook_data.get("args", args)  # Hook may have modified args
+
+        # 3. Zone checking
         paths = self._extract_paths(tool, args)
         zone_result = self._check_zone(name, tool, paths)
         if zone_result is not None:
             return zone_result
 
-        # v1.2: route through ToolExecutor if available
-        if self.tool_executor is not None:
-            try:
-                return self.tool_executor.execute(tool, args)
-            except Exception as e:
-                logger.error("Tool '%s' sandbox execution error: %s", name, e)
-                return f"Tool '{name}' execution error: {e}"
-
-        # 3. Execute tool (expand dict internally)
+        # 4. Execute tool (unified path for both direct and executor/sandbox)
+        start_time = time.time()
         try:
-            result = tool["func"](**args)
-            return str(result) if result is not None else ""
+            if self.tool_executor is not None:
+                result_str = self.tool_executor.execute(tool, args)
+            else:
+                result = tool["func"](**args)
+                result_str = str(result) if result is not None else ""
+
+            # 5. POST_TOOL_USE hook
+            duration_ms = (time.time() - start_time) * 1000
+            self.emit_hook(HookEvent.POST_TOOL_USE, {
+                "tool_name": name,
+                "args": args,
+                "result": result_str,
+                "result_preview": result_str[:200] if result_str else "",
+                "duration_ms": duration_ms,
+            })
+            return result_str
+
         except Exception as e:
+            # 6. TOOL_ERROR hook
             logger.error("Tool '%s' execution error: %s", name, e)
+            self.emit_hook(HookEvent.TOOL_ERROR, {
+                "tool_name": name,
+                "args": args,
+                "error": str(e),
+            })
             return f"Tool '{name}' execution error: {e}"
 
     def get_all_tool_schemas(self) -> list[dict]:
@@ -532,6 +574,150 @@ class SmartAgent:
         return result
 
     # ============================================================
+    # Event Hook system (v1.8)
+    # ============================================================
+
+    def register_hook(
+        self,
+        event: HookEvent,
+        handler: HookCallback | HookHandler,
+        *,
+        matcher: HookMatcher | None = None,
+        priority: int = 100,
+        source: str = "code",
+    ) -> None:
+        """
+        Register an event hook.
+
+        Args:
+            event: Event type to listen for
+            handler: Python callable or HookHandler instance
+            matcher: Optional filter conditions (AND logic)
+            priority: Execution order (lower = earlier). Code default=100, YAML default=200
+            source: Registration source identifier ("code" / "yaml")
+        """
+        if isinstance(handler, HookHandler):
+            hook_handler = handler
+        else:
+            hook_handler = CallableHandler(handler)
+
+        reg = HookRegistration(
+            event=event,
+            handler=hook_handler,
+            matcher=matcher,
+            priority=priority,
+            source=source,
+        )
+
+        if event not in self._hooks:
+            self._hooks[event] = []
+        self._hooks[event].append(reg)
+        # Keep sorted by priority (stable sort preserves registration order for equal priority)
+        self._hooks[event].sort(key=lambda r: r.priority)
+
+        logger.debug("Hook registered: event=%s, source=%s, priority=%d", event.value, source, priority)
+
+    def emit_hook(self, event: HookEvent, data: dict) -> HookResult:
+        """
+        Emit a hook event, executing all matching handlers.
+
+        Reentry protection: if called from within a hook handler, returns CONTINUE immediately.
+
+        Args:
+            event: Event type
+            data: Event data dict (mutable — handlers may modify it)
+
+        Returns:
+            SKIP if any handler blocked the operation (only for PRE_TOOL_USE),
+            CONTINUE otherwise
+        """
+        if self._in_hook:
+            return HookResult.CONTINUE
+
+        registrations = self._hooks.get(event)
+        if not registrations:
+            return HookResult.CONTINUE
+
+        self._in_hook = True
+        try:
+            for reg in registrations:
+                # Matcher filtering
+                if reg.matcher is not None and not reg.matcher.matches(data):
+                    continue
+
+                ctx = HookContext(
+                    agent=self,
+                    event=event,
+                    data=data,
+                    matcher=reg.matcher,
+                )
+
+                result = reg.handler.execute(ctx)
+
+                # SKIP is only effective for skippable events (PRE_TOOL_USE)
+                if result == HookResult.SKIP:
+                    if event in _SKIPPABLE_EVENTS:
+                        return HookResult.SKIP
+                    else:
+                        logger.debug(
+                            "Hook returned SKIP for non-skippable event %s, treating as CONTINUE",
+                            event.value,
+                        )
+
+            return HookResult.CONTINUE
+        finally:
+            self._in_hook = False
+
+    def _register_yaml_hooks(self) -> None:
+        """Register hooks declared in YAML config (config.hooks_config)."""
+        hooks_config = getattr(self.config, "hooks_config", None)
+        if not hooks_config or not isinstance(hooks_config, dict):
+            return
+
+        for event_name, hook_list in hooks_config.items():
+            try:
+                event = HookEvent(event_name)
+            except ValueError:
+                logger.warning("Unknown hook event in YAML config: '%s', skipping", event_name)
+                continue
+
+            if not isinstance(hook_list, list):
+                logger.warning("Hook config for '%s' is not a list, skipping", event_name)
+                continue
+
+            for hook_def in hook_list:
+                if not isinstance(hook_def, dict):
+                    continue
+
+                shell_cmd = hook_def.get("shell")
+                if not shell_cmd:
+                    logger.warning("Hook definition missing 'shell' key for event '%s', skipping", event_name)
+                    continue
+
+                # Parse matcher
+                matcher = None
+                matcher_def = hook_def.get("matcher")
+                if isinstance(matcher_def, dict):
+                    matcher = HookMatcher(
+                        tool_name=matcher_def.get("tool_name"),
+                        tool_names=matcher_def.get("tool_names"),
+                        pack=matcher_def.get("pack"),
+                        safety_level=matcher_def.get("safety_level"),
+                    )
+
+                priority = hook_def.get("priority", 200)
+                timeout = hook_def.get("timeout", 30.0)
+
+                handler = ShellHandler(command=shell_cmd, timeout=timeout)
+                self.register_hook(
+                    event=event,
+                    handler=handler,
+                    matcher=matcher,
+                    priority=priority,
+                    source="yaml",
+                )
+
+    # ============================================================
     # Zone checking (v1.3)
     # ============================================================
 
@@ -615,6 +801,18 @@ class SmartAgent:
         Returns:
             The Agent's response text
         """
+        # --- SESSION_START (fires once on first chat) ---
+        if not self._session_started:
+            self.emit_hook(HookEvent.SESSION_START, {"modules": list(self.modules.keys())})
+            self._session_started = True
+
+        # --- PRE_CHAT (observational, SKIP not supported) ---
+        self.emit_hook(HookEvent.PRE_CHAT, {"user_input": user_input})
+
+        blocked = False
+        blocked_by = None
+        response = ""
+
         # --- Before conversation: context management (reserved for token compression) ---
         self._check_context_compression()
 
@@ -626,38 +824,49 @@ class SmartAgent:
             except Exception as e:
                 logger.error("Module '%s' on_input error: %s", mod.name, e)
 
-        # Safety interception: if input is cleared (e.g., blocked by safety module), return immediately
+        # Safety interception: if input is cleared (e.g., blocked by safety module)
         if not processed or not processed.strip():
-            return "Sorry, I cannot process this request."
+            blocked = True
+            blocked_by = "safety"
+            response = "Sorry, I cannot process this request."
+        else:
+            # --- 2. on_context: modules enhance context (forward registration order) ---
+            context = ""
+            for mod in self.modules.values():
+                try:
+                    context = mod.on_context(processed, context)
+                except Exception as e:
+                    logger.error("Module '%s' on_context error: %s", mod.name, e)
 
-        # --- 2. on_context: modules enhance context (forward registration order) ---
-        context = ""
-        for mod in self.modules.values():
+            # --- 3. Execution strategy ---
             try:
-                context = mod.on_context(processed, context)
+                response = self._execution_strategy.execute(processed, context, self)
             except Exception as e:
-                logger.error("Module '%s' on_context error: %s", mod.name, e)
+                logger.error("Execution strategy error: %s", e)
+                response = f"Error processing request: {e}"
 
-        # --- 3. Execution strategy ---
-        try:
-            response = self._execution_strategy.execute(processed, context, self)
-        except Exception as e:
-            logger.error("Execution strategy error: %s", e)
-            response = f"Error processing request: {e}"
+            # --- 4. on_output: modules post-process output (reverse registration order, onion model) ---
+            for mod in reversed(list(self.modules.values())):
+                try:
+                    response = mod.on_output(response)
+                except Exception as e:
+                    logger.error("Module '%s' on_output error: %s", mod.name, e)
 
-        # --- 4. on_output: modules post-process output (reverse registration order, onion model) ---
-        for mod in reversed(list(self.modules.values())):
-            try:
-                response = mod.on_output(response)
-            except Exception as e:
-                logger.error("Module '%s' on_output error: %s", mod.name, e)
+            # --- 5. Update conversation history (write processed input, not raw user_input) ---
+            self.history.append({"role": "user", "content": processed})
+            self.history.append({"role": "assistant", "content": response})
 
-        # --- 5. Update conversation history (write processed input, not raw user_input) ---
-        self.history.append({"role": "user", "content": processed})
-        self.history.append({"role": "assistant", "content": response})
+            # --- 6. After conversation: turn window check ---
+            self._trim_history()
 
-        # --- 6. After conversation: turn window check ---
-        self._trim_history()
+        # --- POST_CHAT (always-fire, all exit paths) ---
+        self.emit_hook(HookEvent.POST_CHAT, {
+            "user_input": user_input,
+            "response": response,
+            "blocked": blocked,
+            "blocked_by": blocked_by,
+            "completed": not blocked,
+        })
 
         return response
 
@@ -1006,8 +1215,11 @@ class SmartAgent:
 
     def shutdown(self) -> None:
         """
-        Agent shutdown: calls on_shutdown() on all modules in reverse order to release resources (onion model).
+        Agent shutdown: emits SESSION_END, then calls on_shutdown() on all modules
+        in reverse order to release resources (onion model).
         """
+        self.emit_hook(HookEvent.SESSION_END, {"modules": list(self.modules.keys())})
+
         for mod in reversed(list(self.modules.values())):
             try:
                 mod.on_shutdown()

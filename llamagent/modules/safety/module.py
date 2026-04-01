@@ -5,7 +5,7 @@ SafetyModule: safety module providing two-layer security mechanism.
 2. Output sanitization (on_output): redact API keys, credentials, personal information, and other sensitive content
 
 Tool execution safety is handled by the core zone system (v1.3), not by this module.
-SafetyModule is an optional enhancement that provides on_input and on_output hooks.
+SafetyModule is an optional enhancement that provides on_input and on_output callbacks.
 
 Design principles:
 - Interface layers (CLI / Web / API) automatically load the safety module
@@ -48,12 +48,12 @@ class SafetyModule(Module):
 
 
     # ------------------------------------------------------------------
-    # Pipeline Hooks
+    # Pipeline Callbacks
     # ------------------------------------------------------------------
 
     def on_input(self, user_input: str) -> str:
         """
-        Input filtering hook.
+        Input filtering callback.
 
         Return values:
         - Safe input -> original text
@@ -76,7 +76,7 @@ class SafetyModule(Module):
 
     def on_output(self, response: str) -> str:
         """
-        Output sanitization hook.
+        Output sanitization callback.
 
         Checks and redacts sensitive information in output such as API keys, credentials, phone numbers, ID numbers, bank card numbers.
         """
