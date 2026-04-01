@@ -73,3 +73,33 @@ memory:
 # ==================== Output ====================
 # output:
 #   dir: "output/"
+
+# ==================== Hooks ====================
+# Event hooks for tool-level and lifecycle-level interception.
+# Shell commands receive event data via environment variables ($HOOK_*).
+# Exit code: 0 = allow, non-0 = block (only effective for pre_tool_use).
+#
+# hooks:
+#   pre_tool_use:
+#     - matcher:
+#         tool_name: "start_job"
+#       shell: "echo \"[PRE] $HOOK_TOOL_NAME\" >> /tmp/audit.log"
+#     - matcher:
+#         safety_level: 2
+#       shell: "/usr/local/bin/policy-check"
+#       # priority: 200                   # Lower = earlier (code hooks default 100, YAML default 200)
+#
+#   post_tool_use:
+#     - shell: "echo \"[POST] $HOOK_TOOL_NAME ($HOOK_DURATION_MS ms)\" >> /tmp/audit.log"
+#
+#   tool_error:
+#     - shell: "echo \"[ERROR] $HOOK_TOOL_NAME: $HOOK_ERROR\" >> /tmp/audit.log"
+#
+# Available environment variables:
+#   $HOOK_EVENT          - Event type (pre_tool_use / post_tool_use / tool_error / ...)
+#   $HOOK_TOOL_NAME      - Tool name
+#   $HOOK_ARGS           - Tool arguments (JSON)
+#   $HOOK_RESULT         - Tool result (post_tool_use only)
+#   $HOOK_RESULT_PREVIEW - First 200 chars of result (post_tool_use only)
+#   $HOOK_ERROR          - Error message (tool_error only)
+#   $HOOK_DURATION_MS    - Execution time in ms (post_tool_use only)

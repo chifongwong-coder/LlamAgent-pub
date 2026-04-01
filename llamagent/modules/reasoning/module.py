@@ -542,7 +542,7 @@ class PlanningModule(Module):
     Planning module: creates PlanReAct execution strategy and injects into Agent via on_attach.
 
     In the target architecture, injection is done via agent.set_execution_strategy();
-    the current transitional implementation uses the on_execute hook to intercept execution.
+    the current transitional implementation uses the on_execute callback to intercept execution.
     """
 
     name: str = "planning"
@@ -574,7 +574,7 @@ class PlanningModule(Module):
         )
 
         # Target architecture: agent.set_execution_strategy(self.strategy)
-        # Current transition: intercept via on_execute hook
+        # Current transition: intercept via on_execute callback
         if hasattr(agent, "set_execution_strategy"):
             agent.set_execution_strategy(self.strategy)
 
@@ -582,7 +582,7 @@ class PlanningModule(Module):
         """
         [Deprecated] Execution interception: delegates the request to the PlanReAct strategy.
 
-        Once the ExecutionStrategy interface in core is ready, this hook will no longer be needed.
+        Once the ExecutionStrategy interface in core is ready, this callback will no longer be needed.
         This method is retained only for backward compatibility.
         """
         if self.strategy is None:

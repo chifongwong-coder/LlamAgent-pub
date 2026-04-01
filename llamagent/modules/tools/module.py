@@ -191,7 +191,7 @@ class ToolsModule(Module):
             )
 
     # ============================================================
-    # Pipeline hooks
+    # Pipeline Callbacks
     # ============================================================
 
     def on_input(self, user_input: str) -> str:

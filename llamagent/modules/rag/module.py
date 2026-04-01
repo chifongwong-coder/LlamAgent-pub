@@ -143,7 +143,7 @@ class RAGModule(Module):
         return "\n\n".join(lines)
 
     # ============================================================
-    # Pipeline Hook
+    # Pipeline Callbacks
     # ============================================================
 
     def on_context(self, query: str, context: str) -> str:

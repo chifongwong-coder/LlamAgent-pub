@@ -145,6 +145,7 @@ def bare_agent(mock_llm_client):
     config.job_max_active = 10
     config.job_profiles = {}
     config.workspace_id = None
+    config.hooks_config = None
 
     agent = SmartAgent.__new__(SmartAgent)
     agent.config = config
@@ -163,6 +164,9 @@ def bare_agent(mock_llm_client):
     agent._tools = {}
     agent._active_packs = set()
     agent._tools_version = 0
+    agent._hooks = {}
+    agent._session_started = False
+    agent._in_hook = False
 
     from llamagent.core.agent import SimpleReAct
     agent._execution_strategy = SimpleReAct()

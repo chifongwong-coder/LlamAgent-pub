@@ -326,7 +326,7 @@ class MemoryModule(Module):
         return "\n".join(lines)
 
     # ============================================================
-    # Pipeline Hooks
+    # Pipeline Callbacks
     # ============================================================
 
     def on_context(self, query: str, context: str) -> str:

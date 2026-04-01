@@ -202,6 +202,9 @@ class Config:
         # Output
         self.output_dir: str = str(BASE_DIR / "output")
 
+        # Hooks (parsed from YAML, not a flat field)
+        self.hooks_config: dict | None = None
+
     # ==================================================================
     # Step 2: YAML loading
     # ==================================================================
@@ -288,6 +291,11 @@ class Config:
                     continue
                 setattr(self, attr_name, value)
 
+        # Parse hooks section (independent logic, not through _YAML_MAP)
+        hooks_raw = data.get("hooks")
+        if isinstance(hooks_raw, dict):
+            self.hooks_config = hooks_raw
+
         # Warn about unknown keys
         self._check_unknown_keys(data)
 
@@ -305,6 +313,9 @@ class Config:
         """Warn about YAML keys not in the mapping table."""
         for key, value in data.items():
             current_path = prefix + (key,)
+            # hooks: is a special section with its own parsing, skip validation
+            if current_path == ("hooks",):
+                continue
             if current_path not in _VALID_YAML_PATHS:
                 logger.warning(
                     "Unknown YAML config key: '%s' (ignored)",

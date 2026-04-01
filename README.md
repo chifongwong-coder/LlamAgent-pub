@@ -143,7 +143,19 @@ on_output()     Output masking, reflection scoring
 Response
 ```
 
-Modules interact through **hooks** — forward on input/context, reverse on output. No module imports another. They compose, they don't couple.
+Modules interact through **pipeline callbacks** — forward on input/context, reverse on output. No module imports another. They compose, they don't couple.
+
+**Event hooks** let you intercept every tool call — audit, block, or trigger side effects — without writing Python:
+
+```yaml
+# llamagent.yaml
+hooks:
+  pre_tool_use:
+    - matcher: { tool_name: "start_job" }
+      shell: "/usr/local/bin/policy-check"   # exit 0 = allow, non-0 = block
+  post_tool_use:
+    - shell: "echo \"$HOOK_TOOL_NAME ($HOOK_DURATION_MS ms)\" >> /tmp/audit.log"
+```
 
 ## Examples
 
@@ -153,7 +165,7 @@ See [`examples/`](examples/) for runnable tutorials:
 |---|------|------------------|
 | 01 | `quick_start.py` | Create an agent and chat |
 | 02 | `tools.py` | Register tools, function calling, zone safety |
-| 03 | `modules.py` | Load modules, hook pipeline |
+| 03 | `modules.py` | Load modules, callback pipeline |
 | 04 | `reasoning.py` | ReAct loops, task planning |
 | 05 | `persona.py` | Roles, permissions, personas |
 | 06 | `sandbox.py` | Isolated execution |
@@ -182,7 +194,7 @@ llamagent/
 │   └── mcp/           Model Context Protocol
 ├── interfaces/        CLI, Web UI, API server
 ├── examples/          Tutorial scripts
-└── tests/             540+ tests
+└── tests/             600+ tests
 ```
 
 ## License

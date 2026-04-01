@@ -48,7 +48,7 @@ class SkillModule(Module):
         self._forced_skill: str | None = None
 
     # ============================================================
-    # Lifecycle hooks
+    # Lifecycle Callbacks
     # ============================================================
 
     def on_attach(self, agent: SmartAgent) -> None:
@@ -98,7 +98,7 @@ class SkillModule(Module):
         return paths
 
     # ============================================================
-    # Pipeline hooks
+    # Pipeline Callbacks
     # ============================================================
 
     def on_input(self, user_input: str) -> str:

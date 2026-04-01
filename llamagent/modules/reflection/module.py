@@ -1,7 +1,7 @@
 """
 ReflectionModule: self-reflection and lesson management.
 
-Pipeline hooks:
+Pipeline callbacks:
 - on_input:   Record current query, reset reflection state
 - on_context: Semantic retrieval of historical lessons injected into context
 - on_output:  Evaluate quality; if below threshold, reflect + save_lesson; no retry, return as-is

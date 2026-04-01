@@ -1,7 +1,7 @@
 """
 03 — Modules: Plug In Capabilities
 
-Modules add abilities to the agent through a hook pipeline:
+Modules add abilities to the agent through a callback pipeline:
     on_input  (forward) → on_context (forward) → execute → on_output (reverse)
 
 This example shows how to create custom modules and use built-in ones.
