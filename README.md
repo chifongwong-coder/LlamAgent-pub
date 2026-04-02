@@ -128,16 +128,21 @@ reply = agent.chat("Analyze the codebase and write a summary report")
 User Input
     |
     v
-on_input()      Safety filtering, pack state reset
+on_input()           Safety filtering, pack state reset
     |
     v
-on_context()    Memory recall, knowledge retrieval, skill injection
+on_context()         Memory recall, knowledge retrieval, skill injection
     |
     v
-execute()       ReAct loop or PlanReAct (think -> act -> observe)
+execute()            ReAct loop or PlanReAct (think -> act -> observe)
+    |  (each tool call)
+    |   -> PRE_TOOL_USE hook
+    |   -> Authorization engine (zone check + scope matching)
+    |   -> Execute tool
+    |   -> POST_TOOL_USE hook
     |
     v
-on_output()     Output masking, reflection scoring
+on_output()          Output masking, reflection scoring
     |
     v
 Response
@@ -156,6 +161,14 @@ hooks:
   post_tool_use:
     - shell: "echo \"$HOOK_TOOL_NAME ($HOOK_DURATION_MS ms)\" >> /tmp/audit.log"
 ```
+
+**Three authorization modes** control how much the agent can do on its own:
+
+| Mode | Behavior |
+|------|----------|
+| `interactive` | Every side-effect operation asks for confirmation (default) |
+| `task` | Dry-run first, generate a contract, confirm once, then execute without interruption |
+| `continuous` | Run unattended with pre-configured seed scopes — no interaction, no auto-escalation |
 
 ## Examples
 
@@ -177,7 +190,7 @@ See [`examples/`](examples/) for runnable tutorials:
 
 ```
 llamagent/
-├── core/              Agent, Config, LLM, Persona
+├── core/              Agent, Config, LLM, Persona, Hooks, Authorization
 ├── modules/
 │   ├── retrieval/     Shared search infrastructure (embedding, vector, lexical)
 │   ├── tools/         Workspace tools + project sync + pack system
@@ -194,7 +207,7 @@ llamagent/
 │   └── mcp/           Model Context Protocol
 ├── interfaces/        CLI, Web UI, API server
 ├── examples/          Tutorial scripts
-└── tests/             600+ tests
+└── tests/             700+ tests
 ```
 
 ## License
