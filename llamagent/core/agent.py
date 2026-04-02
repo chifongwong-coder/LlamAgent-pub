@@ -352,6 +352,16 @@ class SmartAgent:
     # Execution strategy
     # ============================================================
 
+    def get_active_task_id(self) -> str | None:
+        """
+        Get the active task ID for scope storage/lookup.
+
+        Priority: TaskModeState.task_id > _current_task_id (PlanReAct).
+        """
+        if self.mode == "task" and self._task_mode_state and self._task_mode_state.task_id:
+            return self._task_mode_state.task_id
+        return getattr(self, "_current_task_id", None)
+
     def set_mode(self, mode: str) -> None:
         """
         Switch authorization mode.
@@ -745,6 +755,8 @@ class SmartAgent:
         state = self._task_mode_state
 
         if state.phase == "idle":
+            import uuid as _uuid
+            state.task_id = _uuid.uuid4().hex
             state.phase = "preparing"
             state.original_query = user_input
             return self._run_prepare(user_input)
@@ -752,11 +764,16 @@ class SmartAgent:
         if state.phase == "awaiting_confirmation":
             lower = user_input.strip().lower()
             if lower in ("yes", "y", "confirm", "ok", "approve"):
+                # Write approved scopes before execution
+                self._write_task_scopes()
                 state.phase = "executing"
                 state.confirmed = True
                 return self._run_execute(state.original_query)
             elif lower in ("no", "n", "cancel", "abort"):
+                task_id = state.task_id
+                self._authorization_engine.state.task_scopes.pop(task_id, None)
                 state.phase = "idle"
+                state.task_id = ""
                 state.pending_scopes.clear()
                 state.contract = None
                 state.confirmed = False
@@ -832,16 +849,44 @@ class SmartAgent:
 
         return "\n".join(lines)
 
+    def _write_task_scopes(self):
+        """Convert confirmed contract scopes into ApprovalScopes in AuthorizationState."""
+        from llamagent.core.zone import ApprovalScope
+
+        state = self._task_mode_state
+        task_id = self.get_active_task_id()
+        if not task_id or not state.contract:
+            return
+
+        scopes_to_approve = state.contract.requested_scopes
+        for rs in scopes_to_approve:
+            scope = ApprovalScope(
+                scope="task", zone=rs.zone, actions=rs.actions,
+                path_prefixes=rs.path_prefixes, tool_names=rs.tool_names,
+            )
+            self._authorization_engine.state.task_scopes.setdefault(task_id, []).append(scope)
+
     def _run_execute(self, query: str) -> str:
         """Run the normal pipeline for actual execution after contract confirmation."""
         state = self._task_mode_state
         state.phase = "executing"
-        result = self._run_normal_pipeline(query)
-        # Reset state after execution
-        state.phase = "idle"
-        state.pending_scopes.clear()
-        state.contract = None
-        state.confirmed = False
+
+        # Set _current_task_id so PlanReAct and workspace can use it
+        self._current_task_id = state.task_id
+
+        try:
+            result = self._run_normal_pipeline(query)
+        finally:
+            # Clean up
+            task_id = state.task_id
+            self._current_task_id = None
+            self._authorization_engine.state.task_scopes.pop(task_id, None)
+            state.phase = "idle"
+            state.task_id = ""
+            state.pending_scopes.clear()
+            state.contract = None
+            state.confirmed = False
+
         return result
 
     def _run_normal_pipeline(self, user_input: str) -> str:

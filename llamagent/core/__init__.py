@@ -14,6 +14,7 @@ from llamagent.core.hooks import (
 from llamagent.core.llm import LLMClient
 from llamagent.core.contract import TaskContract, TaskModeState
 from llamagent.core.zone import (
+    ApprovalScope,
     ConfirmRequest,
     ConfirmResponse,
     RequestedScope,
@@ -39,6 +40,7 @@ __all__ = [
     "TaskContract",
     "TaskModeState",
     "RequestedScope",
+    "ApprovalScope",
     "ConfirmRequest",
     "ConfirmResponse",
     "ZoneDecisionItem",
