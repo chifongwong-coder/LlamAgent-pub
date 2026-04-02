@@ -129,13 +129,17 @@ class PlanReAct(ExecutionStrategy):
             return self._execute_simple(query, context, agent, tools_schema)
 
         # -- Set task_id for workspace isolation (v1.5) --
-        import uuid as _uuid
-        task_id = _uuid.uuid4().hex
-        agent._current_task_id = task_id
+        # v1.9.2: reuse task_id if already set (e.g., by task mode)
+        owns_task_id = False
+        if getattr(agent, "_current_task_id", None) is None:
+            import uuid as _uuid
+            agent._current_task_id = _uuid.uuid4().hex
+            owns_task_id = True
         try:
             return self._execute_complex(query, context, agent, tools_schema)
         finally:
-            agent._current_task_id = None
+            if owns_task_id:
+                agent._current_task_id = None
 
     def _execute_complex(self, query: str, context: str, agent, tools_schema: list) -> str:
         """Execute a complex task with planning. Separated for task_id try/finally wrapper."""

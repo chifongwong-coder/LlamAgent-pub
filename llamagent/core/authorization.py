@@ -11,11 +11,12 @@ from __future__ import annotations
 import logging
 import os
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from llamagent.core.contract import TaskModeState
 from llamagent.core.zone import (
+    ApprovalScope,
     ConfirmRequest,
     ConfirmResponse,
     RequestedScope,
@@ -61,8 +62,8 @@ def infer_action(tool: dict) -> str:
 
 @dataclass
 class AuthorizationState:
-    """Placeholder for future scope accumulation. Empty in v1.9.0."""
-    pass
+    """Authorization state tracking approved scopes per task."""
+    task_scopes: dict = field(default_factory=dict)  # dict[str, list[ApprovalScope]]
 
 
 # ======================================================================
@@ -155,7 +156,7 @@ class TaskPolicy(AuthorizationPolicy):
         if self.state.phase == "preparing":
             return self._decide_prepare(evaluation, tool_name, engine)
         if self.state.phase == "executing":
-            return InteractivePolicy().decide(evaluation, tool_name, engine)
+            return self._decide_execute(evaluation, tool_name, engine)
         return None  # idle / awaiting_confirmation: no tool calls expected
 
     def _decide_prepare(
@@ -185,6 +186,36 @@ class TaskPolicy(AuthorizationPolicy):
             )
 
         # All read/allow — proceed
+        return None
+
+    def _decide_execute(
+        self, evaluation: ZoneEvaluation, tool_name: str, engine: AuthorizationEngine
+    ) -> str | None:
+        """Execute phase: match against approved task scopes, fall back to confirm."""
+        task_id = engine.agent.get_active_task_id()
+        scopes = engine.state.task_scopes.get(task_id, []) if task_id else []
+
+        for item in evaluation.items:
+            if item.verdict == ZoneVerdict.HARD_DENY:
+                return item.message or f"Tool '{tool_name}' blocked."
+            if item.verdict == ZoneVerdict.ALLOW:
+                continue
+            # CONFIRMABLE — try scope match
+            if _matches_any_scope(item, tool_name, scopes):
+                continue  # Auto-approved by scope
+            # No match — fall back to per-item confirm
+            request = ConfirmRequest(
+                kind="operation_confirm",
+                tool_name=tool_name,
+                action=item.action,
+                zone=item.zone,
+                target_paths=[item.path],
+                message=f"Tool '{tool_name}' on '{item.path}' is outside approved scope.",
+                mode="task",
+            )
+            response = engine.confirm(request)
+            if not response.allow:
+                return f"Tool '{tool_name}' operation on '{item.path}' was denied."
         return None
 
     def _record_pending(self, item: ZoneDecisionItem, tool_name: str):
@@ -236,6 +267,23 @@ def normalize_scopes(scopes: list[RequestedScope]) -> list[RequestedScope]:
     return result
 
 
+def _matches_any_scope(
+    item: ZoneDecisionItem, tool_name: str, scopes: list[ApprovalScope]
+) -> bool:
+    """Check if a zone decision item is covered by any approved scope."""
+    for scope in scopes:
+        if item.zone != scope.zone:
+            continue
+        if item.action not in scope.actions:
+            continue
+        if scope.tool_names and tool_name not in scope.tool_names:
+            continue
+        if not any(item.path.startswith(prefix) for prefix in scope.path_prefixes):
+            continue
+        return True
+    return False
+
+
 # ======================================================================
 # Authorization engine
 # ======================================================================
@@ -267,6 +315,7 @@ class AuthorizationEngine:
         elif mode == "interactive":
             self.policy = InteractivePolicy()
             self.agent._task_mode_state = None
+            self.state.task_scopes.clear()  # v1.9.2: clear all scopes on mode switch
         # continuous: 1.9.3
 
     def evaluate(self, tool: dict, args: dict) -> str | None:

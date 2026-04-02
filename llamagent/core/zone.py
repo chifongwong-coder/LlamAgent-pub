@@ -82,6 +82,17 @@ class ConfirmRequest:
 
 
 @dataclass
+class ApprovalScope:
+    """One approved authorization scope, stored after contract confirmation."""
+    scope: str                    # "task" (v1.9.2)
+    zone: str                     # "project" | "external"
+    actions: list[str]            # ["write"] / ["execute"]
+    path_prefixes: list[str]      # ["project:src/", "project:docs/"]
+    tool_names: list[str] | None = None
+
+
+@dataclass
 class ConfirmResponse:
     """Structured confirmation response from confirm_handler."""
     allow: bool
+    approved_scopes: list[RequestedScope] | None = None  # v1.9.2: user-narrowed scopes
