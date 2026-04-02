@@ -77,7 +77,21 @@ memory:
 
 # ==================== Authorization ====================
 # authorization:
-#   mode: interactive          # interactive (default) | task | continuous (1.9.0 only supports interactive)
+#   mode: interactive          # interactive (default) | task | continuous
+#   # Seed scopes for continuous mode (pre-authorized operations):
+#   # seed_scopes:
+#   #   - scope: session
+#   #     zone: project
+#   #     actions: [write]
+#   #     path_prefixes:
+#   #       - "docs/"
+#   #       - "src/"
+#   #   - scope: session
+#   #     zone: project
+#   #     actions: [execute]
+#   #     tool_names: [start_job]
+#   #     path_prefixes:
+#   #       - "scripts/"
 
 # ==================== Output ====================
 # output:
