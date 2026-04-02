@@ -12,9 +12,11 @@ from llamagent.core.hooks import (
     HookResult,
 )
 from llamagent.core.llm import LLMClient
+from llamagent.core.contract import TaskContract, TaskModeState
 from llamagent.core.zone import (
     ConfirmRequest,
     ConfirmResponse,
+    RequestedScope,
     ZoneDecisionItem,
     ZoneEvaluation,
     ZoneVerdict,
@@ -34,6 +36,9 @@ __all__ = [
     "HookHandler",
     "HookMatcher",
     "HookResult",
+    "TaskContract",
+    "TaskModeState",
+    "RequestedScope",
     "ConfirmRequest",
     "ConfirmResponse",
     "ZoneDecisionItem",
