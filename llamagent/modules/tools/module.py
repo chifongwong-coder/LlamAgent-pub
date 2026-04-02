@@ -187,6 +187,7 @@ class ToolsModule(Module):
                 safety_level=info.safety_level,
                 path_extractor=None,  # web_search/web_fetch have no path extractors
                 pack=info.pack,
+                action=getattr(info, "action", None),
             )
         for _name, info in self.agent_registry._tools.items():
             if _name in self.agent._tools:
@@ -197,6 +198,7 @@ class ToolsModule(Module):
                 safety_level=info.safety_level,
                 creator_id=info.creator_id,
                 pack=info.pack,
+                action=getattr(info, "action", None),
             )
 
     # ============================================================

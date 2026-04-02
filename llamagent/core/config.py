@@ -93,6 +93,7 @@ _YAML_MAP = [
     (("output", "dir"), "output_dir", str),
     (("web", "search_provider"), "web_search_provider", str),
     (("web", "search_num_results"), "web_search_num_results", int),
+    (("authorization", "mode"), "authorization_mode", str),
 ]
 
 # Build a set of valid YAML key paths for unknown-key detection
@@ -203,6 +204,9 @@ class Config:
 
         # Output
         self.output_dir: str = str(BASE_DIR / "output")
+
+        # Authorization
+        self.authorization_mode: str = "interactive"
 
         # Web
         self.web_search_provider: str = ""  # "" = auto-detect

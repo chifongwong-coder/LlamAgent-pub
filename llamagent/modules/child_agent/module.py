@@ -316,6 +316,7 @@ class ChildAgentModule(Module):
         child.playground_dir = parent.playground_dir
         child.confirm_handler = parent.confirm_handler
         child.interaction_handler = getattr(parent, "interaction_handler", None)
+        child.mode = getattr(parent, "mode", "interactive")
         child._tools = {}
         child._tools_version = 0
         child.tool_executor = getattr(parent, "tool_executor", None)  # Inherit sandbox

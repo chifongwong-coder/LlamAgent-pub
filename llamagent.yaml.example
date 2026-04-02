@@ -75,6 +75,10 @@ memory:
 #   search_provider: ""              # "" = auto-detect from API keys, or: "duckduckgo" / "serpapi" / "tavily"
 #   search_num_results: 5            # Default number of results per search
 
+# ==================== Authorization ====================
+# authorization:
+#   mode: interactive          # interactive (default) | task | continuous (1.9.0 only supports interactive)
+
 # ==================== Output ====================
 # output:
 #   dir: "output/"

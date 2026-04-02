@@ -37,6 +37,7 @@ class ToolInfo:
     safety_level: int = 1               # Safety level: 1=read-only 2=has side effects 3=high risk
     creator_id: str | None = None       # Creator persona_id (only set for agent-tier tools)
     pack: str | None = None             # v1.6: pack name (None = default public surface, always visible)
+    action: str | None = None           # v1.9: explicit action "read" | "write" | "execute" | None (None = infer from safety_level)
 
 
 class ToolRegistry:

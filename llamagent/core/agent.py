@@ -19,6 +19,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
+from llamagent.core.authorization import AuthorizationEngine
 from llamagent.core.config import Config
 from llamagent.core.hooks import (
     CallableHandler,
@@ -263,8 +264,8 @@ class SmartAgent:
         # Execution strategy, default SimpleReAct
         self._execution_strategy: ExecutionStrategy = SimpleReAct()
 
-        # v1.3: zone-based safety system
-        self.confirm_handler: Callable[[str], bool] | None = None
+        # v1.3/v1.9: zone-based safety system (v1.9: structured ConfirmRequest/ConfirmResponse)
+        self.confirm_handler: Callable | None = None  # Callable[[ConfirmRequest], ConfirmResponse]
         self.interaction_handler = None  # v1.8.2: injected by caller for ask_user tool
         self._confirm_wait_time: float = 0.0  # Accumulated confirmation wait, excluded from react_timeout
         self.project_dir: str = os.path.realpath(os.getcwd())
@@ -274,6 +275,10 @@ class SmartAgent:
         except OSError:
             pass  # Playground creation failed (read-only fs, permissions, etc.); zone system still works
         self.tool_executor = None  # v1.2: injected by SandboxModule for sandbox execution dispatch
+
+        # v1.9: authorization engine (encapsulates zone evaluation + policy decision)
+        self.mode: str = getattr(self.config, "authorization_mode", "interactive")
+        self._authorization_engine = AuthorizationEngine(self)
 
         # Tool registry (simple implementation, later enhanced by tools module)
         # Format: {name: {"func": callable, "description": str, "parameters": dict,
@@ -376,6 +381,7 @@ class SmartAgent:
         creator_id: str | None = None,
         path_extractor: Callable[[dict], list[str]] | None = None,
         pack: str | None = None,
+        action: str | None = None,
     ) -> None:
         """
         Register a tool in the registry.
@@ -406,6 +412,7 @@ class SmartAgent:
             "creator_id": creator_id,
             "path_extractor": path_extractor,
             "pack": pack,
+            "action": action,
         }
         self._tools_version += 1
         logger.debug("Tool registered: %s (tier=%s, safety_level=%d)", name, tier, safety_level)
@@ -454,11 +461,10 @@ class SmartAgent:
             return hook_data.get("skip_reason", f"Tool '{name}' blocked by hook.")
         args = hook_data.get("args", args)  # Hook may have modified args
 
-        # 3. Zone checking
-        paths = self._extract_paths(tool, args)
-        zone_result = self._check_zone(name, tool, paths)
-        if zone_result is not None:
-            return zone_result
+        # 3. Authorization (path extraction + zone evaluation + policy decision)
+        auth_result = self._authorization_engine.evaluate(tool, args)
+        if auth_result is not None:
+            return auth_result
 
         # 4. Execute tool (unified path for both direct and executor/sandbox)
         start_time = time.time()
@@ -719,72 +725,33 @@ class SmartAgent:
                 )
 
     # ============================================================
-    # Zone checking (v1.3)
-    # ============================================================
-
-    def _extract_paths(self, tool: dict, args: dict) -> list[str]:
-        """Extract paths from tool arguments using path_extractor or auto-detection."""
-        extractor = tool.get("path_extractor")
-        if extractor is not None:
-            try:
-                return [p for p in extractor(args) if p]
-            except Exception:
-                return []
-        # Auto path extractor fallback
-        PATH_KEYWORDS = {"path", "file", "filepath"}
-        return [v for k, v in args.items()
-                if any(kw in k.lower() for kw in PATH_KEYWORDS)
-                and isinstance(v, str)]
-
-    def _check_zone(self, tool_name: str, tool: dict, paths: list[str]) -> str | None:
-        """Check if paths are within allowed zones. Returns rejection string or None to allow."""
-        if not paths:
-            return None
-
-        sl = tool.get("safety_level", 1)
-        project = self.project_dir
-        playground = self.playground_dir
-
-        for raw_path in paths:
-            resolved = os.path.realpath(os.path.join(project, raw_path)) if not os.path.isabs(raw_path) else os.path.realpath(raw_path)
-
-            # Zone 1: Playground — always allow
-            if resolved.startswith(playground + os.sep) or resolved == playground:
-                continue
-
-            # Zone 2: Project directory — sl=1 allow, sl=2 confirm
-            if resolved.startswith(project + os.sep) or resolved == project:
-                if sl >= 2:
-                    desc = f"Tool '{tool_name}' wants to operate on '{raw_path}' in project directory '{project}' (has side effects)"
-                    if not self._ask_confirmation(desc):
-                        return f"Tool '{tool_name}' operation on '{raw_path}' was denied. Reason: requires user confirmation for side-effect operations in project directory."
-                continue
-
-            # Zone 3: External — sl=1 confirm, sl=2 deny
-            if sl >= 2:
-                return f"Tool '{tool_name}' cannot operate on '{raw_path}'. Reason: path is outside project directory '{project}', side-effect operations are not allowed."
-            else:
-                desc = f"Tool '{tool_name}' wants to read '{raw_path}' (outside project directory '{project}')"
-                if not self._ask_confirmation(desc):
-                    return f"Tool '{tool_name}' operation on '{raw_path}' was denied. Reason: requires user confirmation to read outside project directory."
-
-        return None
-
-    # ============================================================
     # Conversation (core capability)
     # ============================================================
 
-    def _ask_confirmation(self, desc: str) -> bool:
-        """Call confirm_handler and track wait time (excluded from react_timeout)."""
+    def _ask_confirmation(self, request) -> "ConfirmResponse":
+        """
+        Call confirm_handler with structured request. Track wait time.
+
+        Args:
+            request: ConfirmRequest from the authorization engine
+
+        Returns:
+            ConfirmResponse (allow=False if no handler or exception)
+        """
+        from llamagent.core.zone import ConfirmResponse
+
         if self.confirm_handler is None:
-            return False
+            return ConfirmResponse(allow=False)
         t0 = time.time()
         try:
-            result = self.confirm_handler(desc)
+            response = self.confirm_handler(request)
+            if not isinstance(response, ConfirmResponse):
+                # Backward compat: if handler returns bool, wrap it
+                response = ConfirmResponse(allow=bool(response))
         except Exception:
-            result = False
+            response = ConfirmResponse(allow=False)
         self._confirm_wait_time += time.time() - t0
-        return result
+        return response
 
     def chat(self, user_input: str) -> str:
         """
