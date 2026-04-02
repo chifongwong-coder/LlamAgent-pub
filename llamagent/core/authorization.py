@@ -14,9 +14,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from llamagent.core.contract import TaskModeState
 from llamagent.core.zone import (
     ConfirmRequest,
     ConfirmResponse,
+    RequestedScope,
     ZoneDecisionItem,
     ZoneEvaluation,
     ZoneVerdict,
@@ -132,6 +134,108 @@ class InteractivePolicy(AuthorizationPolicy):
         return None  # All items allowed
 
 
+class TaskPolicy(AuthorizationPolicy):
+    """
+    v1.9.1 task mode: controlled dry-run during prepare, interactive during execute.
+
+    Prepare phase: read operations execute normally, write/execute operations
+    are blocked and recorded as pending scopes for the task contract.
+    Execute phase: falls back to InteractivePolicy (1.9.2 will add scope matching).
+    """
+
+    def __init__(self, state: TaskModeState):
+        self.state = state
+
+    def decide(
+        self,
+        evaluation: ZoneEvaluation,
+        tool_name: str,
+        engine: AuthorizationEngine,
+    ) -> str | None:
+        if self.state.phase == "preparing":
+            return self._decide_prepare(evaluation, tool_name, engine)
+        if self.state.phase == "executing":
+            return InteractivePolicy().decide(evaluation, tool_name, engine)
+        return None  # idle / awaiting_confirmation: no tool calls expected
+
+    def _decide_prepare(
+        self, evaluation: ZoneEvaluation, tool_name: str, engine: AuthorizationEngine
+    ) -> str | None:
+        # ask_user always allowed during prepare (need user info)
+        if tool_name == "ask_user":
+            return None
+
+        # First pass: check for HARD_DENY (must reject before recording anything)
+        for item in evaluation.items:
+            if item.verdict == ZoneVerdict.HARD_DENY:
+                return item.message or f"Tool '{tool_name}' blocked."
+
+        # Second pass: record write/execute as pending scopes
+        recorded = []
+        for item in evaluation.items:
+            if item.action in ("write", "execute"):
+                self._record_pending(item, tool_name)
+                recorded.append(item.path)
+
+        if recorded:
+            paths_str = ", ".join(recorded)
+            return (
+                f"[Prepare] '{tool_name}' on {paths_str} recorded. "
+                f"Will need authorization before execution."
+            )
+
+        # All read/allow — proceed
+        return None
+
+    def _record_pending(self, item: ZoneDecisionItem, tool_name: str):
+        scope = RequestedScope(
+            zone=item.zone,
+            actions=[item.action],
+            path_prefixes=[item.path],
+            tool_names=[tool_name],
+        )
+        self.state.pending_scopes.append(scope)
+
+
+def normalize_scopes(scopes: list[RequestedScope]) -> list[RequestedScope]:
+    """
+    Aggregate pending scopes for a cleaner contract.
+
+    Merges scopes with same zone + action + tool_name, deduplicates paths,
+    and attempts to find common path prefixes.
+    """
+    if not scopes:
+        return []
+
+    # Group by (zone, action_tuple, tool_names_tuple)
+    groups: dict[tuple, list[str]] = {}
+    for s in scopes:
+        key = (s.zone, tuple(sorted(s.actions)), tuple(sorted(s.tool_names or [])))
+        if key not in groups:
+            groups[key] = []
+        groups[key].extend(s.path_prefixes)
+
+    result = []
+    for (zone, actions, tool_names), paths in groups.items():
+        # Deduplicate paths
+        unique_paths = sorted(set(paths))
+
+        # Try to find common prefix
+        if len(unique_paths) > 1:
+            prefix = os.path.commonpath(unique_paths) if unique_paths else ""
+            if prefix and prefix != unique_paths[0]:
+                unique_paths = [prefix + "/"]
+
+        result.append(RequestedScope(
+            zone=zone,
+            actions=list(actions),
+            path_prefixes=unique_paths,
+            tool_names=list(tool_names) if tool_names else None,
+        ))
+
+    return result
+
+
 # ======================================================================
 # Authorization engine
 # ======================================================================
@@ -153,6 +257,17 @@ class AuthorizationEngine:
         self.agent = agent
         self.state = AuthorizationState()
         self.policy: AuthorizationPolicy = InteractivePolicy()
+
+    def set_mode(self, mode: str):
+        """Switch authorization mode and policy."""
+        if mode == "task":
+            state = TaskModeState()
+            self.policy = TaskPolicy(state)
+            self.agent._task_mode_state = state
+        elif mode == "interactive":
+            self.policy = InteractivePolicy()
+            self.agent._task_mode_state = None
+        # continuous: 1.9.3
 
     def evaluate(self, tool: dict, args: dict) -> str | None:
         """

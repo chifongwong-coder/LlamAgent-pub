@@ -279,6 +279,7 @@ class SmartAgent:
         # v1.9: authorization engine (encapsulates zone evaluation + policy decision)
         self.mode: str = getattr(self.config, "authorization_mode", "interactive")
         self._authorization_engine = AuthorizationEngine(self)
+        self._task_mode_state = None  # v1.9.1: TaskModeState, set by set_mode("task")
 
         # Tool registry (simple implementation, later enhanced by tools module)
         # Format: {name: {"func": callable, "description": str, "parameters": dict,
@@ -350,6 +351,17 @@ class SmartAgent:
     # ============================================================
     # Execution strategy
     # ============================================================
+
+    def set_mode(self, mode: str) -> None:
+        """
+        Switch authorization mode.
+
+        Args:
+            mode: "interactive" (default) | "task" | "continuous" (1.9.3)
+        """
+        self.mode = mode
+        self._authorization_engine.set_mode(mode)
+        logger.info("Authorization mode switched to: %s", mode)
 
     def set_execution_strategy(self, strategy: ExecutionStrategy) -> None:
         """
@@ -725,6 +737,151 @@ class SmartAgent:
                 )
 
     # ============================================================
+    # Task mode (v1.9.1)
+    # ============================================================
+
+    def _handle_task_mode_turn(self, user_input: str) -> str:
+        """Handle one chat() turn in task mode based on current phase."""
+        state = self._task_mode_state
+
+        if state.phase == "idle":
+            state.phase = "preparing"
+            state.original_query = user_input
+            return self._run_prepare(user_input)
+
+        if state.phase == "awaiting_confirmation":
+            lower = user_input.strip().lower()
+            if lower in ("yes", "y", "confirm", "ok", "approve"):
+                state.phase = "executing"
+                state.confirmed = True
+                return self._run_execute(state.original_query)
+            elif lower in ("no", "n", "cancel", "abort"):
+                state.phase = "idle"
+                state.pending_scopes.clear()
+                state.contract = None
+                state.confirmed = False
+                return "Task cancelled."
+            else:
+                # Additional info — re-enter prepare
+                state.phase = "preparing"
+                return self._run_prepare(user_input)
+
+        if state.phase == "executing":
+            return self._run_normal_pipeline(user_input)
+
+        return self._run_normal_pipeline(user_input)
+
+    def _run_prepare(self, query: str) -> str:
+        """Run one prepare turn: dry-run ReAct to collect pending scopes."""
+        # on_input for safety filtering
+        processed = query
+        for mod in self.modules.values():
+            try:
+                processed = mod.on_input(processed)
+            except Exception as e:
+                logger.error("Module '%s' on_input error: %s", mod.name, e)
+
+        if not processed or not processed.strip():
+            return "Sorry, I cannot process this request."
+
+        # on_context for knowledge/memory/skill injection
+        context = ""
+        for mod in self.modules.values():
+            try:
+                context = mod.on_context(processed, context)
+            except Exception as e:
+                logger.error("Module '%s' on_context error: %s", mod.name, e)
+
+        tools_schema = self.get_all_tool_schemas()
+        messages = self.build_messages(query, context)
+        react_result = self.run_react(messages, tools_schema, self.call_tool)
+
+        # After dry-run, generate contract from collected scopes
+        from llamagent.core.authorization import normalize_scopes
+        from llamagent.core.contract import TaskContract
+
+        state = self._task_mode_state
+        normalized = normalize_scopes(state.pending_scopes)
+
+        contract = TaskContract(
+            task_summary=query,
+            planned_operations=[
+                f"{s.actions[0]} in {s.zone}: {', '.join(s.path_prefixes)}"
+                for s in normalized
+            ],
+            requested_scopes=normalized,
+            open_questions=[],
+            risk_summary=f"{len(normalized)} operations require authorization.",
+        )
+        state.contract = contract
+        state.phase = "awaiting_confirmation"
+
+        # Build contract summary for user
+        if not normalized:
+            # No CONFIRMABLE operations found — skip contract, go straight to execute
+            state.phase = "executing"
+            state.confirmed = True
+            return self._run_execute(state.original_query)
+
+        lines = [f"[Task Contract] {contract.task_summary}", ""]
+        lines.append("Planned operations requiring authorization:")
+        for op in contract.planned_operations:
+            lines.append(f"  - {op}")
+        lines.append(f"\nRisk: {contract.risk_summary}")
+        lines.append("\nReply 'yes' to confirm, 'no' to cancel, or provide more details.")
+
+        return "\n".join(lines)
+
+    def _run_execute(self, query: str) -> str:
+        """Run the normal pipeline for actual execution after contract confirmation."""
+        state = self._task_mode_state
+        state.phase = "executing"
+        result = self._run_normal_pipeline(query)
+        # Reset state after execution
+        state.phase = "idle"
+        state.pending_scopes.clear()
+        state.contract = None
+        state.confirmed = False
+        return result
+
+    def _run_normal_pipeline(self, user_input: str) -> str:
+        """Run the standard pipeline (on_input → on_context → strategy → on_output)."""
+        processed = user_input
+        for mod in self.modules.values():
+            try:
+                processed = mod.on_input(processed)
+            except Exception as e:
+                logger.error("Module '%s' on_input error: %s", mod.name, e)
+
+        if not processed or not processed.strip():
+            return "Sorry, I cannot process this request."
+
+        context = ""
+        for mod in self.modules.values():
+            try:
+                context = mod.on_context(processed, context)
+            except Exception as e:
+                logger.error("Module '%s' on_context error: %s", mod.name, e)
+
+        try:
+            response = self._execution_strategy.execute(processed, context, self)
+        except Exception as e:
+            logger.error("Execution strategy error: %s", e)
+            response = f"Error processing request: {e}"
+
+        for mod in reversed(list(self.modules.values())):
+            try:
+                response = mod.on_output(response)
+            except Exception as e:
+                logger.error("Module '%s' on_output error: %s", mod.name, e)
+
+        self.history.append({"role": "user", "content": processed})
+        self.history.append({"role": "assistant", "content": response})
+        self._trim_history()
+
+        return response
+
+    # ============================================================
     # Conversation (core capability)
     # ============================================================
 
@@ -780,6 +937,15 @@ class SmartAgent:
         blocked = False
         blocked_by = None
         response = ""
+
+        # --- Task mode branch (v1.9.1) ---
+        if self.mode == "task" and self._task_mode_state is not None:
+            response = self._handle_task_mode_turn(user_input)
+            self.emit_hook(HookEvent.POST_CHAT, {
+                "user_input": user_input, "response": response,
+                "blocked": False, "blocked_by": None, "completed": True,
+            })
+            return response
 
         # --- Before conversation: context management (reserved for token compression) ---
         self._check_context_compression()

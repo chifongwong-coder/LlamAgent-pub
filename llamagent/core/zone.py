@@ -60,15 +60,25 @@ class ZoneEvaluation:
 
 
 @dataclass
+class RequestedScope:
+    """One authorization scope requested in a task contract."""
+    zone: str                     # "project" | "external"
+    actions: list[str]            # ["write"] / ["read", "write"] / ["execute"]
+    path_prefixes: list[str]      # ["project:src/", "project:docs/"]
+    tool_names: list[str] | None = None
+
+
+@dataclass
 class ConfirmRequest:
     """Structured confirmation request passed to confirm_handler."""
-    kind: str               # "operation_confirm" (1.9.0 only this kind)
+    kind: str               # "operation_confirm" | "task_contract"
     tool_name: str
     action: str             # "read" | "write" | "execute"
     zone: str               # "playground" | "project" | "external"
     target_paths: list[str]
     message: str
     mode: str = "interactive"  # Informational field, not for decision logic
+    requested_scopes: list[RequestedScope] | None = None  # v1.9.1: contract scopes
 
 
 @dataclass
