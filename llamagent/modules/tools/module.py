@@ -105,10 +105,15 @@ class ToolsModule(Module):
         super().on_attach(agent)
         self._is_admin = bool(agent.persona and agent.persona.is_admin)
 
-        # --- 1. Load built-in tools (globally shared: web_fetch; web_search unregistered) ---
+        # --- 1. Load built-in tools (globally shared: web_search + web_fetch in pack="web") ---
         import llamagent.modules.tools.builtin as builtin
         self.common_registry = global_registry
-        builtin.web_search._llm = agent.llm
+
+        # Initialize web search backend (auto-detect or from config)
+        from llamagent.modules.tools.web import create_search_backend
+        backend = create_search_backend(agent.config)
+        if backend is not None:
+            builtin.web_search._backend = backend
 
         # --- 1b. Create v1.5 internal services ---
         from llamagent.modules.tools.workspace import WorkspaceService

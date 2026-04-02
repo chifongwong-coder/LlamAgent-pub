@@ -283,7 +283,7 @@ class TestInjectionFormat:
 
         mod = SkillModule()
         bare_agent.register_module(mod)
-        result = mod.on_context("any query", "original")
+        result = mod.on_context("hello there", "original")
         assert result == "original"
 
 

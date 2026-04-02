@@ -91,6 +91,8 @@ _YAML_MAP = [
     (("job", "max_active"), "job_max_active", int),
     (("job", "profiles"), "job_profiles", dict),
     (("output", "dir"), "output_dir", str),
+    (("web", "search_provider"), "web_search_provider", str),
+    (("web", "search_num_results"), "web_search_num_results", int),
 ]
 
 # Build a set of valid YAML key paths for unknown-key detection
@@ -201,6 +203,10 @@ class Config:
 
         # Output
         self.output_dir: str = str(BASE_DIR / "output")
+
+        # Web
+        self.web_search_provider: str = ""  # "" = auto-detect
+        self.web_search_num_results: int = 5
 
         # Hooks (parsed from YAML, not a flat field)
         self.hooks_config: dict | None = None
@@ -406,6 +412,12 @@ class Config:
         # Job
         self.job_default_timeout = _safe_float("JOB_DEFAULT_TIMEOUT", self.job_default_timeout)
         self.job_max_active = _safe_int("JOB_MAX_ACTIVE", self.job_max_active)
+
+        # Web
+        env_web_provider = os.getenv("WEB_SEARCH_PROVIDER")
+        if env_web_provider:
+            self.web_search_provider = env_web_provider
+        self.web_search_num_results = _safe_int("WEB_SEARCH_NUM_RESULTS", self.web_search_num_results)
 
         # Output
         env_output = os.getenv("OUTPUT_DIR")

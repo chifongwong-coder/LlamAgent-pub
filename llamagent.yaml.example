@@ -70,6 +70,11 @@ memory:
 #   max_active: 10
 #   profiles: {}
 
+# ==================== Web ====================
+# web:
+#   search_provider: ""              # "" = auto-detect from API keys, or: "duckduckgo" / "serpapi" / "tavily"
+#   search_num_results: 5            # Default number of results per search
+
 # ==================== Output ====================
 # output:
 #   dir: "output/"
