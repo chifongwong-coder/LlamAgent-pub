@@ -2,6 +2,7 @@
 Platform built-in tools (common tier): available to all llamas out of the box.
 
 Includes:
+- ask_user:    Ask the user a question (requires interaction handler)
 - web_search:  Web search via pluggable backends (DuckDuckGo / SerpAPI / Tavily)
 - web_fetch:   Fetch page content from a specified URL
 
@@ -11,6 +12,40 @@ Registered to global_registry with safety_level assigned per tool characteristic
 import json
 
 from llamagent.modules.tools.registry import tool
+
+
+# ============================================================
+# User interaction
+# ============================================================
+
+@tool(
+    name="ask_user",
+    description="Ask the user a question to get information needed for the current task. "
+                "Use this when you need clarification, missing details, or a decision.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "question": {"type": "string", "description": "The question to ask"},
+            "choices": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional list of choices for the user to pick from",
+            },
+        },
+        "required": ["question"],
+    },
+    tier="default",
+    safety_level=1,
+)
+def ask_user(question: str, choices: list[str] | None = None) -> str:
+    """Ask the user and return their response as a string."""
+    handler = getattr(ask_user, "_handler", None)
+    if handler is None:
+        return "Cannot ask user: no interaction handler configured."
+    try:
+        return handler.ask(question, choices)
+    except Exception as e:
+        return f"Failed to get user response: {e}"
 
 
 # ============================================================

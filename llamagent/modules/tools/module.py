@@ -115,6 +115,10 @@ class ToolsModule(Module):
         if backend is not None:
             builtin.web_search._backend = backend
 
+        # Initialize user interaction handler (injected by caller)
+        if getattr(agent, "interaction_handler", None) is not None:
+            builtin.ask_user._handler = agent.interaction_handler
+
         # --- 1b. Create v1.5 internal services ---
         from llamagent.modules.tools.workspace import WorkspaceService
         from llamagent.modules.tools.project_sync import ProjectSyncService
