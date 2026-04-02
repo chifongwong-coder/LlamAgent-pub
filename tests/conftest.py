@@ -158,6 +158,7 @@ def bare_agent(mock_llm_client):
     agent._execution_strategy = None
     import os
     agent.confirm_handler = None
+    agent.interaction_handler = None
     agent.project_dir = os.path.realpath(os.getcwd())
     agent.playground_dir = os.path.realpath(os.path.join(agent.project_dir, "llama_playground"))
     agent.tool_executor = None

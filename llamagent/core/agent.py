@@ -265,6 +265,7 @@ class SmartAgent:
 
         # v1.3: zone-based safety system
         self.confirm_handler: Callable[[str], bool] | None = None
+        self.interaction_handler = None  # v1.8.2: injected by caller for ask_user tool
         self._confirm_wait_time: float = 0.0  # Accumulated confirmation wait, excluded from react_timeout
         self.project_dir: str = os.path.realpath(os.getcwd())
         self.playground_dir: str = os.path.realpath(os.path.join(self.project_dir, "llama_playground"))

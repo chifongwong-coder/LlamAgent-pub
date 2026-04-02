@@ -44,6 +44,7 @@ def _create_test_agent(mock_llm_client):
     agent.conversation = agent.history
     import os
     agent.confirm_handler = None
+    agent.interaction_handler = None
     agent.project_dir = os.path.realpath(os.getcwd())
     agent.playground_dir = os.path.realpath(os.path.join(agent.project_dir, "llama_playground"))
     agent.tool_executor = None
