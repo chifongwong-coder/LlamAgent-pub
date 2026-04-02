@@ -159,6 +159,7 @@ def bare_agent(mock_llm_client):
     import os
     agent.confirm_handler = None
     agent.interaction_handler = None
+    agent._confirm_wait_time = 0.0
     agent.project_dir = os.path.realpath(os.getcwd())
     agent.playground_dir = os.path.realpath(os.path.join(agent.project_dir, "llama_playground"))
     agent.tool_executor = None
@@ -168,7 +169,10 @@ def bare_agent(mock_llm_client):
     agent._hooks = {}
     agent._session_started = False
     agent._in_hook = False
+    agent.mode = "interactive"
 
     from llamagent.core.agent import SimpleReAct
+    from llamagent.core.authorization import AuthorizationEngine
     agent._execution_strategy = SimpleReAct()
+    agent._authorization_engine = AuthorizationEngine(agent)
     return agent

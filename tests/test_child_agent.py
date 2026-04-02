@@ -233,10 +233,13 @@ class TestChildInheritsZoneSettings:
         assert child.project_dir == "/custom/project"
         assert child.playground_dir == "/custom/project/llama_playground"
 
-    def test_child_inherits_confirm_handler(self, bare_agent):
-        """Child agent inherits parent's confirm_handler."""
-        handler = lambda desc: True
+    def test_child_inherits_confirm_handler_and_mode(self, bare_agent):
+        """Child agent inherits parent's confirm_handler and mode."""
+        from llamagent.core.zone import ConfirmRequest, ConfirmResponse
+
+        handler = lambda req: ConfirmResponse(allow=True)
         bare_agent.confirm_handler = handler
+        bare_agent.mode = "interactive"
 
         module = ChildAgentModule()
         bare_agent.register_module(module)
@@ -245,6 +248,7 @@ class TestChildInheritsZoneSettings:
         child = module._create_child_agent(spec)
 
         assert child.confirm_handler is handler
+        assert child.mode == "interactive"
 
         # If parent has no handler, child also has none
         bare_agent.confirm_handler = None

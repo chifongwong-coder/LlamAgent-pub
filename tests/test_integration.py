@@ -54,9 +54,13 @@ def _create_test_agent(mock_llm_client):
     agent._hooks = {}
     agent._session_started = False
     agent._in_hook = False
+    agent.mode = "interactive"
 
     from llamagent.core.agent import SimpleReAct
     agent._execution_strategy = SimpleReAct()
+
+    from llamagent.core.authorization import AuthorizationEngine
+    agent._authorization_engine = AuthorizationEngine(agent)
     return agent
 
 
