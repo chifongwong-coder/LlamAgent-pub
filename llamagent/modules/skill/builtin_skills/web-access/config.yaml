@@ -1,6 +1,6 @@
 name: web-access
-description: Fetch and read web page content
-tags: [web, url, fetch, http, page, site, link, browse, scrape, download, html, crawl, website]
+description: Search the web and fetch web page content
+tags: [web, url, fetch, http, page, site, link, browse, scrape, download, html, crawl, website, search, query, find, lookup]
 invocation: auto-trigger
 required_tool_packs:
   - web

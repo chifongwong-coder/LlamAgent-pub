@@ -2,7 +2,7 @@
 Platform built-in tools (common tier): available to all llamas out of the box.
 
 Includes:
-- web_search:  Web search (LLM-simulated, to be replaced with a real API)
+- web_search:  Web search via pluggable backends (DuckDuckGo / SerpAPI / Tavily)
 - web_fetch:   Fetch page content from a specified URL
 
 Registered to global_registry with safety_level assigned per tool characteristics.
@@ -14,27 +14,35 @@ from llamagent.modules.tools.registry import tool
 
 
 # ============================================================
-# Web search (LLM-simulated)
+# Web search (real search backends)
 # ============================================================
 
-def web_search(query: str) -> str:
-    """Web search. Not registered by default -- no real search backend configured."""
-    llm = getattr(web_search, "_llm", None)
-    if llm is None:
-        return json.dumps({"error": "web_search is not available: no real search backend configured"}, ensure_ascii=False)
+@tool(
+    name="web_search",
+    description="Search the web for information. Returns titles, URLs, and snippets.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Search query"},
+            "num_results": {"type": "integer", "description": "Number of results to return (default 5)"},
+        },
+        "required": ["query"],
+    },
+    safety_level=1,
+    pack="web",
+)
+def web_search(query: str, num_results: int = 5) -> str:
+    """Search the web using the configured search backend."""
+    backend = getattr(web_search, "_backend", None)
+    if backend is None:
+        return json.dumps(
+            {"error": "No search backend available. Install: pip install ddgs"},
+            ensure_ascii=False,
+        )
 
     try:
-        result = llm.ask(
-            prompt=f"Search: {query}",
-            system=(
-                "You are a search engine simulator. Based on the user's search query, "
-                "return 3-5 concise search result summaries in JSON array format. "
-                "Each result should contain title and snippet fields. "
-                "Please return real, accurate information based on your knowledge."
-            ),
-            temperature=0.3,
-        )
-        return result
+        results = backend.search(query, num_results)
+        return json.dumps(results, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"error": f"Search failed: {e}"}, ensure_ascii=False)
 
