@@ -62,8 +62,9 @@ def infer_action(tool: dict) -> str:
 
 @dataclass
 class AuthorizationState:
-    """Authorization state tracking approved scopes per task."""
-    task_scopes: dict = field(default_factory=dict)  # dict[str, list[ApprovalScope]]
+    """Authorization state tracking approved scopes per task and session."""
+    task_scopes: dict = field(default_factory=dict)    # dict[str, list[ApprovalScope]]
+    session_scopes: list = field(default_factory=list)  # list[ApprovalScope]
 
 
 # ======================================================================
@@ -228,6 +229,38 @@ class TaskPolicy(AuthorizationPolicy):
         self.state.pending_scopes.append(scope)
 
 
+class ContinuousPolicy(AuthorizationPolicy):
+    """
+    v1.9.3 continuous mode: no interaction, scope-based authorization only.
+
+    ALLOW → execute. CONFIRMABLE → match against session scopes or deny.
+    HARD_DENY → deny. Never calls confirm_handler.
+    """
+
+    def decide(
+        self,
+        evaluation: ZoneEvaluation,
+        tool_name: str,
+        engine: AuthorizationEngine,
+    ) -> str | None:
+        scopes = engine.state.session_scopes
+
+        for item in evaluation.items:
+            if item.verdict == ZoneVerdict.HARD_DENY:
+                return item.message or f"Tool '{tool_name}' blocked."
+            if item.verdict == ZoneVerdict.ALLOW:
+                continue
+            # CONFIRMABLE — match against session scopes
+            if _matches_any_scope(item, tool_name, scopes):
+                continue  # Auto-approved by seed scope
+            # No match, no interaction — deny
+            return (
+                f"Tool '{tool_name}' on '{item.path}' requires authorization "
+                f"not covered by seed scopes. Operation denied."
+            )
+        return None
+
+
 def normalize_scopes(scopes: list[RequestedScope]) -> list[RequestedScope]:
     """
     Aggregate pending scopes for a cleaner contract.
@@ -315,8 +348,33 @@ class AuthorizationEngine:
         elif mode == "interactive":
             self.policy = InteractivePolicy()
             self.agent._task_mode_state = None
-            self.state.task_scopes.clear()  # v1.9.2: clear all scopes on mode switch
-        # continuous: 1.9.3
+            self.state.task_scopes.clear()
+            self.state.session_scopes.clear()
+        elif mode == "continuous":
+            self.policy = ContinuousPolicy()
+            self.agent._task_mode_state = None
+            self.state.task_scopes.clear()
+            self._load_seed_scopes()
+
+    def _load_seed_scopes(self):
+        """Load seed scopes from config into session_scopes."""
+        raw = getattr(self.agent.config, "seed_scopes", None)
+        if not raw or not isinstance(raw, list):
+            self.state.session_scopes = []
+            return
+        scopes = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            scopes.append(ApprovalScope(
+                scope=item.get("scope", "session"),
+                zone=item.get("zone", "project"),
+                actions=item.get("actions", []),
+                path_prefixes=item.get("path_prefixes", []),
+                tool_names=item.get("tool_names"),
+            ))
+        self.state.session_scopes = scopes
+        logger.info("Loaded %d seed scopes for continuous mode", len(scopes))
 
     def evaluate(self, tool: dict, args: dict) -> str | None:
         """

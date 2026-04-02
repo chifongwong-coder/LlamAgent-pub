@@ -207,6 +207,7 @@ class Config:
 
         # Authorization
         self.authorization_mode: str = "interactive"
+        self.seed_scopes: list | None = None  # Parsed from YAML, list of dicts
 
         # Web
         self.web_search_provider: str = ""  # "" = auto-detect
@@ -306,6 +307,13 @@ class Config:
         if isinstance(hooks_raw, dict):
             self.hooks_config = hooks_raw
 
+        # Parse seed_scopes from authorization section (nested list, not through _YAML_MAP)
+        auth_raw = data.get("authorization")
+        if isinstance(auth_raw, dict):
+            seed_raw = auth_raw.get("seed_scopes")
+            if isinstance(seed_raw, list):
+                self.seed_scopes = seed_raw
+
         # Warn about unknown keys
         self._check_unknown_keys(data)
 
@@ -323,8 +331,8 @@ class Config:
         """Warn about YAML keys not in the mapping table."""
         for key, value in data.items():
             current_path = prefix + (key,)
-            # hooks: is a special section with its own parsing, skip validation
-            if current_path == ("hooks",):
+            # Special sections with their own parsing, skip validation
+            if current_path in (("hooks",), ("authorization", "seed_scopes")):
                 continue
             if current_path not in _VALID_YAML_PATHS:
                 logger.warning(
