@@ -25,7 +25,7 @@ Prerequisites:
 import os
 import tempfile
 
-from llamagent import SmartAgent, Config
+from llamagent import LlamAgent, Config
 from llamagent.modules.skill import SkillModule
 
 
@@ -97,7 +97,7 @@ def part1_basic_skill():
     config.skill_max_active = 2
     config.skill_llm_fallback = False
 
-    agent = SmartAgent(config)
+    agent = LlamAgent(config)
     agent.project_dir = tmp  # Point to our temp dir for scanning
 
     # Register SkillModule

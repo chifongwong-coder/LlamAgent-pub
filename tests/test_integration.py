@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from llamagent.core.agent import SmartAgent, Module
+from llamagent.core.agent import LlamAgent, Module
 from llamagent.core.config import Config
 from conftest import make_llm_response
 
@@ -34,7 +34,7 @@ def _create_test_agent(mock_llm_client):
     config.agent_tools_dir = "/tmp/llamagent_test_tools"
     config.hooks_config = None
 
-    agent = SmartAgent.__new__(SmartAgent)
+    agent = LlamAgent.__new__(LlamAgent)
     agent.config = config
     agent.persona = None
     agent.llm = mock_llm_client
@@ -117,7 +117,7 @@ class TestModuleIntegration:
     def test_main_create_agent(self, mock_llm_client):
         """main.create_agent() factory function works end-to-end."""
         with patch("llamagent.main.Config") as MockConfig, \
-             patch("llamagent.main.SmartAgent") as MockAgent:
+             patch("llamagent.main.LlamAgent") as MockAgent:
             mock_config = MagicMock()
             mock_config.model = "mock-model"
             mock_config.persona_file = "/tmp/test.json"

@@ -5,7 +5,7 @@ Interface layer: three ways to use LlamAgent.
 - web_ui:     Gradio web chat interface (gradio is an optional dependency)
 - api_server: FastAPI RESTful API service (fastapi is an optional dependency)
 
-Three "front desks", one "back kitchen" — the SmartAgent core class.
+Three "front desks", one "back kitchen" — the LlamAgent core class.
 No matter which door the user comes through, they all use the same Agent engine.
 """
 

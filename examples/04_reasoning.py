@@ -11,7 +11,7 @@ Prerequisites:
     pip install -e .
 """
 
-from llamagent import SmartAgent, Config
+from llamagent import LlamAgent, Config
 
 
 # =============================================================
@@ -24,7 +24,7 @@ def part1_simple_react():
     print("=" * 60)
 
     config = Config()
-    agent = SmartAgent(config)
+    agent = LlamAgent(config)
 
     # Register some tools for the agent to use
     def search(query: str) -> str:
@@ -58,7 +58,7 @@ def part2_plan_react():
     print("=" * 60)
 
     config = Config()
-    agent = SmartAgent(config)
+    agent = LlamAgent(config)
 
     # Register tools
     def search(query: str) -> str:
@@ -113,7 +113,7 @@ def part3_react_loop_details():
     config.max_react_steps = 5       # max tool-calling iterations
     config.max_duplicate_actions = 2  # stop if same action repeats
 
-    agent = SmartAgent(config)
+    agent = LlamAgent(config)
 
     call_count = [0]
 

@@ -2,14 +2,14 @@
 01 — Quick Start: Create an Agent and Chat
 
 This example shows the minimal setup to get a LlamAgent running.
-No modules are needed — a bare SmartAgent is already a working chatbot.
+No modules are needed — a bare LlamAgent is already a working chatbot.
 
 Prerequisites:
     pip install -e .
     # Then configure .env (see .env.example)
 """
 
-from llamagent import SmartAgent, Config
+from llamagent import LlamAgent, Config
 
 # --- Step 1: Create a Config ---
 # Config auto-detects your LLM backend:
@@ -22,8 +22,8 @@ print(f"Model: {config.model}")
 print(f"Max context tokens: {config.max_context_tokens}")
 
 # --- Step 2: Create the Agent ---
-# A bare SmartAgent with no modules is a fully functional conversational agent.
-agent = SmartAgent(config)
+# A bare LlamAgent with no modules is a fully functional conversational agent.
+agent = LlamAgent(config)
 
 # --- Step 3: Chat ---
 reply = agent.chat("Hello! What can you do?")

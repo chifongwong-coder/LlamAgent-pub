@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from llamagent.core.agent import SmartAgent
+    from llamagent.core.agent import LlamAgent
     from llamagent.modules.tools.workspace import WorkspaceService
 
 logger = logging.getLogger(__name__)
@@ -82,18 +82,18 @@ class ProjectSyncService:
     with changeset tracking and revert capability.
 
     Attributes:
-        agent: The SmartAgent instance this service is attached to.
+        agent: The LlamAgent instance this service is attached to.
         workspace_service: The WorkspaceService for workspace path resolution.
     """
 
     def __init__(
-        self, agent: SmartAgent, workspace_service: WorkspaceService
+        self, agent: LlamAgent, workspace_service: WorkspaceService
     ) -> None:
         """
         Initialize the ProjectSyncService.
 
         Args:
-            agent: The SmartAgent instance that owns this service.
+            agent: The LlamAgent instance that owns this service.
             workspace_service: The WorkspaceService used for workspace
                 path resolution (needed by sync_workspace_to_project).
         """

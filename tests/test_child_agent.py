@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from llamagent.core.agent import SmartAgent, Module
+from llamagent.core.agent import LlamAgent, Module
 from llamagent.modules.child_agent.budget import (
     Budget,
     BudgetedLLM,
@@ -77,7 +77,7 @@ class TestBudgetEnforcement:
 
         # BudgetedLLM checks BEFORE each call: max_llm_calls=0 means
         # llm_calls(0) >= max(0) is True -> BudgetExceededError on the very
-        # first LLM call. SmartAgent.chat() catches this in the execution
+        # first LLM call. LlamAgent.chat() catches this in the execution
         # strategy error handler and returns an error string. The inline runner
         # sees a completed chat (returns text), so the task status is "completed"
         # but the result text contains the budget exceeded message.

@@ -89,13 +89,13 @@ def _get_persona_choices():
 # ============================================================
 
 def _build_agent(modules_list, role, persona_name, persona_desc):
-    """Build a SmartAgent with the given config."""
-    from llamagent.core import SmartAgent, Config, Persona
+    """Build a LlamAgent with the given config."""
+    from llamagent.core import LlamAgent, Config, Persona
     from llamagent.main import load_module
 
     config = Config()
     persona = Persona(name=persona_name, role_description=persona_desc, role=role)
-    agent = SmartAgent(config, persona=persona)
+    agent = LlamAgent(config, persona=persona)
 
     for mod_name in modules_list:
         mod = load_module(mod_name)

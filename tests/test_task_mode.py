@@ -7,7 +7,7 @@ import os
 
 import pytest
 
-from llamagent.core.agent import SmartAgent, Module
+from llamagent.core.agent import LlamAgent, Module
 from llamagent.core.zone import ConfirmRequest, ConfirmResponse, RequestedScope, ApprovalScope
 from llamagent.core.contract import TaskContract, TaskModeState
 from llamagent.core.authorization import TaskPolicy, InteractivePolicy, normalize_scopes

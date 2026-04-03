@@ -12,7 +12,7 @@ Prerequisites:
     pip install -e .
 """
 
-from llamagent import SmartAgent, Config
+from llamagent import LlamAgent, Config
 from llamagent.modules.sandbox import SandboxModule
 from llamagent.modules.sandbox.policy import (
     ExecutionPolicy,
@@ -30,7 +30,7 @@ def part1_auto_sandbox():
     print("=" * 60)
 
     config = Config()
-    agent = SmartAgent(config)
+    agent = LlamAgent(config)
 
     # Register a safe tool (safety_level=1, default)
     def read_data(key: str) -> str:
@@ -92,7 +92,7 @@ def part2_manual_policy():
     print("=" * 60)
 
     config = Config()
-    agent = SmartAgent(config)
+    agent = LlamAgent(config)
 
     # Create a custom policy: 5-second timeout, no network
     strict_policy = ExecutionPolicy(
@@ -173,7 +173,7 @@ def part4_direct_executor():
     print("=" * 60)
 
     config = Config()
-    agent = SmartAgent(config)
+    agent = LlamAgent(config)
 
     # Register a tool that runs shell commands
     def run_shell(command: str) -> str:

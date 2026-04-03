@@ -28,7 +28,7 @@ class AgentRunnerBackend:
 
         Args:
             spec: The child agent specification (task, role, policy, etc.).
-            agent_factory: Callable that takes a ChildAgentSpec and returns a SmartAgent.
+            agent_factory: Callable that takes a ChildAgentSpec and returns a LlamAgent.
 
         Returns:
             A unique task_id for the spawned child.

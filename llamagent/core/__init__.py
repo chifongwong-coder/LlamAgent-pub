@@ -1,6 +1,6 @@
 """Core module: LlamAgent's foundational capabilities, standalone and runnable."""
 
-from llamagent.core.agent import SmartAgent, Module, ExecutionStrategy, SimpleReAct
+from llamagent.core.agent import LlamAgent, Module, ExecutionStrategy, SimpleReAct
 from llamagent.core.authorization import AuthorizationEngine, AuthorizationResult
 from llamagent.core.config import Config
 from llamagent.core.hooks import (
@@ -25,7 +25,7 @@ from llamagent.core.zone import (
 from llamagent.core.persona import Persona, PersonaManager
 
 __all__ = [
-    "SmartAgent",
+    "LlamAgent",
     "Module",
     "ExecutionStrategy",
     "SimpleReAct",

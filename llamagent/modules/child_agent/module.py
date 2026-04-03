@@ -7,7 +7,7 @@ Registers three tools for the parent agent:
 - collect_results:  Collect results from all completed child agents
 
 The module uses an InlineRunnerBackend by default (synchronous, in-process).
-Each child agent is a constrained SmartAgent with filtered tools, budget limits,
+Each child agent is a constrained LlamAgent with filtered tools, budget limits,
 and no ability to spawn its own children (unless explicitly allowed by policy).
 """
 
@@ -55,7 +55,7 @@ class ChildAgentController:
 
         Args:
             spec: Child agent specification.
-            agent_factory: Callable(spec) -> SmartAgent.
+            agent_factory: Callable(spec) -> LlamAgent.
 
         Returns:
             The unique task_id.
@@ -142,7 +142,7 @@ class ChildAgentModule(Module):
     Child agent control module.
 
     Spawn and control child agents with budget and capability boundaries.
-    Each child is a constrained SmartAgent instance that inherits the parent's
+    Each child is a constrained LlamAgent instance that inherits the parent's
     LLM and selected tools, but operates under strict resource limits.
     """
 
@@ -256,13 +256,13 @@ class ChildAgentModule(Module):
 
     def _create_child_agent(self, spec: ChildAgentSpec):
         """
-        Factory: create a constrained SmartAgent for child execution.
+        Factory: create a constrained LlamAgent for child execution.
 
         The child inherits the parent's LLM and selected tools, but operates
         with a minimal configuration: no memory, no reflection, limited steps,
         and tool access filtered by the role policy.
         """
-        from llamagent.core.agent import SmartAgent, SimpleReAct
+        from llamagent.core.agent import LlamAgent, SimpleReAct
         from llamagent.core.config import Config
 
         parent = self.agent
@@ -303,7 +303,7 @@ class ChildAgentModule(Module):
             child_llm = parent.llm
 
         # Create child agent via normal constructor, then replace internals
-        child = SmartAgent(config)
+        child = LlamAgent(config)
         child.llm = child_llm
         child.persona = None
         child.modules = {}

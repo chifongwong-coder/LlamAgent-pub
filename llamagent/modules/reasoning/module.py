@@ -1,5 +1,5 @@
 """
-PlanningModule: provides task planning capability for SmartAgent via PlanReAct execution strategy.
+PlanningModule: provides task planning capability for LlamAgent via PlanReAct execution strategy.
 
 Architecture:
 - PlanReAct (ExecutionStrategy subclass): Complex task execution strategy
@@ -27,7 +27,7 @@ from llamagent.core.agent import Module, ExecutionStrategy, ReactResult
 from llamagent.modules.reasoning.planner import TaskPlanner, Step, validate_plan
 
 if TYPE_CHECKING:
-    from llamagent.core.agent import SmartAgent
+    from llamagent.core.agent import LlamAgent
     from llamagent.modules.reflection.engine import ReflectionEngine
 
 logger = logging.getLogger(__name__)
@@ -103,7 +103,7 @@ class PlanReAct(ExecutionStrategy):
             self.reflection_enabled = False
             self.reflection_score_threshold = 7.0
 
-    def execute(self, query: str, context: str, agent: "SmartAgent") -> str:
+    def execute(self, query: str, context: str, agent: "LlamAgent") -> str:
         """
         PlanReAct main entry point.
 
@@ -339,7 +339,7 @@ class PlanReAct(ExecutionStrategy):
     # ----------------------------------------------------------
 
     def _judge_complexity(
-        self, query: str, tools_schema: list[dict], agent: "SmartAgent"
+        self, query: str, tools_schema: list[dict], agent: "LlamAgent"
     ) -> bool:
         """
         Call LLM to judge whether the task is complex.
@@ -390,7 +390,7 @@ Criteria:
         self,
         query: str,
         context: str,
-        agent: "SmartAgent",
+        agent: "LlamAgent",
         tools_schema: list[dict],
     ) -> str:
         """Simple task: go directly through ReAct loop (consistent with SimpleReAct behavior)."""
@@ -409,7 +409,7 @@ Criteria:
         step: Step,
         original_query: str,
         context: str,
-        agent: "SmartAgent",
+        agent: "LlamAgent",
         steps: list[Step],
         planner: TaskPlanner,
         replan_closure,
@@ -451,7 +451,7 @@ Criteria:
     # ----------------------------------------------------------
 
     def _summarize_results(
-        self, query: str, steps: list[Step], agent: "SmartAgent"
+        self, query: str, steps: list[Step], agent: "LlamAgent"
     ) -> str:
         """Summarize all step results into a coherent response."""
         completed = [s for s in steps if s.status == "completed"]
@@ -504,7 +504,7 @@ Please integrate the above results and provide a complete, coherent final answer
         )
 
     @staticmethod
-    def _get_tools_schema(agent: "SmartAgent") -> list[dict]:
+    def _get_tools_schema(agent: "LlamAgent") -> list[dict]:
         """
         Get all available tool schemas from the agent.
 
@@ -555,7 +555,7 @@ class PlanningModule(Module):
     def __init__(self):
         self.strategy: PlanReAct | None = None
 
-    def on_attach(self, agent: "SmartAgent"):
+    def on_attach(self, agent: "LlamAgent"):
         """
         Create PlanReAct strategy and inject it.
 

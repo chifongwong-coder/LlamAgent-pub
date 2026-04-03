@@ -274,8 +274,8 @@ def _pick_modules() -> list[str]:
 
 
 def build_agent(setup: dict):
-    """Build a SmartAgent from interactive setup results."""
-    from llamagent.core import SmartAgent, Config, Persona, PersonaManager
+    """Build a LlamAgent from interactive setup results."""
+    from llamagent.core import LlamAgent, Config, Persona, PersonaManager
     from llamagent.main import load_module, AVAILABLE_MODULES
 
     config = Config()
@@ -305,7 +305,7 @@ def build_agent(setup: dict):
         except Exception as e:
             console.print(f"[yellow]Failed to save persona: {e}[/yellow]")
 
-    agent = SmartAgent(config, persona=persona)
+    agent = LlamAgent(config, persona=persona)
 
     # Load modules
     module_names = setup["modules"]
@@ -332,13 +332,13 @@ def build_agent(setup: dict):
 # CLI main class
 # ============================================================
 
-class SmartAgentCLI:
+class LlamAgentCLI:
     """
     LlamAgent command-line interface: turns the terminal into a smart chat window.
 
     Responsibilities:
     1. Handle user input (regular chat vs slash commands)
-    2. Call SmartAgent to get responses
+    2. Call LlamAgent to get responses
     3. Beautify output with Rich (falls back to print when not installed)
     4. Error handling (never crash regardless of user input)
     """
@@ -348,7 +348,7 @@ class SmartAgentCLI:
         Initialize CLI with a pre-built agent.
 
         Args:
-            agent: A configured SmartAgent instance
+            agent: A configured LlamAgent instance
         """
         self.agent = agent
 
@@ -629,7 +629,7 @@ def main():
         }
         agent = build_agent(setup)
         console.print(BANNER)
-        cli = SmartAgentCLI(agent)
+        cli = LlamAgentCLI(agent)
 
         if args.command == "ask":
             cli.ask(args.question)
@@ -646,7 +646,7 @@ def main():
             "persona_desc": "A helpful AI assistant",
         }
         agent = build_agent(setup)
-        cli = SmartAgentCLI(agent)
+        cli = LlamAgentCLI(agent)
         cli.ask(args.question)
         return
 
@@ -666,7 +666,7 @@ def main():
             console.print(f"\n[red]Failed to build agent: {e}[/red]")
             continue
 
-        cli = SmartAgentCLI(agent)
+        cli = LlamAgentCLI(agent)
         result = cli.chat_mode()
 
         # Cleanup

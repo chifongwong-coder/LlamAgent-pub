@@ -27,7 +27,7 @@ from llamagent.core.zone import (
 )
 
 if TYPE_CHECKING:
-    from llamagent.core.agent import SmartAgent
+    from llamagent.core.agent import LlamAgent
 
 logger = logging.getLogger(__name__)
 
@@ -373,15 +373,15 @@ class AuthorizationEngine:
     Unified authorization engine for call_tool().
 
     Encapsulates:
-    - Path extraction (moved from SmartAgent._extract_paths)
-    - Zone evaluation (moved from SmartAgent._check_zone)
+    - Path extraction (moved from LlamAgent._extract_paths)
+    - Zone evaluation (moved from LlamAgent._check_zone)
     - Policy-based authorization decision
 
     The engine accesses agent attributes (project_dir, playground_dir,
     confirm_handler) lazily via self.agent reference.
     """
 
-    def __init__(self, agent: SmartAgent):
+    def __init__(self, agent: LlamAgent):
         self.agent = agent
         self.state = AuthorizationState()
         self.policy: AuthorizationPolicy = InteractivePolicy()
@@ -440,7 +440,7 @@ class AuthorizationEngine:
         return self.agent._ask_confirmation(request)
 
     # ------------------------------------------------------------------
-    # Path extraction (moved from SmartAgent._extract_paths)
+    # Path extraction (moved from LlamAgent._extract_paths)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -461,7 +461,7 @@ class AuthorizationEngine:
         ]
 
     # ------------------------------------------------------------------
-    # Zone evaluation (moved from SmartAgent._check_zone)
+    # Zone evaluation (moved from LlamAgent._check_zone)
     # ------------------------------------------------------------------
 
     def _evaluate_zone(self, tool: dict, paths: list[str]) -> ZoneEvaluation:

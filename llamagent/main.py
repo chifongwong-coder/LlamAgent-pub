@@ -20,7 +20,7 @@ import argparse
 import sys
 import traceback
 
-from llamagent.core import SmartAgent, Config, Persona, PersonaManager
+from llamagent.core import LlamAgent, Config, Persona, PersonaManager
 
 
 # ============================================================
@@ -85,7 +85,7 @@ def create_agent(
     module_names: list[str] | None = None,
     persona_name: str | None = None,
     config_path: str | None = None,
-) -> SmartAgent:
+) -> LlamAgent:
     """
     Create an Agent and load the specified modules.
 
@@ -98,7 +98,7 @@ def create_agent(
         persona_name: Persona name, None uses the default identity
 
     Returns:
-        A configured SmartAgent instance
+        A configured LlamAgent instance
     """
     config = Config(config_path=config_path)
 
@@ -123,7 +123,7 @@ def create_agent(
         except Exception as e:
             print(f"  [Warning] Failed to load persona: {e}, using default identity")
 
-    agent = SmartAgent(config, persona=persona)
+    agent = LlamAgent(config, persona=persona)
 
     # Determine the list of modules to load
     if module_names is None:
@@ -216,8 +216,8 @@ Examples:
 
     # Launch the corresponding interface based on mode
     if args.mode == "cli":
-        from llamagent.interfaces.cli import SmartAgentCLI
-        cli = SmartAgentCLI(module_names=module_names, persona_name=args.persona)
+        from llamagent.interfaces.cli import LlamAgentCLI
+        cli = LlamAgentCLI(module_names=module_names, persona_name=args.persona)
         cli.chat_mode()
 
     elif args.mode == "web":

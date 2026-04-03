@@ -8,12 +8,12 @@ Prerequisites:
     pip install -e .
 """
 
-from llamagent import SmartAgent, Config
+from llamagent import LlamAgent, Config
 
 
 def create_agent_with_tools():
     config = Config()
-    agent = SmartAgent(config)
+    agent = LlamAgent(config)
 
     # --- Register a simple tool ---
     # Just provide a function, a name, and a description.
