@@ -404,11 +404,11 @@ class LlamAgent:
 
         # Emit SCOPE_REVOKED for cleared scopes
         for s in old_scopes:
-            self.emit_hook(HookEvent("scope_revoked"), {"scope": s, "reason": "mode_switch"})
+            self.emit_hook(HookEvent.SCOPE_REVOKED, {"scope": s, "reason": "mode_switch"})
 
         # Emit SCOPE_ISSUED for newly loaded seed scopes (continuous mode)
         for s in self._authorization_engine.state.session_scopes:
-            self.emit_hook(HookEvent("scope_issued"), {"scope": s, "task_id": None})
+            self.emit_hook(HookEvent.SCOPE_ISSUED, {"scope": s, "task_id": None})
 
         logger.info("Authorization mode switched to: %s", mode)
 
@@ -814,7 +814,7 @@ class LlamAgent:
                 task_id = state.task_id
                 removed = self._authorization_engine.state.task_scopes.pop(task_id, [])
                 for s in removed:
-                    self.emit_hook(HookEvent("scope_revoked"), {"scope": s, "reason": "task_cancelled"})
+                    self.emit_hook(HookEvent.SCOPE_REVOKED, {"scope": s, "reason": "task_cancelled"})
                 state.phase = "idle"
                 state.task_id = ""
                 state.pending_scopes.clear()
@@ -910,7 +910,7 @@ class LlamAgent:
                 created_at=_time.time(), source="contract",
             )
             self._authorization_engine.state.task_scopes.setdefault(task_id, []).append(scope)
-            self.emit_hook(HookEvent("scope_issued"), {"scope": scope, "task_id": task_id})
+            self.emit_hook(HookEvent.SCOPE_ISSUED, {"scope": scope, "task_id": task_id})
 
     def _run_execute(self, query: str) -> str:
         """Run the normal pipeline for actual execution after contract confirmation."""
@@ -928,7 +928,7 @@ class LlamAgent:
             self._current_task_id = None
             removed = self._authorization_engine.state.task_scopes.pop(task_id, [])
             for s in removed:
-                self.emit_hook(HookEvent("scope_revoked"), {"scope": s, "reason": "task_completed"})
+                self.emit_hook(HookEvent.SCOPE_REVOKED, {"scope": s, "reason": "task_completed"})
             state.phase = "idle"
             state.task_id = ""
             state.pending_scopes.clear()

@@ -40,6 +40,6 @@ class TaskModeState:
     phase: str = "idle"
     task_id: str = ""              # Generated on idle→preparing transition
     original_query: str = ""
-    pending_scopes: list = field(default_factory=list)  # list[RequestedScope]
+    pending_scopes: list[RequestedScope] = field(default_factory=list)
     contract: TaskContract | None = None
     confirmed: bool = False

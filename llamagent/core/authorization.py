@@ -72,7 +72,7 @@ class AuthorizationState:
 class AuthorizationResult:
     """Result from AuthorizationEngine.evaluate(). Carries decision + audit events."""
     decision: str | None = None  # None = allow, str = rejection message
-    events: list = field(default_factory=list)  # list[tuple[str, dict]]
+    events: list[tuple[str, dict]] = field(default_factory=list)
 
 
 # ======================================================================
