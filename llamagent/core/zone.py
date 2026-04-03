@@ -84,11 +84,17 @@ class ConfirmRequest:
 @dataclass
 class ApprovalScope:
     """One approved authorization scope, stored after contract confirmation."""
-    scope: str                    # "task" (v1.9.2)
+    scope: str                    # "task" | "session"
     zone: str                     # "project" | "external"
     actions: list[str]            # ["write"] / ["execute"]
     path_prefixes: list[str]      # ["project:src/", "project:docs/"]
     tool_names: list[str] | None = None
+    # v1.9.4 governance fields
+    created_at: float | None = None     # time.time() when created
+    expires_at: float | None = None     # expiry time (None = no expiry)
+    max_uses: int | None = None         # max usage count (None = unlimited)
+    uses: int = 0                       # current usage count
+    source: str = "contract"            # "contract" | "seed" | "api"
 
 
 @dataclass

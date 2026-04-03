@@ -1,7 +1,7 @@
 """Core module: LlamAgent's foundational capabilities, standalone and runnable."""
 
 from llamagent.core.agent import SmartAgent, Module, ExecutionStrategy, SimpleReAct
-from llamagent.core.authorization import AuthorizationEngine
+from llamagent.core.authorization import AuthorizationEngine, AuthorizationResult
 from llamagent.core.config import Config
 from llamagent.core.hooks import (
     HookCallback,
@@ -30,6 +30,7 @@ __all__ = [
     "ExecutionStrategy",
     "SimpleReAct",
     "AuthorizationEngine",
+    "AuthorizationResult",
     "Config",
     "HookCallback",
     "HookContext",

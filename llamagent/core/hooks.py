@@ -53,11 +53,17 @@ class HookEvent(str, Enum):
     SESSION_START = "session_start"
     SESSION_END = "session_end"
 
-    # Planning-level — reserved for v1.9, not emitted in v1.8
+    # Planning-level — reserved, not emitted yet
     PLAN_CREATED = "plan_created"
     STEP_START = "step_start"
     STEP_END = "step_end"
     REPLAN = "replan"
+
+    # Authorization-level — v1.9.4
+    SCOPE_ISSUED = "scope_issued"
+    SCOPE_USED = "scope_used"
+    SCOPE_DENIED = "scope_denied"
+    SCOPE_REVOKED = "scope_revoked"
 
 
 # Events that support SKIP (blocking the operation)

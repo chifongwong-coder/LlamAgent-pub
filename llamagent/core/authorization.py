@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -67,6 +68,13 @@ class AuthorizationState:
     session_scopes: list = field(default_factory=list)  # list[ApprovalScope]
 
 
+@dataclass
+class AuthorizationResult:
+    """Result from AuthorizationEngine.evaluate(). Carries decision + audit events."""
+    decision: str | None = None  # None = allow, str = rejection message
+    events: list = field(default_factory=list)  # list[tuple[str, dict]]
+
+
 # ======================================================================
 # Authorization policies
 # ======================================================================
@@ -80,7 +88,7 @@ class AuthorizationPolicy(ABC):
         evaluation: ZoneEvaluation,
         tool_name: str,
         engine: AuthorizationEngine,
-    ) -> str | None:
+    ) -> AuthorizationResult:
         """
         Decide whether to allow, confirm, or deny based on zone evaluation.
 
@@ -102,47 +110,35 @@ class InteractivePolicy(AuthorizationPolicy):
         evaluation: ZoneEvaluation,
         tool_name: str,
         engine: AuthorizationEngine,
-    ) -> str | None:
-        # Fast path: all allowed
+    ) -> AuthorizationResult:
         if evaluation.overall_verdict == ZoneVerdict.ALLOW:
-            return None
+            return AuthorizationResult()
 
         for item in evaluation.items:
             if item.verdict == ZoneVerdict.ALLOW:
                 continue
-
             if item.verdict == ZoneVerdict.HARD_DENY:
-                return (
-                    item.message
-                    or f"Tool '{tool_name}' cannot operate on '{item.path}'."
+                return AuthorizationResult(
+                    decision=item.message or f"Tool '{tool_name}' cannot operate on '{item.path}'."
                 )
-
-            # CONFIRMABLE — ask user for this specific path
             request = ConfirmRequest(
-                kind="operation_confirm",
-                tool_name=tool_name,
-                action=item.action,
-                zone=item.zone,
+                kind="operation_confirm", tool_name=tool_name,
+                action=item.action, zone=item.zone,
                 target_paths=[item.path],
-                message=(
-                    item.message
-                    or f"Tool '{tool_name}' wants to operate on '{item.path}'."
-                ),
+                message=item.message or f"Tool '{tool_name}' wants to operate on '{item.path}'.",
             )
             response = engine.confirm(request)
             if not response.allow:
-                return f"Tool '{tool_name}' operation on '{item.path}' was denied."
+                return AuthorizationResult(
+                    decision=f"Tool '{tool_name}' operation on '{item.path}' was denied."
+                )
 
-        return None  # All items allowed
+        return AuthorizationResult()
 
 
 class TaskPolicy(AuthorizationPolicy):
     """
-    v1.9.1 task mode: controlled dry-run during prepare, interactive during execute.
-
-    Prepare phase: read operations execute normally, write/execute operations
-    are blocked and recorded as pending scopes for the task contract.
-    Execute phase: falls back to InteractivePolicy (1.9.2 will add scope matching).
+    v1.9.1/1.9.2 task mode: controlled dry-run during prepare, scope matching during execute.
     """
 
     def __init__(self, state: TaskModeState):
@@ -153,26 +149,25 @@ class TaskPolicy(AuthorizationPolicy):
         evaluation: ZoneEvaluation,
         tool_name: str,
         engine: AuthorizationEngine,
-    ) -> str | None:
+    ) -> AuthorizationResult:
         if self.state.phase == "preparing":
             return self._decide_prepare(evaluation, tool_name, engine)
         if self.state.phase == "executing":
             return self._decide_execute(evaluation, tool_name, engine)
-        return None  # idle / awaiting_confirmation: no tool calls expected
+        return AuthorizationResult()
 
     def _decide_prepare(
         self, evaluation: ZoneEvaluation, tool_name: str, engine: AuthorizationEngine
-    ) -> str | None:
-        # ask_user always allowed during prepare (need user info)
+    ) -> AuthorizationResult:
         if tool_name == "ask_user":
-            return None
+            return AuthorizationResult()
 
-        # First pass: check for HARD_DENY (must reject before recording anything)
         for item in evaluation.items:
             if item.verdict == ZoneVerdict.HARD_DENY:
-                return item.message or f"Tool '{tool_name}' blocked."
+                return AuthorizationResult(
+                    decision=item.message or f"Tool '{tool_name}' blocked."
+                )
 
-        # Second pass: record write/execute as pending scopes
         recorded = []
         for item in evaluation.items:
             if item.action in ("write", "execute"):
@@ -181,50 +176,64 @@ class TaskPolicy(AuthorizationPolicy):
 
         if recorded:
             paths_str = ", ".join(recorded)
-            return (
-                f"[Prepare] '{tool_name}' on {paths_str} recorded. "
-                f"Will need authorization before execution."
+            return AuthorizationResult(
+                decision=f"[Prepare] '{tool_name}' on {paths_str} recorded. "
+                         f"Will need authorization before execution."
             )
 
-        # All read/allow — proceed
-        return None
+        return AuthorizationResult()
 
     def _decide_execute(
         self, evaluation: ZoneEvaluation, tool_name: str, engine: AuthorizationEngine
-    ) -> str | None:
-        """Execute phase: match against approved task scopes, fall back to confirm."""
+    ) -> AuthorizationResult:
+        """Execute phase: two-stage — match first, consume after all pass."""
         task_id = engine.agent.get_active_task_id()
         scopes = engine.state.task_scopes.get(task_id, []) if task_id else []
+        events = []
+        matched = []
 
         for item in evaluation.items:
             if item.verdict == ZoneVerdict.HARD_DENY:
-                return item.message or f"Tool '{tool_name}' blocked."
+                return AuthorizationResult(
+                    decision=item.message or f"Tool '{tool_name}' blocked."
+                )
             if item.verdict == ZoneVerdict.ALLOW:
                 continue
-            # CONFIRMABLE — try scope match
-            if _matches_any_scope(item, tool_name, scopes):
-                continue  # Auto-approved by scope
-            # No match — fall back to per-item confirm
-            request = ConfirmRequest(
-                kind="operation_confirm",
-                tool_name=tool_name,
-                action=item.action,
-                zone=item.zone,
-                target_paths=[item.path],
-                message=f"Tool '{tool_name}' on '{item.path}' is outside approved scope.",
-                mode="task",
-            )
-            response = engine.confirm(request)
-            if not response.allow:
-                return f"Tool '{tool_name}' operation on '{item.path}' was denied."
-        return None
+            scope = _find_matching_scope(item, tool_name, scopes)
+            if scope is not None:
+                matched.append((item, scope))
+            else:
+                events.append(("scope_denied", {
+                    "tool_name": tool_name, "path": item.path, "zone": item.zone,
+                }))
+                # Fall back to confirm
+                request = ConfirmRequest(
+                    kind="operation_confirm", tool_name=tool_name,
+                    action=item.action, zone=item.zone,
+                    target_paths=[item.path],
+                    message=f"Tool '{tool_name}' on '{item.path}' is outside approved scope.",
+                    mode="task",
+                )
+                response = engine.confirm(request)
+                if not response.allow:
+                    return AuthorizationResult(
+                        decision=f"Tool '{tool_name}' operation on '{item.path}' was denied.",
+                        events=events,
+                    )
+
+        # All passed — consume matched scopes
+        for item, scope in matched:
+            scope.uses += 1
+            events.append(("scope_used", {
+                "scope": scope, "tool_name": tool_name, "path": item.path,
+            }))
+
+        return AuthorizationResult(events=events)
 
     def _record_pending(self, item: ZoneDecisionItem, tool_name: str):
         scope = RequestedScope(
-            zone=item.zone,
-            actions=[item.action],
-            path_prefixes=[item.path],
-            tool_names=[tool_name],
+            zone=item.zone, actions=[item.action],
+            path_prefixes=[item.path], tool_names=[tool_name],
         )
         self.state.pending_scopes.append(scope)
 
@@ -232,9 +241,7 @@ class TaskPolicy(AuthorizationPolicy):
 class ContinuousPolicy(AuthorizationPolicy):
     """
     v1.9.3 continuous mode: no interaction, scope-based authorization only.
-
-    ALLOW → execute. CONFIRMABLE → match against session scopes or deny.
-    HARD_DENY → deny. Never calls confirm_handler.
+    Two-stage: match first, consume after all pass.
     """
 
     def decide(
@@ -242,23 +249,39 @@ class ContinuousPolicy(AuthorizationPolicy):
         evaluation: ZoneEvaluation,
         tool_name: str,
         engine: AuthorizationEngine,
-    ) -> str | None:
+    ) -> AuthorizationResult:
         scopes = engine.state.session_scopes
+        events = []
+        matched = []
 
         for item in evaluation.items:
             if item.verdict == ZoneVerdict.HARD_DENY:
-                return item.message or f"Tool '{tool_name}' blocked."
+                return AuthorizationResult(
+                    decision=item.message or f"Tool '{tool_name}' blocked."
+                )
             if item.verdict == ZoneVerdict.ALLOW:
                 continue
-            # CONFIRMABLE — match against session scopes
-            if _matches_any_scope(item, tool_name, scopes):
-                continue  # Auto-approved by seed scope
-            # No match, no interaction — deny
-            return (
-                f"Tool '{tool_name}' on '{item.path}' requires authorization "
-                f"not covered by seed scopes. Operation denied."
-            )
-        return None
+            scope = _find_matching_scope(item, tool_name, scopes)
+            if scope is not None:
+                matched.append((item, scope))
+            else:
+                events.append(("scope_denied", {
+                    "tool_name": tool_name, "path": item.path, "zone": item.zone,
+                }))
+                return AuthorizationResult(
+                    decision=f"Tool '{tool_name}' on '{item.path}' requires authorization "
+                             f"not covered by seed scopes. Operation denied.",
+                    events=events,
+                )
+
+        # All passed — consume
+        for item, scope in matched:
+            scope.uses += 1
+            events.append(("scope_used", {
+                "scope": scope, "tool_name": tool_name, "path": item.path,
+            }))
+
+        return AuthorizationResult(events=events)
 
 
 def normalize_scopes(scopes: list[RequestedScope]) -> list[RequestedScope]:
@@ -300,20 +323,44 @@ def normalize_scopes(scopes: list[RequestedScope]) -> list[RequestedScope]:
     return result
 
 
-def _matches_any_scope(
+def _find_matching_scope(
     item: ZoneDecisionItem, tool_name: str, scopes: list[ApprovalScope]
-) -> bool:
-    """Check if a zone decision item is covered by any approved scope."""
+) -> ApprovalScope | None:
+    """
+    Find the first approved scope that covers this item. Pure function — no side effects.
+
+    Checks expiry, usage limits, zone, action, tool_names, and path (normalized).
+    """
+    now = time.time()
     for scope in scopes:
+        # Expiry check
+        if scope.expires_at is not None and now > scope.expires_at:
+            continue
+        # Usage limit check
+        if scope.max_uses is not None and scope.uses >= scope.max_uses:
+            continue
+        # Zone + action + tool_names match
         if item.zone != scope.zone:
             continue
         if item.action not in scope.actions:
             continue
         if scope.tool_names and tool_name not in scope.tool_names:
             continue
-        if not any(item.path.startswith(prefix) for prefix in scope.path_prefixes):
+        # Path match: normalized subtree check (not simple startswith)
+        if not _path_in_prefixes(item.path, scope.path_prefixes):
             continue
-        return True
+        return scope
+    return None
+
+
+def _path_in_prefixes(path: str, prefixes: list[str]) -> bool:
+    """Check if path is within any prefix subtree using normalized path comparison."""
+    norm_path = os.path.normpath(path)
+    for prefix in prefixes:
+        norm_prefix = os.path.normpath(prefix)
+        # Exact match or proper subtree (path starts with prefix + separator)
+        if norm_path == norm_prefix or norm_path.startswith(norm_prefix + os.sep):
+            return True
     return False
 
 
@@ -372,15 +419,17 @@ class AuthorizationEngine:
                 actions=item.get("actions", []),
                 path_prefixes=item.get("path_prefixes", []),
                 tool_names=item.get("tool_names"),
+                created_at=time.time(),
+                source="seed",
             ))
         self.state.session_scopes = scopes
         logger.info("Loaded %d seed scopes for continuous mode", len(scopes))
 
-    def evaluate(self, tool: dict, args: dict) -> str | None:
+    def evaluate(self, tool: dict, args: dict) -> AuthorizationResult:
         """
         Complete authorization flow: path extraction → zone evaluation → policy decision.
 
-        Returns None to allow, or rejection string to block.
+        Returns AuthorizationResult with decision (None=allow, str=rejection) and events.
         """
         paths = self._extract_paths(tool, args)
         evaluation = self._evaluate_zone(tool, paths)
