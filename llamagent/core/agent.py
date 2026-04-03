@@ -352,6 +352,30 @@ class SmartAgent:
     # Execution strategy
     # ============================================================
 
+    def authorization_status(self) -> dict:
+        """Return current authorization state snapshot."""
+        import time as _time
+        now = _time.time()
+        state = self._authorization_engine.state
+        return {
+            "mode": self.mode,
+            "task_scopes": {
+                tid: [
+                    {"zone": s.zone, "actions": s.actions, "path_prefixes": s.path_prefixes,
+                     "uses": s.uses, "max_uses": s.max_uses, "source": s.source,
+                     "expired": s.expires_at is not None and now > s.expires_at}
+                    for s in scopes
+                ]
+                for tid, scopes in state.task_scopes.items()
+            },
+            "session_scopes": [
+                {"zone": s.zone, "actions": s.actions, "path_prefixes": s.path_prefixes,
+                 "uses": s.uses, "max_uses": s.max_uses, "source": s.source,
+                 "expired": s.expires_at is not None and now > s.expires_at}
+                for s in state.session_scopes
+            ],
+        }
+
     def get_active_task_id(self) -> str | None:
         """
         Get the active task ID for scope storage/lookup.
@@ -367,10 +391,25 @@ class SmartAgent:
         Switch authorization mode.
 
         Args:
-            mode: "interactive" (default) | "task" | "continuous" (1.9.3)
+            mode: "interactive" (default) | "task" | "continuous"
         """
+        # Collect scopes to revoke before mode switch clears them
+        old_scopes = []
+        for scopes in self._authorization_engine.state.task_scopes.values():
+            old_scopes.extend(scopes)
+        old_scopes.extend(self._authorization_engine.state.session_scopes)
+
         self.mode = mode
         self._authorization_engine.set_mode(mode)
+
+        # Emit SCOPE_REVOKED for cleared scopes
+        for s in old_scopes:
+            self.emit_hook(HookEvent("scope_revoked"), {"scope": s, "reason": "mode_switch"})
+
+        # Emit SCOPE_ISSUED for newly loaded seed scopes (continuous mode)
+        for s in self._authorization_engine.state.session_scopes:
+            self.emit_hook(HookEvent("scope_issued"), {"scope": s, "task_id": None})
+
         logger.info("Authorization mode switched to: %s", mode)
 
     def set_execution_strategy(self, strategy: ExecutionStrategy) -> None:
@@ -484,9 +523,11 @@ class SmartAgent:
         args = hook_data.get("args", args)  # Hook may have modified args
 
         # 3. Authorization (path extraction + zone evaluation + policy decision)
-        auth_result = self._authorization_engine.evaluate(tool, args)
-        if auth_result is not None:
-            return auth_result
+        auth = self._authorization_engine.evaluate(tool, args)
+        for event_name, event_data in auth.events:
+            self.emit_hook(HookEvent(event_name), event_data)
+        if auth.decision is not None:
+            return auth.decision
 
         # 4. Execute tool (unified path for both direct and executor/sandbox)
         start_time = time.time()
@@ -771,7 +812,9 @@ class SmartAgent:
                 return self._run_execute(state.original_query)
             elif lower in ("no", "n", "cancel", "abort"):
                 task_id = state.task_id
-                self._authorization_engine.state.task_scopes.pop(task_id, None)
+                removed = self._authorization_engine.state.task_scopes.pop(task_id, [])
+                for s in removed:
+                    self.emit_hook(HookEvent("scope_revoked"), {"scope": s, "reason": "task_cancelled"})
                 state.phase = "idle"
                 state.task_id = ""
                 state.pending_scopes.clear()
@@ -858,13 +901,16 @@ class SmartAgent:
         if not task_id or not state.contract:
             return
 
+        import time as _time
         scopes_to_approve = state.contract.requested_scopes
         for rs in scopes_to_approve:
             scope = ApprovalScope(
                 scope="task", zone=rs.zone, actions=rs.actions,
                 path_prefixes=rs.path_prefixes, tool_names=rs.tool_names,
+                created_at=_time.time(), source="contract",
             )
             self._authorization_engine.state.task_scopes.setdefault(task_id, []).append(scope)
+            self.emit_hook(HookEvent("scope_issued"), {"scope": scope, "task_id": task_id})
 
     def _run_execute(self, query: str) -> str:
         """Run the normal pipeline for actual execution after contract confirmation."""
@@ -877,10 +923,12 @@ class SmartAgent:
         try:
             result = self._run_normal_pipeline(query)
         finally:
-            # Clean up
+            # Clean up + emit SCOPE_REVOKED for each removed scope
             task_id = state.task_id
             self._current_task_id = None
-            self._authorization_engine.state.task_scopes.pop(task_id, None)
+            removed = self._authorization_engine.state.task_scopes.pop(task_id, [])
+            for s in removed:
+                self.emit_hook(HookEvent("scope_revoked"), {"scope": s, "reason": "task_completed"})
             state.phase = "idle"
             state.task_id = ""
             state.pending_scopes.clear()
