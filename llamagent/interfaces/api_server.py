@@ -155,8 +155,8 @@ def _get_agent(session_id: str | None = None):
         new_agent = _agent_factory()
     else:
         # Fallback: create a bare Agent directly
-        from llamagent.core import SmartAgent, Config
-        new_agent = SmartAgent(Config())
+        from llamagent.core import LlamAgent, Config
+        new_agent = LlamAgent(Config())
 
     agent_sessions[sid] = new_agent
 

@@ -12,12 +12,12 @@
 
 ---
 
-A bare `SmartAgent` is a fully functional AI chatbot. Every capability — tools, memory, planning, safety — is a **pluggable module** that snaps in with one line:
+A bare `LlamAgent` is a fully functional AI chatbot. Every capability — tools, memory, planning, safety — is a **pluggable module** that snaps in with one line:
 
 ```python
-from llamagent import SmartAgent, Config
+from llamagent import LlamAgent, Config
 
-agent = SmartAgent(Config())
+agent = LlamAgent(Config())
 agent.chat("Hello!")  # Works immediately — no setup needed
 ```
 
@@ -107,13 +107,13 @@ python -m llamagent --config prod.yaml       # Custom config file
 ### Use as a library
 
 ```python
-from llamagent import SmartAgent, Config
+from llamagent import LlamAgent, Config
 from llamagent.modules.tools import ToolsModule
 from llamagent.modules.sandbox import SandboxModule
 from llamagent.modules.job import JobModule
 from llamagent.modules.reasoning import PlanningModule
 
-agent = SmartAgent(Config())
+agent = LlamAgent(Config())
 agent.register_module(ToolsModule())
 agent.register_module(SandboxModule())
 agent.register_module(JobModule())

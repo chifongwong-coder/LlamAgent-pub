@@ -8,7 +8,7 @@ Creation workflow (target architecture):
 Usage:
     manager = PersonaManager("/path/to/personas.json")
     coder = manager.create("Code Llama", role_description="frontend development expert")
-    agent = SmartAgent(config, persona=coder)
+    agent = LlamAgent(config, persona=coder)
 """
 
 import hashlib

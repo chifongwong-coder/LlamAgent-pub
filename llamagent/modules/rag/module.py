@@ -1,5 +1,5 @@
 """
-RAG Module: provides knowledge retrieval augmentation based on private documents for SmartAgent.
+RAG Module: provides knowledge retrieval augmentation based on private documents for LlamAgent.
 
 Tool-based (Agentic RAG) mode:
 - on_attach registers the search_knowledge tool; the model autonomously decides when to retrieve

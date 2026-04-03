@@ -30,28 +30,28 @@ import uuid
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from llamagent.core.agent import SmartAgent
+    from llamagent.core.agent import LlamAgent
 
 logger = logging.getLogger(__name__)
 
 
 class WorkspaceService:
     """
-    Logical workspace manager for a single SmartAgent instance.
+    Logical workspace manager for a single LlamAgent instance.
 
     Provides session-scoped workspace directories, path resolution with
     ``project:`` prefix support, and workspace boundary checks.
 
     Attributes:
-        agent: The SmartAgent instance this service is attached to.
+        agent: The LlamAgent instance this service is attached to.
     """
 
-    def __init__(self, agent: SmartAgent, workspace_id: str | None = None) -> None:
+    def __init__(self, agent: LlamAgent, workspace_id: str | None = None) -> None:
         """
         Initialize the WorkspaceService.
 
         Args:
-            agent: The SmartAgent instance that owns this workspace.
+            agent: The LlamAgent instance that owns this workspace.
             workspace_id: Optional external workspace identifier (e.g. API
                 session_id). When None, a unique id is lazily generated on
                 first access via the ``workspace_id`` property.

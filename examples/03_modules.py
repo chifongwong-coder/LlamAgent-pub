@@ -10,7 +10,7 @@ Prerequisites:
     pip install -e ".[all]"
 """
 
-from llamagent import SmartAgent, Config, Module
+from llamagent import LlamAgent, Config, Module
 
 
 # =============================================================
@@ -65,7 +65,7 @@ def part1_custom_modules():
     print("=" * 60)
 
     config = Config()
-    agent = SmartAgent(config)
+    agent = LlamAgent(config)
 
     # Register modules — order matters!
     # on_input/on_context: called in registration order
@@ -93,7 +93,7 @@ def part2_builtin_modules():
     print("=" * 60)
 
     config = Config()
-    agent = SmartAgent(config)
+    agent = LlamAgent(config)
 
     # Load Safety module — should be first (filters dangerous input)
     try:
@@ -159,7 +159,7 @@ def part3_module_with_tools():
     print("=" * 60)
 
     config = Config()
-    agent = SmartAgent(config)
+    agent = LlamAgent(config)
     agent.register_module(TimeModule())
 
     schemas = agent.get_all_tool_schemas()

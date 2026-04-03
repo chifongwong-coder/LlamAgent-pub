@@ -1,11 +1,11 @@
 """
-SmartAgent core class: a complete, standalone AI Agent.
+LlamAgent core class: a complete, standalone AI Agent.
 
-Without loading any modules, SmartAgent is a conversational AI assistant.
+Without loading any modules, LlamAgent is a conversational AI assistant.
 After loading modules via register_module(), the Agent gains tool calling, RAG, memory, and other capabilities.
 
 Core components:
-- SmartAgent:         Main Agent class containing the chat() entry point and run_react() engine
+- LlamAgent:         Main Agent class containing the chat() entry point and run_react() engine
 - Module:             Pluggable module base class that interacts with the Agent via pipeline callbacks
 - ExecutionStrategy:  Pluggable execution strategy interface, replacing the deprecated on_execute callback
 """
@@ -71,7 +71,7 @@ class ExecutionStrategy:
     - PlanReAct: Plans first, then executes step by step (injected by the Planning module)
     """
 
-    def execute(self, query: str, context: str, agent: SmartAgent) -> str:
+    def execute(self, query: str, context: str, agent: LlamAgent) -> str:
         """
         Execute the user request and return response text.
 
@@ -95,7 +95,7 @@ class SimpleReAct(ExecutionStrategy):
     Backward compatible: if a module overrides on_execute() (deprecated), its result is used first.
     """
 
-    def execute(self, query: str, context: str, agent: SmartAgent) -> str:
+    def execute(self, query: str, context: str, agent: LlamAgent) -> str:
         # Backward compatibility: check if any module intercepts via on_execute callback
         for mod in agent.modules.values():
             if type(mod).on_execute is not Module.on_execute:
@@ -146,7 +146,7 @@ class Module:
 
     # --- Lifecycle Callbacks ---
 
-    def on_attach(self, agent: SmartAgent) -> None:
+    def on_attach(self, agent: LlamAgent) -> None:
         """
         Called when the module is registered via register_module().
 
@@ -155,7 +155,7 @@ class Module:
         """
         self.agent = agent
 
-    def attach(self, agent: SmartAgent) -> None:
+    def attach(self, agent: LlamAgent) -> None:
         """
         Backward compatibility: legacy modules use attach(), new modules should use on_attach().
 
@@ -211,11 +211,11 @@ class Module:
 
 
 # ======================================================================
-# SmartAgent main class
+# LlamAgent main class
 # ======================================================================
 
 
-class SmartAgent:
+class LlamAgent:
     """
     LlamAgent: modular AI Agent core engine.
 
@@ -242,7 +242,7 @@ class SmartAgent:
         persona: "Persona | None" = None,
     ):
         """
-        Initialize SmartAgent.
+        Initialize LlamAgent.
 
         Args:
             config: Configuration object; auto-creates default Config() when None

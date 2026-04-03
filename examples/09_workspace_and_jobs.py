@@ -19,7 +19,7 @@ import json
 import os
 import tempfile
 
-from llamagent import SmartAgent, Config
+from llamagent import LlamAgent, Config
 from llamagent.modules.tools import ToolsModule
 from llamagent.modules.job import JobModule
 from llamagent.modules.sandbox import SandboxModule
@@ -53,7 +53,7 @@ def part1_workspace_tools():
 
     # Set up agent with ToolsModule
     config = Config()
-    agent = SmartAgent(config)
+    agent = LlamAgent(config)
     agent.project_dir = tmp_project
     agent.playground_dir = os.path.join(tmp_project, "llama_playground")
     os.makedirs(agent.playground_dir, exist_ok=True)

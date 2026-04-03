@@ -15,7 +15,7 @@ import logging
 import os
 import re
 
-from llamagent.core.agent import Module, SmartAgent
+from llamagent.core.agent import Module, LlamAgent
 from llamagent.modules.skill.index import SkillIndex, SkillMeta
 from llamagent.modules.skill.matcher import (
     DISAMBIGUATE_SYSTEM,
@@ -51,7 +51,7 @@ class SkillModule(Module):
     # Lifecycle Callbacks
     # ============================================================
 
-    def on_attach(self, agent: SmartAgent) -> None:
+    def on_attach(self, agent: LlamAgent) -> None:
         """Scan skill directories and build metadata index."""
         super().on_attach(agent)
 
@@ -65,7 +65,7 @@ class SkillModule(Module):
             names = [s.name for s in skills]
             logger.info("SkillModule loaded %d skill(s): %s", len(skills), names)
 
-    def _build_scan_paths(self, agent: SmartAgent) -> list[tuple[str, str]]:
+    def _build_scan_paths(self, agent: LlamAgent) -> list[tuple[str, str]]:
         """
         Build the ordered list of (directory_path, priority_label) tuples.
 

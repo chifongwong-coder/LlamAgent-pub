@@ -10,7 +10,7 @@ Prerequisites:
 
 import tempfile
 
-from llamagent import SmartAgent, Config, Persona, PersonaManager
+from llamagent import LlamAgent, Config, Persona, PersonaManager
 
 
 # =============================================================
@@ -41,7 +41,7 @@ def part1_direct_persona():
 
     # Use the persona with an agent
     config = Config()
-    agent = SmartAgent(config, persona=coder)
+    agent = LlamAgent(config, persona=coder)
     reply = agent.chat("Write a function to check if a number is prime.")
     print(f"Agent: {reply}")
 
@@ -79,7 +79,7 @@ def part2_tier_visibility():
     print(f"User role: {user.role}")    # user
 
     # Tools with different tiers
-    agent = SmartAgent(config, persona=user)
+    agent = LlamAgent(config, persona=user)
 
     def read_files(paths: list) -> str:
         """Read files (safe operation)."""

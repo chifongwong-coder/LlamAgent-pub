@@ -27,7 +27,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
-    from llamagent.core.agent import SmartAgent
+    from llamagent.core.agent import LlamAgent
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +119,7 @@ class HookMatcher:
 class HookContext:
     """Data passed to hook handlers."""
 
-    agent: SmartAgent
+    agent: LlamAgent
     event: HookEvent
     data: dict
     matcher: HookMatcher | None = None

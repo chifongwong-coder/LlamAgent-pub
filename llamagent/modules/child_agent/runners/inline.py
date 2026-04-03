@@ -38,7 +38,7 @@ class InlineRunnerBackend(AgentRunnerBackend):
 
         Args:
             spec: Child agent specification.
-            agent_factory: Callable(spec) -> SmartAgent.
+            agent_factory: Callable(spec) -> LlamAgent.
 
         Returns:
             Unique task_id for the completed execution.

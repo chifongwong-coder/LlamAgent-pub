@@ -13,7 +13,7 @@ import pytest
 
 from llamagent.core.config import Config
 from llamagent.core.llm import LLMClient
-from llamagent.core.agent import SmartAgent
+from llamagent.core.agent import LlamAgent
 
 
 # ============================================================
@@ -104,7 +104,7 @@ def mock_llm_client():
 
 @pytest.fixture
 def bare_agent(mock_llm_client):
-    """SmartAgent with no modules loaded; LLM is mocked."""
+    """LlamAgent with no modules loaded; LLM is mocked."""
     config = Config.__new__(Config)
     config.model = "mock-model"
     config.system_prompt = "You are a test assistant."
@@ -147,7 +147,7 @@ def bare_agent(mock_llm_client):
     config.workspace_id = None
     config.hooks_config = None
 
-    agent = SmartAgent.__new__(SmartAgent)
+    agent = LlamAgent.__new__(LlamAgent)
     agent.config = config
     agent.persona = None
     agent.llm = mock_llm_client

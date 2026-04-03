@@ -13,7 +13,7 @@ Prerequisites:
     pip install -e .
 """
 
-from llamagent import SmartAgent, Config
+from llamagent import LlamAgent, Config
 from llamagent.modules.child_agent import ChildAgentModule
 from llamagent.modules.child_agent.policy import (
     AgentExecutionPolicy,
@@ -32,7 +32,7 @@ def part1_basic_spawn():
     print("=" * 60)
 
     config = Config()
-    agent = SmartAgent(config)
+    agent = LlamAgent(config)
 
     # Register some tools that children can inherit
     def search(query: str) -> str:
@@ -131,7 +131,7 @@ def part4_programmatic():
     print("=" * 60)
 
     config = Config()
-    agent = SmartAgent(config)
+    agent = LlamAgent(config)
 
     # Register tools
     def analyze(data: str) -> str:
@@ -173,7 +173,7 @@ def part5_multiple_children():
     print("=" * 60)
 
     config = Config()
-    agent = SmartAgent(config)
+    agent = LlamAgent(config)
 
     # Register tools that different roles can use
     def web_search(query: str) -> str:

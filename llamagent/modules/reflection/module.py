@@ -20,7 +20,7 @@ from llamagent.core.agent import Module
 from llamagent.modules.reflection.engine import ReflectionEngine, LessonStore
 
 if TYPE_CHECKING:
-    from llamagent.core.agent import SmartAgent
+    from llamagent.core.agent import LlamAgent
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class ReflectionModule(Module):
         self.lesson_store: LessonStore | None = None
         self.current_query: str | None = None
 
-    def on_attach(self, agent: "SmartAgent"):
+    def on_attach(self, agent: "LlamAgent"):
         """
         Initialize reflection engine and lesson store.
 

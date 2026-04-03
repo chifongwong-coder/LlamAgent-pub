@@ -1,4 +1,4 @@
-"""Planning module: provides task planning and PlanReAct execution strategy for SmartAgent."""
+"""Planning module: provides task planning and PlanReAct execution strategy for LlamAgent."""
 
 from llamagent.modules.reasoning.module import PlanningModule
 
