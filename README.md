@@ -207,7 +207,7 @@ llamagent/
 │   └── mcp/           Model Context Protocol
 ├── interfaces/        CLI, Web UI, API server
 ├── examples/          Tutorial scripts
-└── tests/             700+ tests
+└── tests/             650+ tests
 ```
 
 ## License
