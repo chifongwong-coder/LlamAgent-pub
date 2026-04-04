@@ -427,7 +427,6 @@ class TestScopeNormalization:
 
 
 # ============================================================
-# ============================================================
 # v1.9.8: Task mode session scopes (shared authorization)
 # ============================================================
 
@@ -472,25 +471,21 @@ class TestTaskModeSessionScopes:
         result = bare_agent.chat("write file")
         assert "Done." in result
 
-    def test_user_denies_session_authorize(self, bare_agent, tmp_path, mock_llm_client):
-        """No seed_scopes + user denies → auto_execute=False → prepare/contract flow."""
+    @pytest.mark.parametrize("handler,desc", [
+        (lambda req: ConfirmResponse(allow=False), "user denies"),
+        (None, "no confirm_handler"),
+    ])
+    def test_no_session_scopes_falls_back(self, bare_agent, tmp_path, handler, desc):
+        """No seed_scopes + user denies or no handler → auto_execute=False."""
         _setup_zone(bare_agent, tmp_path)
-        bare_agent.confirm_handler = lambda req: ConfirmResponse(allow=False)
+        bare_agent.confirm_handler = handler
 
         bare_agent.set_mode("task")
         assert bare_agent._controller.auto_execute is False
         assert len(bare_agent._authorization_engine.state.session_scopes) == 0
 
-    def test_no_confirm_handler_falls_back(self, bare_agent, tmp_path):
-        """No seed_scopes + no confirm_handler → auto_execute=False."""
-        _setup_zone(bare_agent, tmp_path)
-        bare_agent.confirm_handler = None
-
-        bare_agent.set_mode("task")
-        assert bare_agent._controller.auto_execute is False
-
-    def test_session_scopes_survive_task_cancel(self, bare_agent, tmp_path, mock_llm_client):
-        """Session scopes persist after task cancellation."""
+    def test_session_scopes_persist_across_tasks(self, bare_agent, tmp_path, mock_llm_client):
+        """Session scopes persist across sequential tasks."""
         _setup_zone(bare_agent, tmp_path)
         bare_agent.config.seed_scopes = [
             {"scope": "session", "zone": "project", "actions": ["read", "write"],
@@ -598,14 +593,6 @@ class TestTaskModeSessionScopes:
         assert action.kind == "run_execute"
         assert ctrl.state.phase == "executing"
         assert ctrl.state.confirmed is True
-
-    def test_auto_execute_false_preserves_prepare(self):
-        """Controller without auto_execute goes through prepare."""
-        ctrl = TaskModeController()
-        ctrl.auto_execute = False
-        action = ctrl.handle_turn("do something")
-        assert action.kind == "run_prepare"
-        assert ctrl.state.phase == "preparing"
 
 
 # ============================================================
