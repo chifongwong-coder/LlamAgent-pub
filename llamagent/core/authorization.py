@@ -432,6 +432,14 @@ class AuthorizationEngine:
         elif mode == "continuous":
             self.policy = ContinuousPolicy()
             self._load_seed_scopes()
+            if not self.state.session_scopes:
+                # v1.9.9: continuous mode defaults to project read/write
+                self.state.session_scopes = [ApprovalScope(
+                    scope="session", zone="project",
+                    actions=["read", "write"],
+                    path_prefixes=[self.agent.project_dir],
+                    created_at=time.time(), source="default",
+                )]
             for s in self.state.session_scopes:
                 events.append(("scope_issued", {"scope": s, "task_id": None}))
         return AuthorizationUpdateResult(

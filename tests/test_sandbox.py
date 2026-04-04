@@ -30,286 +30,66 @@ from llamagent.modules.sandbox.module import SandboxModule
 from llamagent.modules.sandbox.backends.local_process import LocalProcessBackend
 
 
-# ============================================================
-# Flow 1: SandboxModule integration
-# ============================================================
+class TestExecutorRunAndSession:
+    """ToolExecutor.run_command() (basic, cwd, timeout, error) + session lifecycle."""
 
+    def test_executor_run_and_session(self):
+        """run_command basic execution, cwd routing, timeout, error handling,
+        and full session lifecycle (create -> run -> close -> cleanup)."""
+        resolver = BackendResolver()
+        resolver.register(LocalProcessBackend())
+        executor = ToolExecutor(resolver)
 
-class TestSandboxModuleIntegration:
-    """Load SandboxModule -> register tool with policy -> call_tool routes through sandbox."""
+        # --- Basic run_command ---
+        with tempfile.TemporaryDirectory() as cwd:
+            result = executor.run_command("echo run_command_test", cwd, timeout=10)
+            assert "run_command_test" in result
 
-    def test_sandbox_module_integration(self, bare_agent):
-        """Full flow: module loads, tool gets policy, call_tool uses sandbox backend."""
-        # Register a high-risk tool.
-        bare_agent.register_tool(
-            "exec_shell",
-            lambda command: command,
-            "Execute shell command",
-            safety_level=3,
-        )
+        # --- run_command uses cwd ---
+        with tempfile.TemporaryDirectory() as cwd:
+            open(os.path.join(cwd, "marker.txt"), "w").close()
+            result = executor.run_command("ls marker.txt", cwd, timeout=10)
+            assert "marker.txt" in result
 
-        # Load sandbox module (auto_assign=True).
-        mod = SandboxModule(auto_assign=True)
-        bare_agent.register_module(mod)
+        # --- run_command timeout ---
+        with tempfile.TemporaryDirectory() as cwd:
+            result = executor.run_command("sleep 60", cwd, timeout=0.5)
+            assert "TIMEOUT" in result
 
-        # Verify executor was injected.
-        assert bare_agent.tool_executor is not None
+        # --- run_command error ---
+        with tempfile.TemporaryDirectory() as cwd:
+            result = executor.run_command("exit 1", cwd, timeout=10)
+            assert "exit_code" in result.lower() or result == "" or "1" in result
 
-        # Verify policy was auto-assigned (LocalProcessBackend-compatible).
-        from llamagent.modules.sandbox.policy import POLICY_LOCAL_SUBPROCESS
-        assert bare_agent._tools["exec_shell"]["execution_policy"] is POLICY_LOCAL_SUBPROCESS
-
-        # Call the tool — should route through sandbox and execute via subprocess.
-        result = bare_agent.call_tool("exec_shell", {"command": "echo integration_ok"})
-        assert "integration_ok" in result
-
-
-# ============================================================
-# Flow 2: Auto-assign policy
-# ============================================================
-
-
-class TestAutoAssignPolicy:
-    """SandboxModule auto-assigns policy to high-risk tools but respects manual overrides."""
-
-    def test_auto_assign_policy(self, bare_agent):
-        """High-risk tool gets POLICY_SHELL_LIMITED; low-risk tool stays unassigned;
-        manually-set policy is not overridden."""
-        # Manually-set policy.
-        custom = ExecutionPolicy(isolation="container", timeout_seconds=999)
-
-        bare_agent.register_tool("low_risk", lambda: "ok", "Safe tool", safety_level=1)
-        bare_agent.register_tool("high_risk", lambda: "ok", "Dangerous tool", safety_level=4)
-        bare_agent.register_tool("manual", lambda: "ok", "Custom tool", safety_level=5,
-                                 execution_policy=custom)
-
-        SandboxModule(auto_assign=True).on_attach(bare_agent)
-
-        # Low-risk: no policy.
-        assert bare_agent._tools["low_risk"].get("execution_policy") is None
-
-        # High-risk: auto-assigned POLICY_SHELL_LIMITED.
-        from llamagent.modules.sandbox.policy import POLICY_LOCAL_SUBPROCESS
-        assert bare_agent._tools["high_risk"]["execution_policy"] is POLICY_LOCAL_SUBPROCESS
-
-        # Manual: kept as-is.
-        assert bare_agent._tools["manual"]["execution_policy"] is custom
-
-
-# ============================================================
-# Flow 3: LocalProcessBackend Python execution
-# ============================================================
-
-
-class TestLocalProcessPythonExecution:
-    """Execute Python code in subprocess sandbox and verify structured result."""
-
-    def test_local_process_python_execution(self):
-        """Run Python code in a subprocess, get stdout in ExecutionResult."""
-        backend = LocalProcessBackend()
-        policy = ExecutionPolicy(runtime="python", isolation="process")
-        session = backend.create_session(policy)
-        try:
-            spec = ExecutionSpec(
-                command="compute",
-                args={"code": "print(sum(range(10)))"},
-                policy=policy,
-                workspace_path=session.workspace_path,
-            )
-            result = session.run(spec)
-
-            assert result.exit_code == 0
-            assert result.timed_out is False
-            assert "45" in result.stdout
-            assert result.duration_ms > 0
-
-            # to_observation() should return the stdout content.
-            obs = result.to_observation()
-            assert "45" in obs
-        finally:
-            import shutil
-            shutil.rmtree(session.workspace_path, ignore_errors=True)
-
-
-# ============================================================
-# Flow 4: Timeout handling
-# ============================================================
-
-
-class TestLocalProcessTimeoutHandling:
-    """Timeout produces a structured result with timed_out=True."""
-
-    def test_local_process_timeout_handling(self):
-        """A long-running subprocess is killed and returns timed_out=True."""
-        backend = LocalProcessBackend()
-        policy = ExecutionPolicy(
-            runtime="python",
-            isolation="process",
-            timeout_seconds=0.5,
-        )
-        session = backend.create_session(policy)
-        try:
-            spec = ExecutionSpec(
-                command="slow",
-                args={"code": "import time; time.sleep(60)"},
-                policy=policy,
-                workspace_path=session.workspace_path,
-            )
-            result = session.run(spec)
-
-            assert result.timed_out is True
-            assert result.exit_code == -1
-            assert result.success is False
-
-            # to_observation() should include [TIMEOUT ...].
-            obs = result.to_observation()
-            assert "[TIMEOUT" in obs
-        finally:
-            import shutil
-            shutil.rmtree(session.workspace_path, ignore_errors=True)
-
-
-# ============================================================
-# Flow 5: Executor session lifecycle
-# ============================================================
-
-
-class TestExecutorSessionLifecycle:
-    """Create session -> run -> close -> cleanup workspace."""
-
-    def test_executor_session_lifecycle(self):
-        """Full lifecycle: create session -> run -> shutdown cleans workspace."""
-        # Test the backend session directly (not through executor/resolver)
-        # since LocalProcessBackend only supports isolation="none"
+        # --- Session lifecycle: create -> run -> close -> cleanup ---
         backend = LocalProcessBackend()
         policy = ExecutionPolicy(runtime="shell", timeout_seconds=10)
         session = backend.create_session(policy)
 
-        # Workspace created
         workspace = session.workspace_path
         assert os.path.isdir(workspace)
 
-        # Execute in workspace
-        from llamagent.modules.sandbox.backend import ExecutionSpec
         spec = ExecutionSpec(command="test", args={"command": "echo lifecycle_test"}, policy=policy)
-        result = session.run(spec)
-        assert result.success
-        assert "lifecycle_test" in result.stdout
+        run_result = session.run(spec)
+        assert run_result.success
+        assert "lifecycle_test" in run_result.stdout
 
-        # Session close is no-op (workspace managed externally)
         session.close()
         assert os.path.isdir(workspace)
 
-        # Manual cleanup
         import shutil
         shutil.rmtree(workspace)
         assert not os.path.isdir(workspace)
 
 
-# ============================================================
-# Flow 6: Backward compatibility (no SandboxModule)
-# ============================================================
+class TestSandboxSecurity:
+    """Security: env isolation, resolver rejects unmet policy, tool dict name, subprocess error."""
 
-
-class TestCallToolBackwardCompat:
-    """Without SandboxModule loaded, everything works as v1.1."""
-
-    def test_call_tool_backward_compat(self, bare_agent):
-        """call_tool runs tools directly when no sandbox module is loaded."""
-        bare_agent.register_tool(
-            "greet",
-            lambda name: f"hello {name}",
-            "Greeting tool",
-            safety_level=1,
-        )
-
-        # No sandbox module loaded -> tool_executor is None.
-        assert bare_agent.tool_executor is None
-
-        result = bare_agent.call_tool("greet", {"name": "world"})
-        assert result == "hello world"
-
-        # Verify that register_tool still accepts execution_policy (just stores it).
-        bare_agent.register_tool(
-            "custom",
-            lambda: "ok",
-            "Custom",
-            execution_policy=ExecutionPolicy(isolation="process"),
-        )
-        assert bare_agent._tools["custom"]["execution_policy"] is not None
-
-        # Without executor, even tools with policies run directly.
-        result = bare_agent.call_tool("custom", {})
-        assert result == "ok"
-
-
-# ============================================================
-# Flow 7: Security fixes verification
-# ============================================================
-
-
-# ============================================================
-# Flow 7: ToolExecutor.run_command() direct shell execution
-# ============================================================
-
-
-class TestToolExecutorRunCommand:
-    """ToolExecutor.run_command() routes shell commands through backend."""
-
-    def test_run_command_basic(self):
-        """run_command executes a shell command and returns stdout."""
-        resolver = BackendResolver()
-        resolver.register(LocalProcessBackend())
-        executor = ToolExecutor(resolver)
-
-        with tempfile.TemporaryDirectory() as cwd:
-            result = executor.run_command("echo run_command_test", cwd, timeout=10)
-            assert "run_command_test" in result
-
-    def test_run_command_uses_cwd(self):
-        """run_command executes in the specified working directory."""
-        resolver = BackendResolver()
-        resolver.register(LocalProcessBackend())
-        executor = ToolExecutor(resolver)
-
-        with tempfile.TemporaryDirectory() as cwd:
-            # Create a file in cwd, then list it
-            open(os.path.join(cwd, "marker.txt"), "w").close()
-            result = executor.run_command("ls marker.txt", cwd, timeout=10)
-            assert "marker.txt" in result
-
-    def test_run_command_timeout(self):
-        """run_command with short timeout returns timeout observation."""
-        resolver = BackendResolver()
-        resolver.register(LocalProcessBackend())
-        executor = ToolExecutor(resolver)
-
-        with tempfile.TemporaryDirectory() as cwd:
-            result = executor.run_command("sleep 60", cwd, timeout=0.5)
-            assert "TIMEOUT" in result
-
-    def test_run_command_error(self):
-        """run_command for failing command returns stderr in observation."""
-        resolver = BackendResolver()
-        resolver.register(LocalProcessBackend())
-        executor = ToolExecutor(resolver)
-
-        with tempfile.TemporaryDirectory() as cwd:
-            result = executor.run_command("exit 1", cwd, timeout=10)
-            # Should contain exit code info
-            assert "exit_code" in result.lower() or result == "" or "1" in result
-
-
-# ============================================================
-# Flow 8: Security fixes verification
-# ============================================================
-
-
-class TestSandboxSecurityFixes:
-    """Verify key security fixes in the sandbox module."""
-
-    def test_env_isolation_no_host_leak(self):
-        """Sandbox processes get minimal env, host secrets not leaked."""
+    def test_sandbox_security(self, bare_agent):
+        """Sandbox processes get minimal env (no host secrets); resolver rejects
+        unmet network policy; register_tool stores name; subprocess errors return
+        structured result."""
+        # --- Env isolation ---
         backend = LocalProcessBackend()
         policy = ExecutionPolicy(runtime="python", timeout_seconds=10)
         session = backend.create_session(policy)
@@ -327,47 +107,201 @@ class TestSandboxSecurityFixes:
             )
             result = session.run(spec)
             assert result.success
-            # PATH and HOME should be present (minimal env)
             assert "MISSING" not in result.stdout.split("|")[0]  # PATH
             assert "MISSING" not in result.stdout.split("|")[2]  # HOME
-            # Secrets should NOT be present
             assert "NOT_LEAKED" in result.stdout
         finally:
             import shutil
             shutil.rmtree(session.workspace_path, ignore_errors=True)
 
-    def test_resolver_rejects_unmet_network_policy(self):
-        """Resolver refuses backends that can't meet network isolation requirements."""
+        # --- Resolver rejects unmet network policy ---
         resolver = BackendResolver()
-        resolver.register(LocalProcessBackend())  # supports_network_isolation=False
-
-        # Policy requiring network isolation
-        policy = ExecutionPolicy(runtime="python", network="none")
-
+        resolver.register(LocalProcessBackend())
+        net_policy = ExecutionPolicy(runtime="python", network="none")
         with pytest.raises(RuntimeError, match="No sandbox backend available"):
-            resolver.resolve(policy)
+            resolver.resolve(net_policy)
 
-    def test_tool_dict_includes_name(self, bare_agent):
-        """register_tool stores name in the tool dict for error messages."""
+        # --- Tool dict includes name ---
         bare_agent.register_tool("my_tool", lambda: "ok", "A tool")
         assert bare_agent._tools["my_tool"]["name"] == "my_tool"
 
-    def test_subprocess_exception_handled(self):
-        """Non-timeout subprocess errors return structured result, not crash."""
-        backend = LocalProcessBackend()
-        policy = ExecutionPolicy(runtime="python", timeout_seconds=5)
-        session = backend.create_session(policy)
+        # --- Subprocess exception handled ---
+        backend2 = LocalProcessBackend()
+        policy2 = ExecutionPolicy(runtime="python", timeout_seconds=5)
+        session2 = backend2.create_session(policy2)
         try:
-            # Trigger a Python syntax error
-            spec = ExecutionSpec(
+            spec2 = ExecutionSpec(
                 command="test",
                 args={"code": "def !!!invalid"},
+                policy=policy2,
+            )
+            result2 = session2.run(spec2)
+            assert not result2.success
+            assert result2.exit_code != 0
+        finally:
+            import shutil
+            shutil.rmtree(session2.workspace_path, ignore_errors=True)
+
+
+class TestSandboxIntegrationAndCompat:
+    """SandboxModule integration + call_tool backward compat + auto-assign policy."""
+
+    def test_sandbox_integration_and_compat(self, bare_agent):
+        """Full flow: module loads, tool gets policy, call_tool uses sandbox backend.
+        Without SandboxModule, call_tool runs tools directly. Auto-assign respects
+        manual overrides."""
+        # --- Module integration ---
+        bare_agent.register_tool(
+            "exec_shell", lambda command: command,
+            "Execute shell command", safety_level=3,
+        )
+        mod = SandboxModule(auto_assign=True)
+        bare_agent.register_module(mod)
+
+        assert bare_agent.tool_executor is not None
+        from llamagent.modules.sandbox.policy import POLICY_LOCAL_SUBPROCESS
+        assert bare_agent._tools["exec_shell"]["execution_policy"] is POLICY_LOCAL_SUBPROCESS
+
+        result = bare_agent.call_tool("exec_shell", {"command": "echo integration_ok"})
+        assert "integration_ok" in result
+
+        # --- Auto-assign policy ---
+        # Use a fresh agent for auto-assign test
+        from llamagent.core.agent import LlamAgent, SimpleReAct
+        from llamagent.core.config import Config
+        from llamagent.core.authorization import AuthorizationEngine
+        import os
+
+        config2 = Config.__new__(Config)
+        for attr in vars(bare_agent.config):
+            setattr(config2, attr, getattr(bare_agent.config, attr))
+
+        agent2 = LlamAgent.__new__(LlamAgent)
+        agent2.config = config2
+        agent2.persona = None
+        agent2.llm = bare_agent.llm
+        agent2.modules = {}
+        agent2.history = []
+        agent2.summary = None
+        agent2.conversation = agent2.history
+        agent2._execution_strategy = SimpleReAct()
+        agent2.confirm_handler = None
+        agent2.interaction_handler = None
+        agent2._confirm_wait_time = 0.0
+        agent2.project_dir = os.path.realpath(os.getcwd())
+        agent2.playground_dir = os.path.realpath(os.path.join(agent2.project_dir, "llama_playground"))
+        agent2.tool_executor = None
+        agent2._tools = {}
+        agent2._active_packs = set()
+        agent2._tools_version = 0
+        agent2._hooks = {}
+        agent2._session_started = False
+        agent2._in_hook = False
+        agent2.mode = "interactive"
+        agent2._controller = None
+        agent2._authorization_engine = AuthorizationEngine(agent2)
+
+        custom = ExecutionPolicy(isolation="container", timeout_seconds=999)
+        agent2.register_tool("low_risk", lambda: "ok", "Safe tool", safety_level=1)
+        agent2.register_tool("high_risk", lambda: "ok", "Dangerous tool", safety_level=4)
+        agent2.register_tool("manual", lambda: "ok", "Custom tool", safety_level=5,
+                             execution_policy=custom)
+
+        SandboxModule(auto_assign=True).on_attach(agent2)
+
+        assert agent2._tools["low_risk"].get("execution_policy") is None
+        assert agent2._tools["high_risk"]["execution_policy"] is POLICY_LOCAL_SUBPROCESS
+        assert agent2._tools["manual"]["execution_policy"] is custom
+
+        # --- Backward compat: no sandbox module ---
+        agent3 = LlamAgent.__new__(LlamAgent)
+        agent3.config = config2
+        agent3.persona = None
+        agent3.llm = bare_agent.llm
+        agent3.modules = {}
+        agent3.history = []
+        agent3.summary = None
+        agent3.conversation = agent3.history
+        agent3._execution_strategy = SimpleReAct()
+        agent3.confirm_handler = None
+        agent3.interaction_handler = None
+        agent3._confirm_wait_time = 0.0
+        agent3.project_dir = os.path.realpath(os.getcwd())
+        agent3.playground_dir = os.path.realpath(os.path.join(agent3.project_dir, "llama_playground"))
+        agent3.tool_executor = None
+        agent3._tools = {}
+        agent3._active_packs = set()
+        agent3._tools_version = 0
+        agent3._hooks = {}
+        agent3._session_started = False
+        agent3._in_hook = False
+        agent3.mode = "interactive"
+        agent3._controller = None
+        agent3._authorization_engine = AuthorizationEngine(agent3)
+
+        agent3.register_tool("greet", lambda name: f"hello {name}", "Greeting tool", safety_level=1)
+        assert agent3.tool_executor is None
+        greet_result = agent3.call_tool("greet", {"name": "world"})
+        assert greet_result == "hello world"
+
+        agent3.register_tool("custom", lambda: "ok", "Custom",
+                             execution_policy=ExecutionPolicy(isolation="process"))
+        assert agent3._tools["custom"]["execution_policy"] is not None
+        custom_result = agent3.call_tool("custom", {})
+        assert custom_result == "ok"
+
+
+class TestLocalProcessExecution:
+    """LocalProcessBackend: Python execution + timeout handling."""
+
+    def test_local_process_execution(self):
+        """Run Python code in subprocess, verify structured result.
+        Long-running subprocess killed with timed_out=True."""
+        # --- Python execution ---
+        backend = LocalProcessBackend()
+        policy = ExecutionPolicy(runtime="python", isolation="process")
+        session = backend.create_session(policy)
+        try:
+            spec = ExecutionSpec(
+                command="compute",
+                args={"code": "print(sum(range(10)))"},
                 policy=policy,
+                workspace_path=session.workspace_path,
             )
             result = session.run(spec)
-            # Should get a structured error, not an exception
-            assert not result.success
-            assert result.exit_code != 0
+
+            assert result.exit_code == 0
+            assert result.timed_out is False
+            assert "45" in result.stdout
+            assert result.duration_ms > 0
+
+            obs = result.to_observation()
+            assert "45" in obs
         finally:
             import shutil
             shutil.rmtree(session.workspace_path, ignore_errors=True)
+
+        # --- Timeout handling ---
+        backend2 = LocalProcessBackend()
+        timeout_policy = ExecutionPolicy(
+            runtime="python", isolation="process", timeout_seconds=0.5,
+        )
+        session2 = backend2.create_session(timeout_policy)
+        try:
+            spec2 = ExecutionSpec(
+                command="slow",
+                args={"code": "import time; time.sleep(60)"},
+                policy=timeout_policy,
+                workspace_path=session2.workspace_path,
+            )
+            result2 = session2.run(spec2)
+
+            assert result2.timed_out is True
+            assert result2.exit_code == -1
+            assert result2.success is False
+
+            obs2 = result2.to_observation()
+            assert "[TIMEOUT" in obs2
+        finally:
+            import shutil
+            shutil.rmtree(session2.workspace_path, ignore_errors=True)

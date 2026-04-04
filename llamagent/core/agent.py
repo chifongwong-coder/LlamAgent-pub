@@ -280,7 +280,7 @@ class LlamAgent:
         self.tool_executor = None  # v1.2: injected by SandboxModule for sandbox execution dispatch
 
         # v1.9: authorization engine (encapsulates zone evaluation + policy decision)
-        self.mode: str = getattr(self.config, "authorization_mode", "interactive")
+        self.mode: str = "interactive"  # v1.9.9: always start interactive; set_mode() handles actual switch
         self._authorization_engine = AuthorizationEngine(self)
         self._controller = None  # v1.9.6: ModeController instance, set by set_mode("task")
         self._current_task_id = None  # Legacy fallback for PlanReAct / Workspace
@@ -303,6 +303,14 @@ class LlamAgent:
 
         # Register YAML-configured hooks
         self._register_yaml_hooks()
+
+        # v1.9.9: config-driven mode initialization
+        config_mode = getattr(self.config, "authorization_mode", "interactive")
+        if config_mode != "interactive":
+            if config_mode not in ("task", "continuous"):
+                logger.warning("Invalid authorization_mode '%s' in config, falling back to interactive", config_mode)
+            else:
+                self.set_mode(config_mode)
 
     # ============================================================
     # Module management
