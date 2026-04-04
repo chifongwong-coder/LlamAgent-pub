@@ -55,7 +55,7 @@ def _create_test_agent(mock_llm_client):
     agent._session_started = False
     agent._in_hook = False
     agent.mode = "interactive"
-    agent._task_mode_state = None
+    agent._controller = None
 
     from llamagent.core.agent import SimpleReAct
     agent._execution_strategy = SimpleReAct()

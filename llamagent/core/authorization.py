@@ -3,7 +3,9 @@ Authorization engine: unified authorization decision layer for call_tool().
 
 Encapsulates path extraction, zone evaluation, and policy-based decisions.
 In v1.9.0, only InteractivePolicy is implemented (same behavior as v1.8.x).
-Future versions add TaskPolicy (1.9.2) and ContinuousPolicy (1.9.3).
+v1.9.2 adds TaskPolicy, v1.9.3 adds ContinuousPolicy.
+v1.9.6: ApprovalScope moved here from zone.py; engine.set_mode() replaced by _switch_policy();
+         new apply_update() / _clear_all_scopes() / drain_prepare_data() / clear_pending_buffer().
 """
 
 from __future__ import annotations
@@ -15,9 +17,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from llamagent.core.contract import TaskModeState
+from llamagent.core.contract import AuthorizationUpdate, TaskModeState
 from llamagent.core.zone import (
-    ApprovalScope,
     ConfirmRequest,
     ConfirmResponse,
     RequestedScope,
@@ -30,6 +31,26 @@ if TYPE_CHECKING:
     from llamagent.core.agent import LlamAgent
 
 logger = logging.getLogger(__name__)
+
+
+# ======================================================================
+# ApprovalScope (moved from zone.py in v1.9.6)
+# ======================================================================
+
+@dataclass
+class ApprovalScope:
+    """One approved authorization scope, stored after contract confirmation."""
+    scope: str                    # "task" | "session"
+    zone: str                     # "project" | "external"
+    actions: list[str]            # ["write"] / ["execute"]
+    path_prefixes: list[str]      # ["project:src/", "project:docs/"]
+    tool_names: list[str] | None = None
+    # v1.9.4 governance fields
+    created_at: float | None = None     # time.time() when created
+    expires_at: float | None = None     # expiry time (None = no expiry)
+    max_uses: int | None = None         # max usage count (None = unlimited)
+    uses: int = 0                       # current usage count
+    source: str = "contract"            # "contract" | "seed" | "api"
 
 
 # ======================================================================
@@ -58,14 +79,14 @@ def infer_action(tool: dict) -> str:
 
 
 # ======================================================================
-# Authorization state (placeholder for future scope accumulation)
+# Authorization state
 # ======================================================================
 
 @dataclass
 class AuthorizationState:
     """Authorization state tracking approved scopes per task and session."""
-    task_scopes: dict = field(default_factory=dict)    # dict[str, list[ApprovalScope]]
-    session_scopes: list = field(default_factory=list)  # list[ApprovalScope]
+    task_scopes: dict[str, list[ApprovalScope]] = field(default_factory=dict)
+    session_scopes: list[ApprovalScope] = field(default_factory=list)
 
 
 @dataclass
@@ -73,6 +94,13 @@ class AuthorizationResult:
     """Result from AuthorizationEngine.evaluate(). Carries decision + audit events."""
     decision: str | None = None  # None = allow, str = rejection message
     events: list[tuple[str, dict]] = field(default_factory=list)
+
+
+@dataclass
+class AuthorizationUpdateResult:
+    """Result from AuthorizationEngine.apply_update() / _clear_all_scopes()."""
+    events: list[tuple[str, dict]] = field(default_factory=list)
+    changed: bool = False
 
 
 # ======================================================================
@@ -139,10 +167,14 @@ class InteractivePolicy(AuthorizationPolicy):
 class TaskPolicy(AuthorizationPolicy):
     """
     v1.9.1/1.9.2 task mode: controlled dry-run during prepare, scope matching during execute.
+
+    v1.9.6: pending scopes stored in internal _pending_buffer (not in shared TaskModeState).
+    Shared state is read-only: policy reads phase/task_id, never writes to state.
     """
 
     def __init__(self, state: TaskModeState):
-        self.state = state
+        self.state = state  # read-only: phase, task_id
+        self._pending_buffer: list[RequestedScope] = []
 
     def decide(
         self,
@@ -187,7 +219,8 @@ class TaskPolicy(AuthorizationPolicy):
         self, evaluation: ZoneEvaluation, tool_name: str, engine: AuthorizationEngine
     ) -> AuthorizationResult:
         """Execute phase: two-stage — match first, consume after all pass."""
-        task_id = engine.agent.get_active_task_id()
+        # v1.9.6: read task_id directly from shared state, not via engine.agent
+        task_id = self.state.task_id
         scopes = engine.state.task_scopes.get(task_id, []) if task_id else []
         events = []
         matched = []
@@ -231,11 +264,18 @@ class TaskPolicy(AuthorizationPolicy):
         return AuthorizationResult(events=events)
 
     def _record_pending(self, item: ZoneDecisionItem, tool_name: str):
+        """Record a pending scope into the internal buffer (not into shared state)."""
         scope = RequestedScope(
             zone=item.zone, actions=[item.action],
             path_prefixes=[item.path], tool_names=[tool_name],
         )
-        self.state.pending_scopes.append(scope)
+        self._pending_buffer.append(scope)
+
+    def take_pending_scopes(self) -> list[RequestedScope]:
+        """Return and clear accumulated pending scopes. Called by engine.drain_prepare_data()."""
+        result = list(self._pending_buffer)
+        self._pending_buffer.clear()
+        return result
 
 
 class ContinuousPolicy(AuthorizationPolicy):
@@ -282,45 +322,6 @@ class ContinuousPolicy(AuthorizationPolicy):
             }))
 
         return AuthorizationResult(events=events)
-
-
-def normalize_scopes(scopes: list[RequestedScope]) -> list[RequestedScope]:
-    """
-    Aggregate pending scopes for a cleaner contract.
-
-    Merges scopes with same zone + action + tool_name, deduplicates paths,
-    and attempts to find common path prefixes.
-    """
-    if not scopes:
-        return []
-
-    # Group by (zone, action_tuple, tool_names_tuple)
-    groups: dict[tuple, list[str]] = {}
-    for s in scopes:
-        key = (s.zone, tuple(sorted(s.actions)), tuple(sorted(s.tool_names or [])))
-        if key not in groups:
-            groups[key] = []
-        groups[key].extend(s.path_prefixes)
-
-    result = []
-    for (zone, actions, tool_names), paths in groups.items():
-        # Deduplicate paths
-        unique_paths = sorted(set(paths))
-
-        # Try to find common prefix
-        if len(unique_paths) > 1:
-            prefix = os.path.commonpath(unique_paths) if unique_paths else ""
-            if prefix and prefix != unique_paths[0]:
-                unique_paths = [prefix + "/"]
-
-        result.append(RequestedScope(
-            zone=zone,
-            actions=list(actions),
-            path_prefixes=unique_paths,
-            tool_names=list(tool_names) if tool_names else None,
-        ))
-
-    return result
 
 
 def _find_matching_scope(
@@ -379,6 +380,9 @@ class AuthorizationEngine:
 
     The engine accesses agent attributes (project_dir, playground_dir,
     confirm_handler) lazily via self.agent reference.
+
+    v1.9.6: set_mode() replaced by _switch_policy() (internal method).
+    New methods: apply_update(), _clear_all_scopes(), drain_prepare_data(), clear_pending_buffer().
     """
 
     def __init__(self, agent: LlamAgent):
@@ -386,22 +390,26 @@ class AuthorizationEngine:
         self.state = AuthorizationState()
         self.policy: AuthorizationPolicy = InteractivePolicy()
 
-    def set_mode(self, mode: str):
-        """Switch authorization mode and policy."""
+    def _switch_policy(self, mode: str, state: TaskModeState | None = None) -> AuthorizationUpdateResult:
+        """
+        Switch authorization policy. Internal method, called only by agent.set_mode().
+
+        Does NOT clear scopes or write agent attributes — those are agent's responsibility.
+        Returns events for newly loaded scopes (e.g., seed scopes in continuous mode).
+        """
+        events: list[tuple[str, dict]] = []
         if mode == "task":
-            state = TaskModeState()
+            if state is None:
+                raise ValueError("TaskPolicy requires a TaskModeState instance")
             self.policy = TaskPolicy(state)
-            self.agent._task_mode_state = state
         elif mode == "interactive":
             self.policy = InteractivePolicy()
-            self.agent._task_mode_state = None
-            self.state.task_scopes.clear()
-            self.state.session_scopes.clear()
         elif mode == "continuous":
             self.policy = ContinuousPolicy()
-            self.agent._task_mode_state = None
-            self.state.task_scopes.clear()
             self._load_seed_scopes()
+            for s in self.state.session_scopes:
+                events.append(("scope_issued", {"scope": s, "task_id": None}))
+        return AuthorizationUpdateResult(events=events, changed=bool(events))
 
     def _load_seed_scopes(self):
         """Load seed scopes from config into session_scopes."""
@@ -424,6 +432,105 @@ class AuthorizationEngine:
             ))
         self.state.session_scopes = scopes
         logger.info("Loaded %d seed scopes for continuous mode", len(scopes))
+
+    def apply_update(self, update: AuthorizationUpdate) -> AuthorizationUpdateResult:
+        """
+        Apply an authorization state change. Called by agent as a transparent courier.
+
+        - approved_scopes: converts RequestedScope → ApprovalScope and writes to task_scopes
+        - clear_task_scope: removes scopes for a specific task_id
+        - clear_session_scopes: removes all session scopes
+        """
+        events: list[tuple[str, dict]] = []
+        changed = False
+
+        # Write approved scopes
+        if update.approved_scopes and update.task_id:
+            for rs in update.approved_scopes:
+                scope = ApprovalScope(
+                    scope="task", zone=rs.zone, actions=rs.actions,
+                    path_prefixes=rs.path_prefixes, tool_names=rs.tool_names,
+                    created_at=time.time(), source="contract",
+                )
+                self.state.task_scopes.setdefault(update.task_id, []).append(scope)
+                events.append(("scope_issued", {"scope": scope, "task_id": update.task_id}))
+            changed = True
+
+        # Clear task scopes
+        if update.clear_task_scope and update.task_id:
+            removed = self.state.task_scopes.pop(update.task_id, [])
+            for s in removed:
+                events.append(("scope_revoked", {"scope": s, "reason": "task_completed"}))
+            if removed:
+                changed = True
+
+        # Clear session scopes
+        if update.clear_session_scopes:
+            for s in self.state.session_scopes:
+                events.append(("scope_revoked", {"scope": s, "reason": "session_clear"}))
+            if self.state.session_scopes:
+                changed = True
+            self.state.session_scopes.clear()
+
+        return AuthorizationUpdateResult(events=events, changed=changed)
+
+    def _clear_all_scopes(self, reason: str = "mode_switch") -> AuthorizationUpdateResult:
+        """
+        Clear all scopes (task + session). Internal method for set_mode() / shutdown.
+
+        Returns revocation events for agent to emit via hook system.
+        """
+        events: list[tuple[str, dict]] = []
+        for tid, scopes in self.state.task_scopes.items():
+            for s in scopes:
+                events.append(("scope_revoked", {"scope": s, "reason": reason}))
+        for s in self.state.session_scopes:
+            events.append(("scope_revoked", {"scope": s, "reason": reason}))
+        changed = bool(self.state.task_scopes or self.state.session_scopes)
+        self.state.task_scopes.clear()
+        self.state.session_scopes.clear()
+        return AuthorizationUpdateResult(events=events, changed=changed)
+
+    def authorization_status(self) -> dict:
+        """
+        Return a formatted snapshot of current authorization state.
+
+        Agent calls this for diagnostics without needing to understand scope internals.
+        """
+        now = time.time()
+        return {
+            "task_scopes": {
+                tid: [
+                    {"zone": s.zone, "actions": s.actions, "path_prefixes": s.path_prefixes,
+                     "uses": s.uses, "max_uses": s.max_uses, "source": s.source,
+                     "expired": s.expires_at is not None and now > s.expires_at}
+                    for s in scopes
+                ]
+                for tid, scopes in self.state.task_scopes.items()
+            },
+            "session_scopes": [
+                {"zone": s.zone, "actions": s.actions, "path_prefixes": s.path_prefixes,
+                 "uses": s.uses, "max_uses": s.max_uses, "source": s.source,
+                 "expired": s.expires_at is not None and now > s.expires_at}
+                for s in self.state.session_scopes
+            ],
+        }
+
+    def drain_prepare_data(self) -> dict:
+        """
+        Drain data accumulated during prepare pipeline. Returns opaque dict.
+
+        Agent calls this after prepare pipeline and puts the result into
+        PipelineOutcome.metadata. Agent does not inspect the contents.
+        """
+        if isinstance(self.policy, TaskPolicy):
+            return {"pending_scopes": self.policy.take_pending_scopes()}
+        return {}
+
+    def clear_pending_buffer(self) -> None:
+        """Clear any stale pending scopes from a previous failed prepare."""
+        if isinstance(self.policy, TaskPolicy):
+            self.policy._pending_buffer.clear()
 
     def evaluate(self, tool: dict, args: dict) -> AuthorizationResult:
         """
@@ -450,7 +557,9 @@ class AuthorizationEngine:
         if extractor is not None:
             try:
                 return [p for p in extractor(args) if p]
-            except Exception:
+            except Exception as e:
+                logger.warning("path_extractor raised exception for tool '%s': %s",
+                               tool.get("name", "unknown"), e)
                 return []
         # Auto path extractor fallback
         PATH_KEYWORDS = {"path", "file", "filepath"}
