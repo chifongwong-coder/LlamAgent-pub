@@ -30,12 +30,14 @@ from llamagent.modules.child_agent.module import ChildAgentModule
 from conftest import make_llm_response
 
 
-class TestChildAgentModuleIntegration:
-    """Load module -> spawn_child tool available -> call it."""
+class TestModuleIntegrationAndBudget:
+    """Module integration (register, spawn, list, collect) + budget enforcement + budgeted LLM."""
 
-    def test_child_agent_module_integration(self, bare_agent, mock_llm_client):
-        """Full integration: register module, spawn child, get result."""
-        # The child agent will make one LLM call that returns text
+    def test_module_integration_and_budget(self, bare_agent, mock_llm_client):
+        """Full integration: register module -> spawn child -> list -> collect.
+        Then budget enforcement: zero-budget child, direct BudgetExceededError,
+        and usage recording."""
+        # --- Module integration ---
         mock_llm_client.set_responses([
             make_llm_response("research findings: AI is great"),
         ])
@@ -53,7 +55,6 @@ class TestChildAgentModuleIntegration:
             "task": "research AI trends",
             "role": "worker",
         })
-
         assert isinstance(result, str)
         assert len(result) > 0
 
@@ -66,23 +67,9 @@ class TestChildAgentModuleIntegration:
         collect_result = bare_agent.call_tool("collect_results", {})
         assert "worker" in collect_result
 
-
-class TestBudgetEnforcement:
-    """Child with budget: budget exceeded raises error."""
-
-    def test_budget_enforcement(self, bare_agent, mock_llm_client):
-        """Child agent with tight budget: BudgetExceededError surfaces in result."""
-        module = ChildAgentModule()
-        bare_agent.register_module(module)
-
-        # BudgetedLLM checks BEFORE each call: max_llm_calls=0 means
-        # llm_calls(0) >= max(0) is True -> BudgetExceededError on the very
-        # first LLM call. LlamAgent.chat() catches this in the execution
-        # strategy error handler and returns an error string. The inline runner
-        # sees a completed chat (returns text), so the task status is "completed"
-        # but the result text contains the budget exceeded message.
+        # --- Budget enforcement: zero-budget child ---
         policy = AgentExecutionPolicy(
-            budget=Budget(max_llm_calls=0),  # No LLM calls allowed
+            budget=Budget(max_llm_calls=0),
             can_spawn_children=False,
         )
         spec = ChildAgentSpec(
@@ -91,48 +78,39 @@ class TestBudgetEnforcement:
             policy=policy,
             parent_task_id=module._parent_id,
         )
-
         task_id = module.controller.spawn_child(spec, module._create_child_agent)
         record = module.controller.wait_child(task_id)
-
-        # The child "completed" but the result text contains the budget error
         assert record.status == "completed"
         assert "budget exceeded" in record.result.lower() or "Budget" in record.result
 
-    def test_budget_exceeded_raises_directly(self):
-        """BudgetedLLM raises BudgetExceededError when budget is exhausted."""
+        # --- BudgetedLLM raises directly when budget exhausted ---
         mock_llm = MagicMock()
         mock_llm.model = "mock"
-
         tracker = BudgetTracker(Budget(max_llm_calls=1))
         budgeted = BudgetedLLM(mock_llm, tracker)
         tracker.llm_calls = 1  # Already at limit
-
         with pytest.raises(BudgetExceededError, match="LLM call budget exceeded"):
             budgeted.chat([{"role": "user", "content": "hi"}])
 
-    def test_budgeted_llm_records_usage(self):
-        """BudgetedLLM correctly records usage after each call."""
-        mock_llm = MagicMock()
-        mock_llm.model = "mock"
-        mock_llm.ask.return_value = "short answer"
-
-        tracker = BudgetTracker(Budget(max_llm_calls=5))
-        budgeted = BudgetedLLM(mock_llm, tracker)
-
-        budgeted.ask("question 1")
-        budgeted.ask("question 2")
-
-        assert tracker.llm_calls == 2
-        assert tracker.tokens_used > 0
+        # --- BudgetedLLM records usage ---
+        mock_llm2 = MagicMock()
+        mock_llm2.model = "mock"
+        mock_llm2.ask.return_value = "short answer"
+        tracker2 = BudgetTracker(Budget(max_llm_calls=5))
+        budgeted2 = BudgetedLLM(mock_llm2, tracker2)
+        budgeted2.ask("question 1")
+        budgeted2.ask("question 2")
+        assert tracker2.llm_calls == 2
+        assert tracker2.tokens_used > 0
 
 
-class TestRolePoliciesToolFiltering:
-    """Coder role only gets allowed tools."""
+class TestRolePoliciesAndTaskBoard:
+    """Role-based tool filtering (coder, researcher) + task board lifecycle (spawn, list, collect)."""
 
-    def test_role_policies_tool_filtering(self, bare_agent):
-        """Child with coder role gets only v1.5 allowed tools."""
-        # Register tools matching the v1.5 tool names
+    def test_role_policies_and_task_board(self, bare_agent, mock_llm_client):
+        """Coder role gets only allowed tools; researcher role gets web-oriented tools.
+        Then spawn multiple children, list them, and collect completed results."""
+        # --- Coder role filtering ---
         bare_agent.register_tool("read_files", lambda paths: "data", "Read files")
         bare_agent.register_tool("write_files", lambda files: "ok", "Write files")
         bare_agent.register_tool("apply_patch", lambda t, e: "patched", "Patch")
@@ -140,87 +118,67 @@ class TestRolePoliciesToolFiltering:
         bare_agent.register_tool("glob_files", lambda p: "files", "Glob")
         bare_agent.register_tool("search_text", lambda q: "found", "Search text")
         bare_agent.register_tool("web_search", lambda q: "results", "Search")
+        bare_agent.register_tool("web_fetch", lambda u: "page", "Fetch")
+        bare_agent.register_tool("search_knowledge", lambda q: "kb", "KB")
         bare_agent.register_tool("delete_database", lambda: "gone", "Delete")
 
         module = ChildAgentModule()
         bare_agent.register_module(module)
 
-        policy = ROLE_POLICIES["coder"]
-        spec = ChildAgentSpec(task="write code", role="coder", policy=policy)
-        child = module._create_child_agent(spec)
+        # Coder allowlist
+        coder_policy = ROLE_POLICIES["coder"]
+        coder_spec = ChildAgentSpec(task="write code", role="coder", policy=coder_policy)
+        coder_child = module._create_child_agent(coder_spec)
 
-        # Coder allowlist: read_files, write_files, apply_patch, start_job, glob_files, search_text
-        assert "read_files" in child._tools
-        assert "write_files" in child._tools
-        assert "apply_patch" in child._tools
-        assert "start_job" in child._tools
+        assert "read_files" in coder_child._tools
+        assert "write_files" in coder_child._tools
+        assert "apply_patch" in coder_child._tools
+        assert "start_job" in coder_child._tools
+        assert "web_search" not in coder_child._tools
+        assert "delete_database" not in coder_child._tools
+        assert "spawn_child" not in coder_child._tools
 
-        # These should NOT be present
-        assert "web_search" not in child._tools
-        assert "delete_database" not in child._tools
-        assert "spawn_child" not in child._tools
+        # --- Researcher role filtering ---
+        researcher_policy = ROLE_POLICIES["researcher"]
+        researcher_spec = ChildAgentSpec(task="research", role="researcher", policy=researcher_policy)
+        researcher_child = module._create_child_agent(researcher_spec)
 
-    def test_researcher_role_filtering(self, bare_agent):
-        """Child with researcher role gets only web-oriented + read tools."""
-        bare_agent.register_tool("web_search", lambda q: "results", "Search")
-        bare_agent.register_tool("web_fetch", lambda u: "page", "Fetch")
-        bare_agent.register_tool("search_knowledge", lambda q: "kb", "KB")
-        bare_agent.register_tool("search_text", lambda q: "found", "Search text")
-        bare_agent.register_tool("read_files", lambda paths: "data", "Read files")
-        bare_agent.register_tool("start_job", lambda cmd: "out", "Job")
+        assert "web_search" in researcher_child._tools
+        assert "web_fetch" in researcher_child._tools
+        assert "search_knowledge" in researcher_child._tools
+        assert "search_text" in researcher_child._tools
+        assert "read_files" in researcher_child._tools
+        assert "start_job" not in researcher_child._tools
 
-        module = ChildAgentModule()
-        bare_agent.register_module(module)
-
-        policy = ROLE_POLICIES["researcher"]
-        spec = ChildAgentSpec(task="research", role="researcher", policy=policy)
-        child = module._create_child_agent(spec)
-
-        assert "web_search" in child._tools
-        assert "web_fetch" in child._tools
-        assert "search_knowledge" in child._tools
-        assert "search_text" in child._tools
-        assert "read_files" in child._tools
-        assert "start_job" not in child._tools
-
-
-class TestTaskBoardLifecycle:
-    """Full lifecycle: spawn -> list -> collect."""
-
-    def test_task_board_lifecycle(self, bare_agent, mock_llm_client):
-        """Spawn multiple children, list them, then collect completed results."""
-        # Two children: both succeed
+        # --- Task board lifecycle: spawn multiple, list, collect ---
         mock_llm_client.set_responses([
             make_llm_response("result from child 1"),
             make_llm_response("result from child 2"),
         ])
 
-        module = ChildAgentModule()
-        bare_agent.register_module(module)
-
-        # Spawn two children
         result1 = module._spawn_child(task="task alpha", role="worker")
         result2 = module._spawn_child(task="task beta", role="analyst")
 
-        # List children should show both
         listing = module._list_children()
         assert "worker" in listing
         assert "analyst" in listing
         assert "task alpha" in listing
         assert "task beta" in listing
 
-        # Collect results should return both (both completed)
         collected = module._collect_results()
         assert "worker" in collected or "analyst" in collected
-        # At least one result should be present
         assert len(collected) > 0
 
 
-class TestChildInheritsZoneSettings:
-    """Child agent inherits parent's zone system settings (v1.3)."""
+class TestZoneInheritanceAndBackwardCompat:
+    """Child inherits parent zone settings + backward compat without module."""
 
-    def test_child_inherits_playground_dir(self, bare_agent):
-        """Child agent inherits parent's project_dir and playground_dir."""
+    def test_zone_inheritance_and_backward_compat(self, bare_agent, mock_llm_client):
+        """Child inherits project_dir, playground_dir, confirm_handler, mode, tool_executor.
+        Without ChildAgentModule, agent works normally as v1.1."""
+        from llamagent.core.zone import ConfirmRequest, ConfirmResponse
+
+        # --- playground_dir and project_dir inheritance ---
         bare_agent.project_dir = "/custom/project"
         bare_agent.playground_dir = "/custom/project/llama_playground"
 
@@ -229,83 +187,95 @@ class TestChildInheritsZoneSettings:
 
         spec = ChildAgentSpec(task="test task", role="worker")
         child = module._create_child_agent(spec)
-
         assert child.project_dir == "/custom/project"
         assert child.playground_dir == "/custom/project/llama_playground"
 
-    def test_child_inherits_confirm_handler_and_mode(self, bare_agent):
-        """Child agent inherits parent's confirm_handler and mode."""
-        from llamagent.core.zone import ConfirmRequest, ConfirmResponse
-
+        # --- confirm_handler and mode inheritance ---
         handler = lambda req: ConfirmResponse(allow=True)
         bare_agent.confirm_handler = handler
         bare_agent.mode = "interactive"
 
-        module = ChildAgentModule()
-        bare_agent.register_module(module)
-
-        spec = ChildAgentSpec(task="test task", role="worker")
-        child = module._create_child_agent(spec)
-
-        assert child.confirm_handler is handler
-        assert child.mode == "interactive"
+        child2 = module._create_child_agent(spec)
+        assert child2.confirm_handler is handler
+        assert child2.mode == "interactive"
 
         # If parent has no handler, child also has none
         bare_agent.confirm_handler = None
         child_no_handler = module._create_child_agent(spec)
         assert child_no_handler.confirm_handler is None
 
-    def test_child_inherits_tool_executor(self, bare_agent):
-        """Child agent inherits parent's tool_executor (sandbox dispatch)."""
+        # --- tool_executor inheritance ---
         mock_executor = MagicMock()
         bare_agent.tool_executor = mock_executor
+        spec_coder = ChildAgentSpec(task="sandbox task", role="coder")
+        child_executor = module._create_child_agent(spec_coder)
+        assert child_executor.tool_executor is mock_executor
 
-        module = ChildAgentModule()
-        bare_agent.register_module(module)
-
-        spec = ChildAgentSpec(task="sandbox task", role="coder")
-        child = module._create_child_agent(spec)
-
-        assert child.tool_executor is mock_executor
-
-
-class TestBackwardCompatWithoutModule:
-    """Without ChildAgentModule, agent works as v1.1."""
-
-    def test_backward_compat_without_module(self, bare_agent, mock_llm_client):
-        """Agent without ChildAgentModule still works normally for chat."""
+        # --- Backward compat: no ChildAgentModule ---
+        # Create a fresh agent without the module
+        bare_agent.tool_executor = None  # reset
+        bare_agent2 = bare_agent  # reuse; remove module reference for test
+        # A separate bare_agent would be ideal but we can check the properties
+        # before module was loaded were valid
         mock_llm_client.set_responses([
             make_llm_response("hello, I am your assistant"),
         ])
 
-        # No modules loaded at all
-        assert not bare_agent.has_module("child_agent")
-        assert "spawn_child" not in bare_agent._tools
+        # Create a truly bare agent for backward compat test
+        from llamagent.core.config import Config
+        from llamagent.core.agent import SimpleReAct
+        from llamagent.core.authorization import AuthorizationEngine
+        import os
 
-        # Normal chat still works
-        response = bare_agent.chat("hi")
+        config2 = Config.__new__(Config)
+        for attr in vars(bare_agent.config):
+            setattr(config2, attr, getattr(bare_agent.config, attr))
+
+        agent2 = LlamAgent.__new__(LlamAgent)
+        agent2.config = config2
+        agent2.persona = None
+        agent2.llm = mock_llm_client
+        agent2.modules = {}
+        agent2.history = []
+        agent2.summary = None
+        agent2.conversation = agent2.history
+        agent2._execution_strategy = SimpleReAct()
+        agent2.confirm_handler = None
+        agent2.interaction_handler = None
+        agent2._confirm_wait_time = 0.0
+        agent2.project_dir = os.path.realpath(os.getcwd())
+        agent2.playground_dir = os.path.realpath(os.path.join(agent2.project_dir, "llama_playground"))
+        agent2.tool_executor = None
+        agent2._tools = {}
+        agent2._active_packs = set()
+        agent2._tools_version = 0
+        agent2._hooks = {}
+        agent2._session_started = False
+        agent2._in_hook = False
+        agent2.mode = "interactive"
+        agent2._controller = None
+        agent2._authorization_engine = AuthorizationEngine(agent2)
+
+        assert not agent2.has_module("child_agent")
+        assert "spawn_child" not in agent2._tools
+
+        response = agent2.chat("hi")
         assert isinstance(response, str)
         assert len(response) > 0
 
-        # Register a tool and use it without child agent module
-        bare_agent.register_tool("greet", lambda name: f"hello {name}", "Greet")
-        assert "greet" in bare_agent._tools
-
-        # Agent is fully functional without child agent capability
-        assert bare_agent.has_module("child_agent") is False
+        agent2.register_tool("greet", lambda name: f"hello {name}", "Greet")
+        assert "greet" in agent2._tools
+        assert agent2.has_module("child_agent") is False
 
 
-# ============================================================
-# Security fixes verification
-# ============================================================
+class TestSecurityFixes:
+    """Security fixes: deep copy isolation, max children limit, permission enforcement, cleanup."""
 
-
-class TestChildAgentSecurityFixes:
-    """Verify key security fixes in the child agent module."""
-
-    def test_tool_deep_copy_isolation(self, bare_agent, mock_llm_client):
-        """Child tool mutation does not bleed back to parent."""
-        mock_llm_client.set_responses([make_llm_response("done")])
+    def test_security_fixes(self, bare_agent, mock_llm_client):
+        """Child tool mutation does not bleed to parent; max_children enforced;
+        child inherits zone settings; runner results cleaned after sync."""
+        # --- Deep copy isolation ---
+        mock_llm_client.set_responses([make_llm_response("done")] * 10)
         bare_agent.register_tool(
             "shared_tool", lambda: "ok", "test",
             parameters={"type": "object", "properties": {"x": {"type": "string"}}},
@@ -316,54 +286,30 @@ class TestChildAgentSecurityFixes:
 
         spec = ChildAgentSpec(task="test")
         child = module._create_child_agent(spec)
-
-        # Mutate child's nested tool parameters
         child._tools["shared_tool"]["parameters"]["properties"]["injected"] = {"type": "int"}
-
-        # Parent must NOT be affected
         assert "injected" not in bare_agent._tools["shared_tool"]["parameters"]["properties"]
 
-    def test_max_children_limit(self, bare_agent, mock_llm_client):
-        """Controller enforces max_children limit."""
-        mock_llm_client.set_responses([make_llm_response("ok")] * 10)
-        module = ChildAgentModule()
-        bare_agent.register_module(module)
+        # --- Max children limit ---
         module.controller.max_children = 2
-
-        # First 2 succeed
         r1 = module._spawn_child(task="t1")
         r2 = module._spawn_child(task="t2")
         assert "Cannot spawn" not in r1
         assert "Cannot spawn" not in r2
-
-        # 3rd blocked
         r3 = module._spawn_child(task="overflow")
         assert "Max children limit" in r3
 
-    def test_child_permission_level_enforced(self, bare_agent, mock_llm_client):
-        """Child agent inherits zone settings from parent."""
-        mock_llm_client.set_responses([make_llm_response("done")])
-
+        # --- Child inherits zone settings (permission level via playground_dir) ---
         bare_agent.register_tool("dangerous", lambda: "boom", "high risk", safety_level=3)
+        spec2 = ChildAgentSpec(task="test")
+        child2 = module._create_child_agent(spec2)
+        assert child2.playground_dir == bare_agent.playground_dir
 
-        module = ChildAgentModule()
-        bare_agent.register_module(module)
-
-        spec = ChildAgentSpec(task="test")
-        child = module._create_child_agent(spec)
-
-        # Child inherits playground_dir from parent
-        assert child.playground_dir == bare_agent.playground_dir
-
-    def test_runner_cleanup_prevents_memory_leak(self, bare_agent, mock_llm_client):
-        """Runner results cleaned after sync to TaskBoard."""
+        # --- Runner cleanup prevents memory leak ---
+        # Reset module for clean state
+        module2 = ChildAgentModule()
+        bare_agent.modules.pop("child_agent", None)
+        bare_agent.register_module(module2)
         mock_llm_client.set_responses([make_llm_response("done")])
-        module = ChildAgentModule()
-        bare_agent.register_module(module)
-
-        module._spawn_child(task="test")
-
-        # Runner should be empty (cleaned after sync)
-        assert len(module.controller.runner._results) == 0
-        # TaskBoard should have the record
-        assert len(module.controller.list_children(module._parent_id)) == 1
+        module2._spawn_child(task="test")
+        assert len(module2.controller.runner._results) == 0
+        assert len(module2.controller.list_children(module2._parent_id)) == 1

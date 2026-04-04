@@ -167,8 +167,19 @@ hooks:
 | Mode | Behavior |
 |------|----------|
 | `interactive` | Every side-effect operation asks for confirmation (default) |
-| `task` | Dry-run first, generate a contract, confirm once, then execute without interruption |
-| `continuous` | Run unattended with pre-configured seed scopes — no interaction, no auto-escalation |
+| `task` | Execute a task with project access, auto-clean scopes on completion. Configure seed scopes to skip the planning phase, or let the agent plan first and confirm once. |
+| `continuous` | Run unattended with project access until manually stopped. Configure seed scopes to narrow boundaries. |
+
+Set the mode in YAML — the agent applies it on startup:
+
+```yaml
+authorization:
+  mode: continuous
+  seed_scopes:
+    - zone: project
+      actions: [read, write]
+      path_prefixes: [src/, docs/]
+```
 
 ## Examples
 
@@ -207,7 +218,7 @@ llamagent/
 │   └── mcp/           Model Context Protocol
 ├── interfaces/        CLI, Web UI, API server
 ├── examples/          Tutorial scripts
-└── tests/             650+ tests
+└── tests/             520+ tests
 ```
 
 ## License

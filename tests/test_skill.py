@@ -68,61 +68,18 @@ def _make_agent_with_skills(bare_agent, tmp_path, skills_data):
 
 
 # ============================================================
-# A-level: /skill command flow
+# Flow 1: Tag matching (B-level) + LLM fallback (C-level)
 # ============================================================
 
-class TestSkillCommandFlow:
-    """/skill command end-to-end: on_input intercept -> on_context inject."""
+class TestTagMatchingAndLLMFallbackFlow:
+    """B-level tag matching and C-level LLM fallback: single match, multi
+    match + LLM disambiguate, LLM error, no match, max_active truncation,
+    fallback disabled / enabled / empty."""
 
-    def test_slash_skill_activates_and_injects(self, bare_agent, tmp_path):
-        """Full A-level flow: /skill command -> forced activation -> content injected."""
-        mod = _make_agent_with_skills(bare_agent, tmp_path, [
-            {"name": "deploy", "description": "Deploy workflow",
-             "tags": ["deploy"], "content": "## Steps\n1. Build\n2. Ship"},
-        ])
+    def test_tag_matching_and_llm_fallback_flow(self, bare_agent, tmp_path, mock_llm_client):
+        """Full tag matching and LLM fallback flow across multiple scenarios."""
 
-        # on_input intercepts the command
-        query = mod.on_input("/skill deploy run the deployment")
-        assert mod._forced_skill == "deploy"
-        assert query == "run the deployment"
-
-        # on_context injects the skill
-        result = mod.on_context(query, "")
-        assert "[Active Skill: deploy]" in result
-        assert "## Steps" in result
-        assert "[End Skill]" in result
-
-    def test_slash_skill_not_found_falls_to_tag_match(self, bare_agent, tmp_path):
-        """A-level miss degrades to B-level tag match."""
-        mod = _make_agent_with_skills(bare_agent, tmp_path, [
-            {"name": "deploy", "description": "Deploy workflow",
-             "tags": ["deploy"], "content": "Deploy playbook"},
-        ])
-
-        mod.on_input("/skill nonexistent")
-        result = mod.on_context("deploy the app", "")
-        assert "[Active Skill: deploy]" in result
-
-    def test_normal_input_does_not_force(self, bare_agent, tmp_path):
-        """Normal input passes through without forced activation."""
-        mod = _make_agent_with_skills(bare_agent, tmp_path, [
-            {"name": "deploy", "description": "Deploy", "tags": ["deploy"]},
-        ])
-
-        result = mod.on_input("just a normal question")
-        assert mod._forced_skill is None
-        assert result == "just a normal question"
-
-
-# ============================================================
-# B-level: tag matching flow
-# ============================================================
-
-class TestTagMatchingFlow:
-    """B-level tag matching: single match, multi match + LLM, no match."""
-
-    def test_single_tag_match_activates(self, bare_agent, tmp_path):
-        """Single tag hit activates the skill without LLM call."""
+        # --- Single tag match activates skill without LLM ---
         mod = _make_agent_with_skills(bare_agent, tmp_path, [
             {"name": "db-migration", "description": "Database migration",
              "tags": ["migration", "alembic"], "content": "Migration playbook"},
@@ -131,13 +88,12 @@ class TestTagMatchingFlow:
         ])
 
         result = mod.on_context("run the migration", "existing context")
-
         assert "existing context" in result
         assert "[Active Skill: db-migration]" in result
         assert "[Active Skill: code-review]" not in result
 
-    def test_multiple_candidates_llm_disambiguate(self, bare_agent, tmp_path, mock_llm_client):
-        """2+ tag hits triggers LLM disambiguation."""
+        # --- Multiple candidates: LLM disambiguates ---
+        bare_agent.modules.clear()
         mod = _make_agent_with_skills(bare_agent, tmp_path, [
             {"name": "db-migration", "description": "Database migration",
              "tags": ["database"], "content": "Migration playbook"},
@@ -153,8 +109,8 @@ class TestTagMatchingFlow:
         assert "[Active Skill: db-migration]" in result
         assert "[Active Skill: db-backup]" not in result
 
-    def test_llm_error_falls_back_to_first_candidate(self, bare_agent, tmp_path, mock_llm_client):
-        """LLM failure during disambiguation falls back to first candidate."""
+        # --- LLM error falls back to first candidate ---
+        bare_agent.modules.clear()
         mod = _make_agent_with_skills(bare_agent, tmp_path, [
             {"name": "skill-a", "description": "Skill A",
              "tags": ["shared"], "content": "A playbook"},
@@ -166,8 +122,8 @@ class TestTagMatchingFlow:
         result = mod.on_context("shared task", "")
         assert "[Active Skill: skill-a]" in result
 
-    def test_no_tag_match_returns_original(self, bare_agent, tmp_path):
-        """No tag match -> context unchanged."""
+        # --- No tag match returns original context ---
+        bare_agent.modules.clear()
         mod = _make_agent_with_skills(bare_agent, tmp_path, [
             {"name": "deploy", "description": "Deploy", "tags": ["deploy"]},
         ])
@@ -175,8 +131,8 @@ class TestTagMatchingFlow:
         result = mod.on_context("what is the weather today", "original context")
         assert result == "original context"
 
-    def test_skill_max_active_truncation(self, bare_agent, tmp_path, mock_llm_client):
-        """Only skill_max_active skills are injected."""
+        # --- max_active truncation: only N skills injected ---
+        bare_agent.modules.clear()
         mod = _make_agent_with_skills(bare_agent, tmp_path, [
             {"name": "s1", "description": "Skill 1", "tags": ["common"], "content": "S1"},
             {"name": "s2", "description": "Skill 2", "tags": ["common"], "content": "S2"},
@@ -191,16 +147,9 @@ class TestTagMatchingFlow:
         result = mod.on_context("common task", "")
         assert result.count("[Active Skill:") == 1
 
-
-# ============================================================
-# C-level: LLM fallback flow
-# ============================================================
-
-class TestLLMFallbackFlow:
-    """C-level LLM full metadata scan (optional fallback)."""
-
-    def test_fallback_disabled_by_default(self, bare_agent, tmp_path):
-        """C-level not triggered when skill_llm_fallback=False."""
+        # --- Fallback disabled (C-level not triggered) ---
+        bare_agent.modules.clear()
+        bare_agent.config.skill_max_active = 2
         mod = _make_agent_with_skills(bare_agent, tmp_path, [
             {"name": "hidden", "description": "Hidden skill",
              "tags": ["zzz_unique"], "content": "Hidden playbook"},
@@ -209,8 +158,8 @@ class TestLLMFallbackFlow:
         result = mod.on_context("something completely different", "ctx")
         assert result == "ctx"
 
-    def test_fallback_activates_when_enabled(self, bare_agent, tmp_path, mock_llm_client):
-        """C-level triggers when B-level has 0 candidates and fallback is on."""
+        # --- Fallback enabled: C-level triggers on 0 B-level candidates ---
+        bare_agent.modules.clear()
         mod = _make_agent_with_skills(bare_agent, tmp_path, [
             {"name": "release-checklist", "description": "Pre-release checklist",
              "tags": ["release"], "content": "Release playbook"},
@@ -224,13 +173,13 @@ class TestLLMFallbackFlow:
         result = mod.on_context("what should I do before going live", "")
         assert "[Active Skill: release-checklist]" in result
 
-    def test_fallback_llm_returns_empty(self, bare_agent, tmp_path, mock_llm_client):
-        """C-level LLM returns no match -> no skill injected."""
+        # --- Fallback LLM returns empty: no skill injected ---
+        bare_agent.modules.clear()
+        bare_agent.config.skill_llm_fallback = True
         mod = _make_agent_with_skills(bare_agent, tmp_path, [
             {"name": "deploy", "description": "Deploy", "tags": ["deploy"]},
         ])
 
-        bare_agent.config.skill_llm_fallback = True
         mock_llm_client.set_responses([
             make_llm_response(json.dumps({"selected": []})),
         ])
@@ -240,14 +189,16 @@ class TestLLMFallbackFlow:
 
 
 # ============================================================
-# Injection format and context preservation
+# Flow 2: Injection format and context preservation
 # ============================================================
 
-class TestInjectionFormat:
-    """Skill content injection format and context ordering."""
+class TestInjectionFormatAndContext:
+    """Skill content injection format, context ordering, and empty index."""
 
-    def test_skill_block_format(self, bare_agent, tmp_path):
-        """Injected skill has [Active Skill: name]...[End Skill] wrapper."""
+    def test_injection_format_and_context(self, bare_agent, tmp_path):
+        """Injection block format, existing context preserved, empty index returns original."""
+
+        # --- Skill block format: [Active Skill: name]...[End Skill] ---
         mod = _make_agent_with_skills(bare_agent, tmp_path, [
             {"name": "my-skill", "description": "My skill",
              "tags": ["myskill"], "content": "Line 1\nLine 2"},
@@ -259,8 +210,8 @@ class TestInjectionFormat:
         assert result.endswith("[End Skill]")
         assert "Line 1\nLine 2" in result
 
-    def test_existing_context_preserved(self, bare_agent, tmp_path):
-        """Existing context is preserved, skill appended after."""
+        # --- Existing context preserved, skill appended after ---
+        bare_agent.modules.clear()
         mod = _make_agent_with_skills(bare_agent, tmp_path, [
             {"name": "s1", "description": "S1", "tags": ["deployment"],
              "content": "S1 content"},
@@ -271,8 +222,8 @@ class TestInjectionFormat:
         assert "[Active Skill: s1]" in result
         assert result.index("[Memory]") < result.index("[Active Skill:")
 
-    def test_empty_index_returns_original(self, bare_agent, tmp_path):
-        """No skills indexed -> context unchanged."""
+        # --- Empty index: no skills -> context unchanged ---
+        bare_agent.modules.clear()
         skills_dir = os.path.join(str(tmp_path), ".llamagent", "skills")
         os.makedirs(skills_dir, exist_ok=True)
 
@@ -288,14 +239,17 @@ class TestInjectionFormat:
 
 
 # ============================================================
-# v1.6: Pack activation via required_tool_packs
+# Flow 3: Pack activation + /skill command
 # ============================================================
 
-class TestSkillPackActivation:
-    """Skill with required_tool_packs activates packs on match."""
+class TestPackActivationAndSlashCommand:
+    """Pack activation via required_tool_packs and /skill command flow."""
 
-    def test_skill_activates_pack_on_tag_match(self, bare_agent, tmp_path):
-        """When a skill with required_tool_packs matches, the packs are activated."""
+    def test_pack_activation_and_slash_command(self, bare_agent, tmp_path):
+        """Tag match activates packs, no packs leaves _active_packs empty,
+        /skill command activates packs, and full /skill command flow."""
+
+        # --- Tag match activates required_tool_packs ---
         mod = _make_agent_with_skills(bare_agent, tmp_path, [
             {"name": "my-toolsmith", "description": "Create tools",
              "tags": ["tool", "create"],
@@ -309,8 +263,9 @@ class TestSkillPackActivation:
         assert "[Active Skill: my-toolsmith]" in result
         assert "toolsmith" in bare_agent._active_packs
 
-    def test_skill_without_packs_does_not_affect_active_packs(self, bare_agent, tmp_path):
-        """Normal skill without required_tool_packs does not modify _active_packs."""
+        # --- Skill without packs does not modify _active_packs ---
+        bare_agent.modules.clear()
+        bare_agent._active_packs.clear()
         mod = _make_agent_with_skills(bare_agent, tmp_path, [
             {"name": "deploy", "description": "Deploy workflow",
              "tags": ["deploy"],
@@ -320,8 +275,9 @@ class TestSkillPackActivation:
         mod.on_context("deploy the app", "")
         assert len(bare_agent._active_packs) == 0
 
-    def test_slash_skill_activates_pack(self, bare_agent, tmp_path):
-        """A-level /skill command also activates required_tool_packs."""
+        # --- /skill command also activates required_tool_packs ---
+        bare_agent.modules.clear()
+        bare_agent._active_packs.clear()
         mod = _make_agent_with_skills(bare_agent, tmp_path, [
             {"name": "web-access", "description": "Fetch web pages",
              "tags": ["web"],
@@ -333,16 +289,57 @@ class TestSkillPackActivation:
         result = mod.on_context(query, "")
         assert "web" in bare_agent._active_packs
 
+        # --- Full /skill command flow: forced activation + injection ---
+        bare_agent.modules.clear()
+        bare_agent._active_packs.clear()
+        mod = _make_agent_with_skills(bare_agent, tmp_path, [
+            {"name": "deploy", "description": "Deploy workflow",
+             "tags": ["deploy"], "content": "## Steps\n1. Build\n2. Ship"},
+        ])
+
+        query = mod.on_input("/skill deploy run the deployment")
+        assert mod._forced_skill == "deploy"
+        assert query == "run the deployment"
+
+        result = mod.on_context(query, "")
+        assert "[Active Skill: deploy]" in result
+        assert "## Steps" in result
+        assert "[End Skill]" in result
+
+        # --- /skill miss degrades to B-level tag match ---
+        bare_agent.modules.clear()
+        mod = _make_agent_with_skills(bare_agent, tmp_path, [
+            {"name": "deploy", "description": "Deploy workflow",
+             "tags": ["deploy"], "content": "Deploy playbook"},
+        ])
+
+        mod.on_input("/skill nonexistent")
+        result = mod.on_context("deploy the app", "")
+        assert "[Active Skill: deploy]" in result
+
+        # --- Normal input passes through without forced activation ---
+        bare_agent.modules.clear()
+        mod = _make_agent_with_skills(bare_agent, tmp_path, [
+            {"name": "deploy", "description": "Deploy", "tags": ["deploy"]},
+        ])
+
+        result = mod.on_input("just a normal question")
+        assert mod._forced_skill is None
+        assert result == "just a normal question"
+
 
 # ============================================================
-# v1.6: Builtin skills scanning
+# Flow 4: Builtin skills
 # ============================================================
 
 class TestBuiltinSkills:
-    """Builtin skills from package directory are scanned and available."""
+    """Builtin skills scanning and project-level override."""
 
-    def test_builtin_skills_loaded(self, bare_agent, tmp_path):
-        """Builtin skills (toolsmith, web-access, etc.) are loaded from package directory."""
+    def test_builtin_skills(self, bare_agent, tmp_path):
+        """Builtin skills are loaded from package directory, and project-level
+        skills with the same name override builtins."""
+
+        # --- Builtin skills loaded ---
         bare_agent.project_dir = str(tmp_path)
         bare_agent.config.skill_dirs = []
         bare_agent.config.skill_max_active = 2
@@ -351,15 +348,13 @@ class TestBuiltinSkills:
         mod = SkillModule()
         bare_agent.register_module(mod)
 
-        # Check that builtin skills are indexed
         assert mod.index.lookup("toolsmith") is not None
         assert mod.index.lookup("web-access") is not None
         assert mod.index.lookup("workspace-ops") is not None
         assert mod.index.lookup("lightweight-collab") is not None
 
-    def test_project_skill_overrides_builtin(self, bare_agent, tmp_path):
-        """Project-level skill with same name overrides builtin."""
-        # Create a project-level skill named "toolsmith" with different content
+        # --- Project skill overrides builtin ---
+        bare_agent.modules.clear()
         skills_dir = os.path.join(str(tmp_path), ".llamagent", "skills")
         _create_skill(skills_dir, "toolsmith",
                       "Custom project toolsmith",
