@@ -101,6 +101,7 @@ class AuthorizationUpdateResult:
     """Result from AuthorizationEngine.apply_update() / _clear_all_scopes()."""
     events: list[tuple[str, dict]] = field(default_factory=list)
     changed: bool = False
+    has_session_scopes: bool = False
 
 
 # ======================================================================
@@ -219,9 +220,10 @@ class TaskPolicy(AuthorizationPolicy):
         self, evaluation: ZoneEvaluation, tool_name: str, engine: AuthorizationEngine
     ) -> AuthorizationResult:
         """Execute phase: two-stage — match first, consume after all pass."""
-        # v1.9.6: read task_id directly from shared state, not via engine.agent
+        # v1.9.8: merge task scopes (specific) + session scopes (broad), task-first priority
         task_id = self.state.task_id
-        scopes = engine.state.task_scopes.get(task_id, []) if task_id else []
+        task = engine.state.task_scopes.get(task_id, []) if task_id else []
+        scopes = task + engine.state.session_scopes
         events = []
         matched = []
 
@@ -398,10 +400,33 @@ class AuthorizationEngine:
         Returns events for newly loaded scopes (e.g., seed scopes in continuous mode).
         """
         events: list[tuple[str, dict]] = []
+        has_session_scopes = False
         if mode == "task":
             if state is None:
                 raise ValueError("TaskPolicy requires a TaskModeState instance")
             self.policy = TaskPolicy(state)
+            self._load_seed_scopes()
+            if not self.state.session_scopes:
+                # No seed scopes configured — ask user whether to open project access
+                request = ConfirmRequest(
+                    kind="session_authorize",
+                    tool_name="*",
+                    action="read_write",
+                    zone="project",
+                    target_paths=[self.agent.project_dir],
+                    message="Allow all tasks to read and write in the project directory?",
+                )
+                response = self.confirm(request)
+                if response.allow:
+                    self.state.session_scopes = [ApprovalScope(
+                        scope="session", zone="project",
+                        actions=["read", "write"],
+                        path_prefixes=[self.agent.project_dir],
+                        created_at=time.time(), source="session_authorize",
+                    )]
+            has_session_scopes = bool(self.state.session_scopes)
+            for s in self.state.session_scopes:
+                events.append(("scope_issued", {"scope": s, "task_id": None}))
         elif mode == "interactive":
             self.policy = InteractivePolicy()
         elif mode == "continuous":
@@ -409,7 +434,10 @@ class AuthorizationEngine:
             self._load_seed_scopes()
             for s in self.state.session_scopes:
                 events.append(("scope_issued", {"scope": s, "task_id": None}))
-        return AuthorizationUpdateResult(events=events, changed=bool(events))
+        return AuthorizationUpdateResult(
+            events=events, changed=bool(events),
+            has_session_scopes=has_session_scopes,
+        )
 
     def _load_seed_scopes(self):
         """Load seed scopes from config into session_scopes."""
@@ -431,7 +459,7 @@ class AuthorizationEngine:
                 source="seed",
             ))
         self.state.session_scopes = scopes
-        logger.info("Loaded %d seed scopes for continuous mode", len(scopes))
+        logger.info("Loaded %d seed scopes", len(scopes))
 
     def apply_update(self, update: AuthorizationUpdate) -> AuthorizationUpdateResult:
         """

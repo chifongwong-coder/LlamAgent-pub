@@ -94,6 +94,7 @@ class TaskModeController(ModeController):
 
     def __init__(self):
         self.state = TaskModeState()
+        self.auto_execute = False
 
     def is_idle(self) -> bool:
         return self.state.phase == "idle"
@@ -123,8 +124,17 @@ class TaskModeController(ModeController):
 
         if phase == "idle":
             self.state.task_id = uuid.uuid4().hex
-            self.state.phase = "preparing"
             self.state.original_query = user_input
+            if self.auto_execute:
+                # Session scopes pre-authorized — skip prepare/contract
+                self.state.phase = "executing"
+                self.state.confirmed = True
+                return ModeAction(
+                    kind="run_execute",
+                    query=user_input,
+                    task_id=self.state.task_id,
+                )
+            self.state.phase = "preparing"
             return ModeAction(
                 kind="run_prepare",
                 query=user_input,
