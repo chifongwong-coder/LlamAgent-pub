@@ -61,14 +61,14 @@ def _call_tool_json(agent, name, **kwargs):
 
 
 # ============================================================
-# Pack + Skill + Tools integration
+# Tests
 # ============================================================
 
-class TestPackSkillIntegration:
-    """Skill activation triggers pack, making hidden tools visible."""
+class TestCrossModule:
+    """Consolidated cross-module integration flow tests."""
 
-    def test_skill_activates_workspace_maintenance_pack(self, bare_agent, tmp_path):
-        """Workspace-ops builtin skill activates workspace-maintenance pack."""
+    def test_pack_skill_integration(self, bare_agent, tmp_path):
+        """Skill activation triggers pack visibility, and on_input resets packs each turn."""
         tools_mod, skill_mod = _setup_tools_and_skill(bare_agent, tmp_path)
 
         # Before: workspace-maintenance tools hidden
@@ -90,11 +90,7 @@ class TestPackSkillIntegration:
             assert "glob_files" in schema_names
             assert "move_path" in schema_names
 
-    def test_on_input_resets_packs_each_turn(self, bare_agent, tmp_path):
-        """Packs from previous turn are cleared on next on_input."""
-        tools_mod, _ = _setup_tools_and_skill(bare_agent, tmp_path)
-
-        # Manually activate a pack
+        # --- on_input resets packs each turn ---
         bare_agent._active_packs.add("workspace-maintenance")
         assert "workspace-maintenance" in bare_agent._active_packs
 
@@ -102,16 +98,8 @@ class TestPackSkillIntegration:
         tools_mod.on_input("hello")
         assert len(bare_agent._active_packs) == 0
 
-
-# ============================================================
-# Pack + Job integration
-# ============================================================
-
-class TestPackJobIntegration:
-    """Job execution activates job-followup pack within same turn."""
-
-    def test_start_job_activates_followup_pack(self, bare_agent, tmp_path):
-        """start_job success makes inspect_job/wait_job/cancel_job visible."""
+    def test_pack_job_integration(self, bare_agent, tmp_path):
+        """start_job activates followup pack, and state-driven eval re-activates it next turn."""
         tools_mod, _ = _setup_tools_and_skill(bare_agent, tmp_path)
 
         # Add job module with mock executor
@@ -135,14 +123,7 @@ class TestPackJobIntegration:
         assert "wait_job" in schema_names
         assert "cancel_job" in schema_names
 
-    def test_job_followup_persists_via_state_eval(self, bare_agent, tmp_path):
-        """Next turn: state-driven eval re-activates job-followup if jobs exist."""
-        tools_mod, _ = _setup_tools_and_skill(bare_agent, tmp_path)
-
-        bare_agent.tool_executor = _MockToolExecutor()
-        job_mod = JobModule()
-        bare_agent.register_module(job_mod)
-
+        # --- State-driven persistence across turns ---
         # Start an async job (stays in service)
         result = _call_tool_json(bare_agent, "start_job", command="sleep 2", wait=False)
         job_id = result["job_id"]
@@ -151,94 +132,65 @@ class TestPackJobIntegration:
         tools_mod.on_input("check my job")
         tools_mod.on_context("check my job", "")
 
-        # State-driven: JobService has jobs → pack re-activated
+        # State-driven: JobService has jobs -> pack re-activated
         assert "job-followup" in bare_agent._active_packs
 
         # Clean up
         bare_agent._tools["cancel_job"]["func"](job_id=job_id)
 
-
-# ============================================================
-# Tools + Workspace + Project Sync flow
-# ============================================================
-
-class TestWorkspaceProjectFlow:
-    """End-to-end workspace → project sync flow."""
-
-    def test_write_in_workspace_then_sync_to_project(self, bare_agent, tmp_path):
-        """Write files in workspace, sync to project, verify project has them."""
+    def test_workspace_project_flow(self, bare_agent, tmp_path):
+        """Write+sync to project, patch+revert, and reject project prefix."""
         _setup_tools_and_skill(bare_agent, tmp_path)
 
-        # Write to workspace
+        # --- Write in workspace then sync to project ---
         result = _call_tool_json(bare_agent, "write_files", files={
             "app.py": "print('hello')\n",
         })
         assert result["status"] == "success"
 
-        # Sync to project
         result = _call_tool_json(bare_agent, "sync_workspace_to_project", mode="auto")
         assert result["status"] == "success"
         assert result["synced"] >= 1
 
-        # Verify project file
         project_file = os.path.join(bare_agent.project_dir, "app.py")
         assert os.path.isfile(project_file)
         with open(project_file) as f:
             assert "hello" in f.read()
 
-    def test_patch_project_then_revert(self, bare_agent, tmp_path):
-        """Patch a project file, then revert to original."""
-        _setup_tools_and_skill(bare_agent, tmp_path)
-
-        # Create a project file
-        project_file = os.path.join(bare_agent.project_dir, "config.txt")
+        # --- Patch project file then revert ---
+        config_file = os.path.join(bare_agent.project_dir, "config.txt")
         original = "version = 1.0\n"
-        with open(project_file, "w") as f:
+        with open(config_file, "w") as f:
             f.write(original)
 
-        # Patch it
         result = _call_tool_json(bare_agent, "apply_patch", target="config.txt", edits=[
             {"match": "version = 1.0", "replace": "version = 2.0"},
         ])
         assert result["status"] == "success"
 
-        with open(project_file) as f:
+        with open(config_file) as f:
             assert "version = 2.0" in f.read()
 
-        # Revert
         result = _call_tool_json(bare_agent, "revert_changes")
         assert result["status"] == "success"
 
-        with open(project_file) as f:
+        with open(config_file) as f:
             assert f.read() == original
 
-    def test_write_files_rejects_project_prefix(self, bare_agent, tmp_path):
-        """write_files cannot write to project via project: prefix."""
-        _setup_tools_and_skill(bare_agent, tmp_path)
-
+        # --- write_files rejects project: prefix ---
         result = _call_tool_json(bare_agent, "write_files", files={
             "project:hack.py": "bad content",
         })
         assert result["status"] == "partial"
         assert len(result["errors"]) == 1
 
-
-# ============================================================
-# Hook pipeline ordering
-# ============================================================
-
-class TestHookPipelineOrdering:
-    """Tools on_input runs before Skill on_context (registration order)."""
-
-    def test_tools_before_skill_in_pipeline(self, bare_agent, tmp_path):
-        """ToolsModule.on_input clears packs before SkillModule.on_context adds them."""
+    def test_hook_and_context_stacking(self, bare_agent, tmp_path):
+        """Hook pipeline ordering and context injection stacking across modules."""
         tools_mod, skill_mod = _setup_tools_and_skill(bare_agent, tmp_path)
 
-        # Manually set a pack (simulating leftover from previous turn)
+        # --- Hook pipeline ordering: tools on_input clears packs before skill on_context ---
         bare_agent._active_packs.add("toolsmith")
 
-        # Run the pipeline as chat() would
-        # Step 1: on_input (tools first, then skill)
         processed = "create a tool for me"
         processed = tools_mod.on_input(processed)
         processed = skill_mod.on_input(processed)
@@ -246,38 +198,21 @@ class TestHookPipelineOrdering:
         # After tools on_input: packs cleared
         assert "toolsmith" not in bare_agent._active_packs
 
-        # Step 2: on_context (tools first, then skill)
         context = ""
         context = tools_mod.on_context(processed, context)
         context = skill_mod.on_context(processed, context)
 
-        # After skill on_context: if "create" matched toolsmith skill, pack re-added
-        # (depends on tag matching — may or may not match)
-        # The key assertion is that tools on_input cleared before skill on_context ran
-        # This is verified by the clear check above
-
-
-# ============================================================
-# Context injection stacking
-# ============================================================
-
-class TestContextInjectionStacking:
-    """Multiple modules inject into context without conflict."""
-
-    def test_tools_and_skill_context_coexist(self, bare_agent, tmp_path):
-        """ToolsModule injects WORKSPACE_GUIDE + hints, SkillModule injects playbook."""
-        tools_mod, skill_mod = _setup_tools_and_skill(bare_agent, tmp_path)
-
-        # Force a skill activation
+        # --- Context injection stacking: both modules contribute ---
+        # Force a skill activation for context stacking test
         skill_mod._forced_skill = "toolsmith"
 
-        context = ""
-        context = tools_mod.on_context("create a tool", context)
-        context = skill_mod.on_context("create a tool", context)
+        context2 = ""
+        context2 = tools_mod.on_context("create a tool", context2)
+        context2 = skill_mod.on_context("create a tool", context2)
 
         # Both should be present
-        assert "[Workspace Guidelines]" in context
-        assert "[Available Tool Packs]" in context
+        assert "[Workspace Guidelines]" in context2
+        assert "[Available Tool Packs]" in context2
         # If toolsmith skill was found, its playbook is also injected
-        if "[Active Skill: toolsmith]" in context:
-            assert "[End Skill]" in context
+        if "[Active Skill: toolsmith]" in context2:
+            assert "[End Skill]" in context2

@@ -61,10 +61,11 @@ class InputFilterModule(Module):
 # ============================================================
 
 class TestChatPipeline:
-    """End-to-end chat pipeline flow tests."""
+    """Consolidated chat pipeline flow tests."""
 
-    def test_full_hook_pipeline_order(self, bare_agent, mock_llm_client):
-        """on_input -> on_context -> execute -> on_output, with 2 modules."""
+    def test_chat_pipeline_flow(self, bare_agent, mock_llm_client):
+        """Full pipeline: hook order, context injection, input filtering, history, and strategy."""
+        # --- Hook pipeline order with 2 modules ---
         mock_llm_client.set_responses([make_llm_response("reply")])
         log = []
         bare_agent.register_module(TrackingModule("A", log))
@@ -72,29 +73,24 @@ class TestChatPipeline:
         bare_agent.chat("test")
 
         # on_input/on_context: forward order (A, B)
-        # on_output: reverse order (B, A) — onion model
+        # on_output: reverse order (B, A) -- onion model
         assert log == [
             "A.on_input", "B.on_input",
             "A.on_context", "B.on_context",
             "B.on_output", "A.on_output",
         ]
 
-    def test_safety_interception_skips_llm(self, bare_agent, mock_llm_client):
-        """When on_input returns empty string, LLM is never called."""
-        bare_agent.register_module(BlockerModule())
-        result = bare_agent.chat("danger operation")
-        assert "cannot process" in result
-        assert mock_llm_client._mock_completion.call_count == 0
-
-    def test_input_filter_writes_processed_to_history(self, bare_agent, mock_llm_client):
-        """History stores the filtered input, not the original."""
+        # --- Input filter writes processed text to history ---
         mock_llm_client.set_responses([make_llm_response("ok")])
+        bare_agent.modules.clear()
+        bare_agent.history.clear()
         bare_agent.register_module(InputFilterModule())
         bare_agent.chat("hello profanity world")
         assert bare_agent.history[0]["content"] == "hello *** world"
 
-    def test_history_trimming(self, bare_agent, mock_llm_client):
-        """Older turns get dropped when context_window_size is exceeded."""
+        # --- History trimming ---
+        bare_agent.modules.clear()
+        bare_agent.history.clear()
         bare_agent.config.context_window_size = 2
 
         for i in range(4):
@@ -105,8 +101,7 @@ class TestChatPipeline:
         contents = [m["content"] for m in bare_agent.history]
         assert "msg0" not in contents  # oldest trimmed
 
-    def test_execution_strategy_called(self, bare_agent, mock_llm_client):
-        """Custom ExecutionStrategy.execute() is invoked by chat()."""
+        # --- Custom ExecutionStrategy is invoked ---
         class SpyStrategy(ExecutionStrategy):
             called = False
             def execute(self, query, context, agent):
@@ -118,23 +113,31 @@ class TestChatPipeline:
         assert SpyStrategy.called
         assert result == "spy result"
 
-    def test_context_overflow_recovery(self, bare_agent, mock_llm_client):
-        """chat() recovers gracefully from ContextWindowExceededError."""
+        # --- Context overflow recovery ---
         class ContextWindowExceededError(Exception):
             pass
 
+        bare_agent.set_execution_strategy(None)
+        from llamagent.core.agent import SimpleReAct
+        bare_agent._execution_strategy = SimpleReAct()
         mock_llm_client.set_responses([ContextWindowExceededError("too long")])
         result = bare_agent.chat("very long query")
         assert result is not None
         assert isinstance(result, str)
 
-    def test_blocked_pipeline_sets_outcome_blocked(self, bare_agent, mock_llm_client):
-        """on_input blocker → PipelineOutcome.blocked=True → POST_CHAT blocked=True."""
+    def test_safety_and_blocked(self, bare_agent, mock_llm_client):
+        """Safety interception skips LLM and sets PipelineOutcome blocked state."""
         from llamagent.core.hooks import HookEvent
 
         bare_agent.register_module(BlockerModule())
-        post_chat_data = {}
 
+        # --- on_input returns empty -> LLM never called ---
+        result = bare_agent.chat("danger operation")
+        assert "cannot process" in result
+        assert mock_llm_client._mock_completion.call_count == 0
+
+        # --- POST_CHAT hook receives blocked=True ---
+        post_chat_data = {}
         bare_agent.register_hook(HookEvent.POST_CHAT, lambda ctx: post_chat_data.update(ctx.data))
         result = bare_agent.chat("danger operation")
 
