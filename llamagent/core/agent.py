@@ -310,7 +310,10 @@ class LlamAgent:
             if config_mode not in ("task", "continuous"):
                 logger.warning("Invalid authorization_mode '%s' in config, falling back to interactive", config_mode)
             else:
-                self.set_mode(config_mode)
+                try:
+                    self.set_mode(config_mode)
+                except Exception as e:
+                    logger.warning("Failed to apply authorization_mode '%s' from config: %s", config_mode, e)
 
     # ============================================================
     # Module management
@@ -410,21 +413,30 @@ class LlamAgent:
             new_controller = TaskModeController()
             new_state = new_controller.state
 
-        # 3. Clear old scopes, collect SCOPE_REVOKED events (before switching policy)
-        clear_result = self._authorization_engine._clear_all_scopes(reason="mode_switch")
+        # 3-7 wrapped for exception safety: if _switch_policy fails, fall back to interactive
+        try:
+            # 3. Clear old scopes, collect SCOPE_REVOKED events (before switching policy)
+            clear_result = self._authorization_engine._clear_all_scopes(reason="mode_switch")
 
-        # 4. Switch policy (loads seed scopes, may ask user for project access in task mode)
-        switch_result = self._authorization_engine._switch_policy(mode, state=new_state)
+            # 4. Switch policy (loads seed scopes, may ask user for project access in task mode)
+            switch_result = self._authorization_engine._switch_policy(mode, state=new_state)
 
-        # 5. Configure controller based on policy result (before commit)
-        if new_controller is not None:
-            new_controller.auto_execute = switch_result.has_session_scopes
+            # 5. Configure controller based on policy result (before commit)
+            if new_controller is not None:
+                new_controller.auto_execute = switch_result.has_session_scopes
 
-        # 6. Commit controller reference
-        self._controller = new_controller
+            # 6. Commit controller reference
+            self._controller = new_controller
 
-        # 7. Update mode
-        self.mode = mode
+            # 7. Update mode
+            self.mode = mode
+        except Exception as e:
+            # Roll back to consistent interactive state
+            logger.error("set_mode('%s') failed, falling back to interactive: %s", mode, e)
+            self._authorization_engine._switch_policy("interactive")
+            self._controller = None
+            self.mode = "interactive"
+            raise
 
         # 8. Emit events from clearing + switching (agent doesn't inspect, just forwards)
         for event_name, data in clear_result.events + switch_result.events:
