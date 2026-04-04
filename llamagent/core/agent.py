@@ -22,6 +22,7 @@ from typing import Any, Callable, Literal
 from llamagent.core.authorization import AuthorizationEngine
 from llamagent.core.config import Config
 from llamagent.core.contract import PipelineOutcome
+from llamagent.core.zone import ConfirmRequest, ConfirmResponse
 from llamagent.core.controller import ModeAction, TaskModeController
 from llamagent.core.hooks import (
     CallableHandler,
@@ -267,7 +268,7 @@ class LlamAgent:
         self._execution_strategy: ExecutionStrategy = SimpleReAct()
 
         # v1.3/v1.9: zone-based safety system (v1.9: structured ConfirmRequest/ConfirmResponse)
-        self.confirm_handler: Callable[..., Any] | None = None  # Callable[[ConfirmRequest], ConfirmResponse] (loose for backward compat with bool returns)
+        self.confirm_handler: Callable[[ConfirmRequest], ConfirmResponse | bool] | None = None
         self.interaction_handler = None  # v1.8.2: injected by caller for ask_user tool
         self._confirm_wait_time: float = 0.0  # Accumulated confirmation wait, excluded from react_timeout
         self.project_dir: str = os.path.realpath(os.getcwd())
@@ -835,7 +836,7 @@ class LlamAgent:
                 logger.error("Module '%s' on_input error: %s", mod.name, e)
 
         if not processed or not processed.strip():
-            return PipelineOutcome(response="Sorry, I cannot process this request.", task_id=task_id)
+            return PipelineOutcome(response="Sorry, I cannot process this request.", task_id=task_id, blocked=True)
 
         # 2. on_context
         context = ""
@@ -890,7 +891,7 @@ class LlamAgent:
     # Task mode driving loop (v1.9.6)
     # ============================================================
 
-    def _run_task_mode_turn(self, user_input: str) -> str:
+    def _run_controller_turn(self, user_input: str) -> str:
         """
         Run one chat() turn through the task mode controller.
 
@@ -992,8 +993,6 @@ class LlamAgent:
         Returns:
             ConfirmResponse (allow=False if no handler or exception)
         """
-        from llamagent.core.zone import ConfirmResponse
-
         if self.confirm_handler is None:
             return ConfirmResponse(allow=False)
         t0 = time.time()
@@ -1012,11 +1011,11 @@ class LlamAgent:
         """
         Agent main entry point: receives user input and returns a response.
 
-        Pipeline: on_input -> on_context -> execution strategy -> on_output
-
-        Context management before and after conversation:
-        - Before: (reserved) token compression check
-        - After: turn window check, discarding oldest turns
+        Two execution paths:
+        - Controller mode (_controller is not None): delegates to _run_controller_turn(),
+          which drives the controller's two-step protocol (handle_turn / on_pipeline_done).
+        - Normal mode: on_input -> on_context -> execution strategy -> on_output.
+          If on_input blocks the input, outcome.blocked is set and LLM is skipped.
 
         Args:
             user_input: User input, should not be an empty string
@@ -1036,9 +1035,9 @@ class LlamAgent:
         blocked_by = None
         response = ""
 
-        # --- Task mode branch (v1.9.6: driving loop) ---
-        if self.mode == "task" and self._controller is not None:
-            response = self._run_task_mode_turn(user_input)
+        # --- Controller mode branch (v1.9.7: controller-presence dispatch) ---
+        if self._controller is not None:
+            response = self._run_controller_turn(user_input)
             self.emit_hook(HookEvent.POST_CHAT, {
                 "user_input": user_input, "response": response,
                 "blocked": False, "blocked_by": None, "completed": True,
@@ -1051,7 +1050,7 @@ class LlamAgent:
         # --- Normal pipeline via unified _run_pipeline ---
         outcome = self._run_pipeline(user_input, mode="normal", record_history=True)
         response = outcome.response
-        if response == "Sorry, I cannot process this request.":
+        if outcome.blocked:
             blocked = True
             blocked_by = "safety"
 
