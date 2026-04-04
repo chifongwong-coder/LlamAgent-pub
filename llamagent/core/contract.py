@@ -76,6 +76,7 @@ class PipelineOutcome:
     """
     response: str
     task_id: str | None = None
+    blocked: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

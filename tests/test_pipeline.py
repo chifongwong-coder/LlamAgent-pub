@@ -127,3 +127,19 @@ class TestChatPipeline:
         result = bare_agent.chat("very long query")
         assert result is not None
         assert isinstance(result, str)
+
+    def test_blocked_pipeline_sets_outcome_blocked(self, bare_agent, mock_llm_client):
+        """on_input blocker → PipelineOutcome.blocked=True → POST_CHAT blocked=True."""
+        from llamagent.core.hooks import HookEvent
+
+        bare_agent.register_module(BlockerModule())
+        post_chat_data = {}
+
+        bare_agent.register_hook(HookEvent.POST_CHAT, lambda ctx: post_chat_data.update(ctx.data))
+        result = bare_agent.chat("danger operation")
+
+        assert "cannot process" in result
+        assert post_chat_data.get("blocked") is True
+        assert post_chat_data.get("blocked_by") == "safety"
+        assert post_chat_data.get("completed") is False
+        assert mock_llm_client._mock_completion.call_count == 0
