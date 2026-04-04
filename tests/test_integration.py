@@ -66,42 +66,35 @@ def _create_test_agent(mock_llm_client):
 
 
 class TestModuleIntegration:
-    """Multi-module loading and cooperation tests."""
+    """Consolidated module integration flow tests."""
 
-    def test_safety_module_provides_hooks(self, mock_llm_client):
-        """SafetyModule provides on_input/on_output hooks without affecting tool execution."""
+    def test_module_integration_flow(self, mock_llm_client, tmp_path):
+        """Safety hooks, planning strategy, load order, and legacy on_execute compat."""
         agent = _create_test_agent(mock_llm_client)
+
+        # --- SafetyModule provides hooks without affecting tool execution ---
         from llamagent.modules.safety.module import SafetyModule
         safety = SafetyModule()
         agent.register_module(safety)
         assert agent.has_module("safety")
         assert safety.guard is not None
 
-    def test_planning_sets_strategy(self, mock_llm_client):
-        """PlanningModule upgrades execution strategy to PlanReAct."""
-        agent = _create_test_agent(mock_llm_client)
+        # --- PlanningModule upgrades execution strategy to PlanReAct ---
         from llamagent.modules.reasoning.module import PlanningModule, PlanReAct
         agent.register_module(PlanningModule())
         assert isinstance(agent._execution_strategy, PlanReAct)
 
-    def test_recommended_load_order(self, mock_llm_client, tmp_path):
-        """Loading safety -> planning in recommended order works correctly."""
-        agent = _create_test_agent(mock_llm_client)
-        agent.config.output_dir = str(tmp_path)
+        # --- Recommended load order: safety -> planning works correctly ---
+        agent2 = _create_test_agent(mock_llm_client)
+        agent2.config.output_dir = str(tmp_path)
+        agent2.register_module(SafetyModule())
+        agent2.register_module(PlanningModule())
+        assert agent2.has_module("safety")
+        assert agent2.has_module("planning")
+        assert len(agent2.list_modules()) == 2
 
-        from llamagent.modules.safety.module import SafetyModule
-        from llamagent.modules.reasoning.module import PlanningModule
-
-        agent.register_module(SafetyModule())
-        agent.register_module(PlanningModule())
-
-        assert agent.has_module("safety")
-        assert agent.has_module("planning")
-        assert len(agent.list_modules()) == 2
-
-    def test_legacy_on_execute_compat(self, mock_llm_client):
-        """Legacy modules using on_execute hook still work."""
-        agent = _create_test_agent(mock_llm_client)
+        # --- Legacy on_execute compat ---
+        agent3 = _create_test_agent(mock_llm_client)
 
         class LegacyModule(Module):
             name = "legacy"
@@ -109,9 +102,9 @@ class TestModuleIntegration:
             def on_execute(self, query, context):
                 return "legacy intercept"
 
-        agent.register_module(LegacyModule())
+        agent3.register_module(LegacyModule())
         mock_llm_client.set_responses([make_llm_response("should not reach")])
-        result = agent.chat("test")
+        result = agent3.chat("test")
         assert "legacy intercept" in result
 
     def test_main_create_agent(self, mock_llm_client):
