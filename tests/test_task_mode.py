@@ -430,6 +430,47 @@ class TestScopeNormalization:
 # Interactive isolation
 # ============================================================
 
+class TestMaxModeStepsExhaustion:
+    """Driving loop terminates when MAX_MODE_STEPS is exhausted."""
+
+    def test_max_mode_steps_exhaustion(self, bare_agent, mock_llm_client):
+        """Controller that never returns terminal action → loop exhausts and returns error."""
+
+        class InfiniteController(ModeController):
+            """Always returns run_prepare, never terminates."""
+            def __init__(self):
+                self.state = TaskModeState()
+                self.state.phase = "preparing"
+                self.state.task_id = "T_INF"
+                self.turn_count = 0
+
+            def handle_turn(self, user_input):
+                self.turn_count += 1
+                return ModeAction(kind="run_prepare", query=user_input, task_id="T_INF")
+
+            def on_pipeline_done(self, action, outcome):
+                self.turn_count += 1
+                return ModeAction(kind="run_prepare", query="again", task_id="T_INF")
+
+            def reset(self):
+                self.state.phase = "idle"
+                return []
+
+            def is_idle(self):
+                return self.state.phase == "idle"
+
+        ctrl = InfiniteController()
+        bare_agent.mode = "task"
+        bare_agent._controller = ctrl
+        from llamagent.core.authorization import TaskPolicy
+        bare_agent._authorization_engine.policy = TaskPolicy(ctrl.state)
+
+        result = bare_agent.chat("infinite task")
+        assert "exceeded maximum steps" in result.lower()
+        # handle_turn(1) + on_pipeline_done * MAX_MODE_STEPS
+        assert ctrl.turn_count == 1 + bare_agent._MAX_MODE_STEPS
+
+
 class TestInteractiveIsolation:
     def test_chat_and_call_tool_unaffected(self, bare_agent, tmp_path, mock_llm_client):
         mock_llm_client.set_responses([make_llm_response("Hi")])
