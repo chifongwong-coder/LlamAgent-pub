@@ -1,8 +1,20 @@
 """Core module: LlamAgent's foundational capabilities, standalone and runnable."""
 
 from llamagent.core.agent import LlamAgent, Module, ExecutionStrategy, SimpleReAct
-from llamagent.core.authorization import AuthorizationEngine, AuthorizationResult
+from llamagent.core.authorization import (
+    ApprovalScope,
+    AuthorizationEngine,
+    AuthorizationResult,
+    AuthorizationUpdateResult,
+)
 from llamagent.core.config import Config
+from llamagent.core.contract import (
+    AuthorizationUpdate,
+    PipelineOutcome,
+    TaskContract,
+    TaskModeState,
+)
+from llamagent.core.controller import ModeAction, ModeController, TaskModeController
 from llamagent.core.hooks import (
     HookCallback,
     HookContext,
@@ -12,9 +24,7 @@ from llamagent.core.hooks import (
     HookResult,
 )
 from llamagent.core.llm import LLMClient
-from llamagent.core.contract import TaskContract, TaskModeState
 from llamagent.core.zone import (
-    ApprovalScope,
     ConfirmRequest,
     ConfirmResponse,
     RequestedScope,
@@ -31,6 +41,9 @@ __all__ = [
     "SimpleReAct",
     "AuthorizationEngine",
     "AuthorizationResult",
+    "AuthorizationUpdate",
+    "AuthorizationUpdateResult",
+    "ApprovalScope",
     "Config",
     "HookCallback",
     "HookContext",
@@ -38,10 +51,13 @@ __all__ = [
     "HookHandler",
     "HookMatcher",
     "HookResult",
+    "ModeAction",
+    "ModeController",
+    "TaskModeController",
+    "PipelineOutcome",
     "TaskContract",
     "TaskModeState",
     "RequestedScope",
-    "ApprovalScope",
     "ConfirmRequest",
     "ConfirmResponse",
     "ZoneDecisionItem",

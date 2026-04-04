@@ -8,8 +8,8 @@ import time
 
 import pytest
 
-from llamagent.core.zone import ConfirmRequest, ConfirmResponse, ApprovalScope, RequestedScope
-from llamagent.core.authorization import infer_action, _find_matching_scope, _path_in_prefixes, AuthorizationResult
+from llamagent.core.zone import ConfirmRequest, ConfirmResponse, RequestedScope
+from llamagent.core.authorization import ApprovalScope, infer_action, _find_matching_scope, _path_in_prefixes, AuthorizationResult
 from llamagent.core.hooks import HookEvent, HookResult
 from conftest import make_llm_response
 
@@ -164,7 +164,7 @@ class TestAuditEvents:
     def test_scope_used_and_denied_events(self, bare_agent, tmp_path):
         _setup_zone(bare_agent, tmp_path)
         bare_agent.set_mode("task")
-        state = bare_agent._task_mode_state
+        state = bare_agent._controller.state
         state.phase = "executing"
         state.task_id = "T1"
         bare_agent._current_task_id = "T1"
@@ -212,3 +212,73 @@ class TestContinuousMode:
         assert len(bare_agent._authorization_engine.state.session_scopes) == 1
         bare_agent.set_mode("interactive")
         assert bare_agent._authorization_engine.state.session_scopes == []
+
+
+# ============================================================
+# apply_update / _clear_all_scopes (v1.9.6)
+# ============================================================
+
+class TestApplyUpdateAndClearScopes:
+    """engine.apply_update() and _clear_all_scopes(): v1.9.6 scope management."""
+
+    def test_write_and_clear_task_scopes(self, bare_agent):
+        """Write approved scopes, then clear them — full lifecycle."""
+        engine = bare_agent._authorization_engine
+        from llamagent.core.contract import AuthorizationUpdate
+
+        # Write scopes
+        result = engine.apply_update(AuthorizationUpdate(
+            task_id="T1",
+            approved_scopes=[
+                RequestedScope(zone="project", actions=["write"], path_prefixes=["src/"]),
+                RequestedScope(zone="project", actions=["execute"], path_prefixes=["scripts/"]),
+            ],
+        ))
+        assert result.changed is True
+        assert len(engine.state.task_scopes["T1"]) == 2
+        scope = engine.state.task_scopes["T1"][0]
+        assert isinstance(scope, ApprovalScope)
+        assert scope.source == "contract"
+        assert len([e for name, e in result.events if name == "scope_issued"]) == 2
+
+        # Clear scopes
+        result = engine.apply_update(AuthorizationUpdate(task_id="T1", clear_task_scope=True))
+        assert result.changed is True
+        assert "T1" not in engine.state.task_scopes
+        assert len([e for name, e in result.events if name == "scope_revoked"]) == 2
+
+    def test_clear_noop_and_session(self, bare_agent):
+        """Clear nonexistent task is no-op; clear session works."""
+        engine = bare_agent._authorization_engine
+        from llamagent.core.contract import AuthorizationUpdate
+
+        result = engine.apply_update(AuthorizationUpdate(task_id="NONE", clear_task_scope=True))
+        assert result.changed is False
+
+        engine.state.session_scopes = [
+            ApprovalScope(scope="session", zone="project", actions=["write"], path_prefixes=["src/"])
+        ]
+        result = engine.apply_update(AuthorizationUpdate(clear_session_scopes=True))
+        assert result.changed is True
+        assert engine.state.session_scopes == []
+
+    def test_clear_all_scopes(self, bare_agent):
+        """_clear_all_scopes: clears everything, returns events; empty state is no-op."""
+        engine = bare_agent._authorization_engine
+        # Empty state
+        assert engine._clear_all_scopes().changed is False
+
+        # Populated state
+        engine.state.task_scopes["T1"] = [
+            ApprovalScope(scope="task", zone="project", actions=["write"], path_prefixes=["a"])
+        ]
+        engine.state.session_scopes = [
+            ApprovalScope(scope="session", zone="project", actions=["read"], path_prefixes=["c"])
+        ]
+        result = engine._clear_all_scopes(reason="test")
+        assert result.changed is True
+        assert engine.state.task_scopes == {}
+        assert engine.state.session_scopes == []
+        revoked = [e for name, e in result.events if name == "scope_revoked"]
+        assert len(revoked) == 2
+        assert all(e["reason"] == "test" for e in revoked)

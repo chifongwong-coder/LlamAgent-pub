@@ -21,6 +21,8 @@ from typing import Any, Callable, Literal
 
 from llamagent.core.authorization import AuthorizationEngine
 from llamagent.core.config import Config
+from llamagent.core.contract import PipelineOutcome
+from llamagent.core.controller import ModeAction, TaskModeController
 from llamagent.core.hooks import (
     CallableHandler,
     HookCallback,
@@ -265,7 +267,7 @@ class LlamAgent:
         self._execution_strategy: ExecutionStrategy = SimpleReAct()
 
         # v1.3/v1.9: zone-based safety system (v1.9: structured ConfirmRequest/ConfirmResponse)
-        self.confirm_handler: Callable | None = None  # Callable[[ConfirmRequest], ConfirmResponse]
+        self.confirm_handler: Callable[..., Any] | None = None  # Callable[[ConfirmRequest], ConfirmResponse] (loose for backward compat with bool returns)
         self.interaction_handler = None  # v1.8.2: injected by caller for ask_user tool
         self._confirm_wait_time: float = 0.0  # Accumulated confirmation wait, excluded from react_timeout
         self.project_dir: str = os.path.realpath(os.getcwd())
@@ -279,7 +281,8 @@ class LlamAgent:
         # v1.9: authorization engine (encapsulates zone evaluation + policy decision)
         self.mode: str = getattr(self.config, "authorization_mode", "interactive")
         self._authorization_engine = AuthorizationEngine(self)
-        self._task_mode_state = None  # v1.9.1: TaskModeState, set by set_mode("task")
+        self._controller = None  # v1.9.6: ModeController instance, set by set_mode("task")
+        self._current_task_id = None  # Legacy fallback for PlanReAct / Workspace
 
         # Tool registry (simple implementation, later enhanced by tools module)
         # Format: {name: {"func": callable, "description": str, "parameters": dict,
@@ -353,62 +356,68 @@ class LlamAgent:
     # ============================================================
 
     def authorization_status(self) -> dict:
-        """Return current authorization state snapshot."""
-        import time as _time
-        now = _time.time()
-        state = self._authorization_engine.state
-        return {
-            "mode": self.mode,
-            "task_scopes": {
-                tid: [
-                    {"zone": s.zone, "actions": s.actions, "path_prefixes": s.path_prefixes,
-                     "uses": s.uses, "max_uses": s.max_uses, "source": s.source,
-                     "expired": s.expires_at is not None and now > s.expires_at}
-                    for s in scopes
-                ]
-                for tid, scopes in state.task_scopes.items()
-            },
-            "session_scopes": [
-                {"zone": s.zone, "actions": s.actions, "path_prefixes": s.path_prefixes,
-                 "uses": s.uses, "max_uses": s.max_uses, "source": s.source,
-                 "expired": s.expires_at is not None and now > s.expires_at}
-                for s in state.session_scopes
-            ],
-        }
+        """Return current authorization state snapshot. Agent adds mode, engine formats scope details."""
+        result = self._authorization_engine.authorization_status()
+        result["mode"] = self.mode
+        return result
 
     def get_active_task_id(self) -> str | None:
         """
         Get the active task ID for scope storage/lookup.
 
-        Priority: TaskModeState.task_id > _current_task_id (PlanReAct).
+        Priority: controller.state.task_id > _current_task_id (PlanReAct legacy).
         """
-        if self.mode == "task" and self._task_mode_state and self._task_mode_state.task_id:
-            return self._task_mode_state.task_id
+        if self.mode == "task" and self._controller:
+            tid = self._controller.state.task_id
+            if tid:
+                return tid
         return getattr(self, "_current_task_id", None)
 
     def set_mode(self, mode: str) -> None:
         """
-        Switch authorization mode.
+        Switch authorization mode. Single public entry point.
+
+        Sequence: check idle → prepare new controller → clear old scopes →
+                  switch policy (loads seed scopes) → commit controller →
+                  update mode → emit events.
 
         Args:
             mode: "interactive" (default) | "task" | "continuous"
         """
-        # Collect scopes to revoke before mode switch clears them
-        old_scopes = []
-        for scopes in self._authorization_engine.state.task_scopes.values():
-            old_scopes.extend(scopes)
-        old_scopes.extend(self._authorization_engine.state.session_scopes)
+        # 0. Validate mode
+        valid_modes = ("interactive", "task", "continuous")
+        if mode not in valid_modes:
+            raise ValueError(f"Invalid mode '{mode}'. Must be one of: {valid_modes}")
 
+        # 1. Check if switch is allowed
+        if self._controller and not self._controller.is_idle():
+            raise RuntimeError("Cannot switch mode while task is active")
+
+        # 2. Prepare new controller / state
+        new_controller = None
+        new_state = None
+        if mode == "task":
+            new_controller = TaskModeController()
+            new_state = new_controller.state
+
+        # 3. Clear old scopes, collect SCOPE_REVOKED events (before switching policy)
+        clear_result = self._authorization_engine._clear_all_scopes(reason="mode_switch")
+
+        # 4. Switch policy (loads seed scopes for continuous mode, returns events)
+        switch_result = self._authorization_engine._switch_policy(mode, state=new_state)
+
+        # 5. Commit controller reference
+        self._controller = new_controller
+
+        # 6. Update mode
         self.mode = mode
-        self._authorization_engine.set_mode(mode)
 
-        # Emit SCOPE_REVOKED for cleared scopes
-        for s in old_scopes:
-            self.emit_hook(HookEvent.SCOPE_REVOKED, {"scope": s, "reason": "mode_switch"})
-
-        # Emit SCOPE_ISSUED for newly loaded seed scopes (continuous mode)
-        for s in self._authorization_engine.state.session_scopes:
-            self.emit_hook(HookEvent.SCOPE_ISSUED, {"scope": s, "task_id": None})
+        # 7. Emit events from clearing + switching (agent doesn't inspect, just forwards)
+        for event_name, data in clear_result.events + switch_result.events:
+            try:
+                self.emit_hook(HookEvent(event_name), data)
+            except ValueError:
+                logger.warning("Unknown hook event: %s", event_name)
 
         logger.info("Authorization mode switched to: %s", mode)
 
@@ -788,52 +797,36 @@ class LlamAgent:
                 )
 
     # ============================================================
-    # Task mode (v1.9.1)
+    # Unified pipeline (v1.9.6)
     # ============================================================
 
-    def _handle_task_mode_turn(self, user_input: str) -> str:
-        """Handle one chat() turn in task mode based on current phase."""
-        state = self._task_mode_state
+    # Maximum iterations for the task mode driving loop (defensive guard)
+    _MAX_MODE_STEPS = 10
 
-        if state.phase == "idle":
-            import uuid as _uuid
-            state.task_id = _uuid.uuid4().hex
-            state.phase = "preparing"
-            state.original_query = user_input
-            return self._run_prepare(user_input)
+    def _run_pipeline(
+        self,
+        query: str,
+        *,
+        mode: str = "normal",
+        extra_system: str = "",
+        skip_output: bool = False,
+        task_id: str | None = None,
+        record_history: bool = True,
+    ) -> PipelineOutcome:
+        """
+        Unified pipeline: on_input → on_context → strategy → on_output → history.
 
-        if state.phase == "awaiting_confirmation":
-            lower = user_input.strip().lower()
-            if lower in ("yes", "y", "confirm", "ok", "approve"):
-                # Write approved scopes before execution
-                self._write_task_scopes()
-                state.phase = "executing"
-                state.confirmed = True
-                return self._run_execute(state.original_query)
-            elif lower in ("no", "n", "cancel", "abort"):
-                task_id = state.task_id
-                removed = self._authorization_engine.state.task_scopes.pop(task_id, [])
-                for s in removed:
-                    self.emit_hook(HookEvent.SCOPE_REVOKED, {"scope": s, "reason": "task_cancelled"})
-                state.phase = "idle"
-                state.task_id = ""
-                state.pending_scopes.clear()
-                state.contract = None
-                state.confirmed = False
-                return "Task cancelled."
-            else:
-                # Additional info — re-enter prepare
-                state.phase = "preparing"
-                return self._run_prepare(user_input)
+        mode="normal": full pipeline
+        mode="prepare": dry-run (clear pending buffer, skip on_output, no history,
+                        drain prepare data into outcome.metadata at the end)
+        """
+        is_prepare = mode == "prepare"
 
-        if state.phase == "executing":
-            return self._run_normal_pipeline(user_input)
+        # Prepare mode: clear stale pending buffer before starting
+        if is_prepare:
+            self._authorization_engine.clear_pending_buffer()
 
-        return self._run_normal_pipeline(user_input)
-
-    def _run_prepare(self, query: str) -> str:
-        """Run one prepare turn: dry-run ReAct to collect pending scopes."""
-        # on_input for safety filtering
+        # 1. on_input
         processed = query
         for mod in self.modules.values():
             try:
@@ -842,9 +835,9 @@ class LlamAgent:
                 logger.error("Module '%s' on_input error: %s", mod.name, e)
 
         if not processed or not processed.strip():
-            return "Sorry, I cannot process this request."
+            return PipelineOutcome(response="Sorry, I cannot process this request.", task_id=task_id)
 
-        # on_context for knowledge/memory/skill injection
+        # 2. on_context
         context = ""
         for mod in self.modules.values():
             try:
@@ -852,127 +845,138 @@ class LlamAgent:
             except Exception as e:
                 logger.error("Module '%s' on_context error: %s", mod.name, e)
 
-        tools_schema = self.get_all_tool_schemas()
-        messages = self.build_messages(query, context)
-        react_result = self.run_react(messages, tools_schema, self.call_tool)
-
-        # After dry-run, generate contract from collected scopes
-        from llamagent.core.authorization import normalize_scopes
-        from llamagent.core.contract import TaskContract
-
-        state = self._task_mode_state
-        normalized = normalize_scopes(state.pending_scopes)
-
-        contract = TaskContract(
-            task_summary=query,
-            planned_operations=[
-                f"{s.actions[0]} in {s.zone}: {', '.join(s.path_prefixes)}"
-                for s in normalized
-            ],
-            requested_scopes=normalized,
-            open_questions=[],
-            risk_summary=f"{len(normalized)} operations require authorization.",
-        )
-        state.contract = contract
-        state.phase = "awaiting_confirmation"
-
-        # Build contract summary for user
-        if not normalized:
-            # No CONFIRMABLE operations found — skip contract, go straight to execute
-            state.phase = "executing"
-            state.confirmed = True
-            return self._run_execute(state.original_query)
-
-        lines = [f"[Task Contract] {contract.task_summary}", ""]
-        lines.append("Planned operations requiring authorization:")
-        for op in contract.planned_operations:
-            lines.append(f"  - {op}")
-        lines.append(f"\nRisk: {contract.risk_summary}")
-        lines.append("\nReply 'yes' to confirm, 'no' to cancel, or provide more details.")
-
-        return "\n".join(lines)
-
-    def _write_task_scopes(self):
-        """Convert confirmed contract scopes into ApprovalScopes in AuthorizationState."""
-        from llamagent.core.zone import ApprovalScope
-
-        state = self._task_mode_state
-        task_id = self.get_active_task_id()
-        if not task_id or not state.contract:
-            return
-
-        import time as _time
-        scopes_to_approve = state.contract.requested_scopes
-        for rs in scopes_to_approve:
-            scope = ApprovalScope(
-                scope="task", zone=rs.zone, actions=rs.actions,
-                path_prefixes=rs.path_prefixes, tool_names=rs.tool_names,
-                created_at=_time.time(), source="contract",
-            )
-            self._authorization_engine.state.task_scopes.setdefault(task_id, []).append(scope)
-            self.emit_hook(HookEvent.SCOPE_ISSUED, {"scope": scope, "task_id": task_id})
-
-    def _run_execute(self, query: str) -> str:
-        """Run the normal pipeline for actual execution after contract confirmation."""
-        state = self._task_mode_state
-        state.phase = "executing"
-
-        # Set _current_task_id so PlanReAct and workspace can use it
-        self._current_task_id = state.task_id
-
+        # 3. Execution strategy
         try:
-            result = self._run_normal_pipeline(query)
-        finally:
-            # Clean up + emit SCOPE_REVOKED for each removed scope
-            task_id = state.task_id
-            self._current_task_id = None
-            removed = self._authorization_engine.state.task_scopes.pop(task_id, [])
-            for s in removed:
-                self.emit_hook(HookEvent.SCOPE_REVOKED, {"scope": s, "reason": "task_completed"})
-            state.phase = "idle"
-            state.task_id = ""
-            state.pending_scopes.clear()
-            state.contract = None
-            state.confirmed = False
-
-        return result
-
-    def _run_normal_pipeline(self, user_input: str) -> str:
-        """Run the standard pipeline (on_input → on_context → strategy → on_output)."""
-        processed = user_input
-        for mod in self.modules.values():
-            try:
-                processed = mod.on_input(processed)
-            except Exception as e:
-                logger.error("Module '%s' on_input error: %s", mod.name, e)
-
-        if not processed or not processed.strip():
-            return "Sorry, I cannot process this request."
-
-        context = ""
-        for mod in self.modules.values():
-            try:
-                context = mod.on_context(processed, context)
-            except Exception as e:
-                logger.error("Module '%s' on_context error: %s", mod.name, e)
-
-        try:
-            response = self._execution_strategy.execute(processed, context, self)
+            if is_prepare:
+                # Prepare mode: inject extra_system, run react directly
+                messages = self.build_messages(processed, context, extra_system=extra_system)
+                tools_schema = self.get_all_tool_schemas()
+                react_result = self.run_react(messages, tools_schema, self.call_tool)
+                response = react_result.text
+            else:
+                # Normal mode: use execution strategy (SimpleReAct or PlanReAct)
+                if extra_system:
+                    response = self._execution_strategy.execute(processed, context + "\n" + extra_system, self)
+                else:
+                    response = self._execution_strategy.execute(processed, context, self)
         except Exception as e:
-            logger.error("Execution strategy error: %s", e)
+            logger.error("Execution error: %s", e)
             response = f"Error processing request: {e}"
 
-        for mod in reversed(list(self.modules.values())):
-            try:
-                response = mod.on_output(response)
-            except Exception as e:
-                logger.error("Module '%s' on_output error: %s", mod.name, e)
+        # 4. on_output (skip for prepare mode)
+        if not is_prepare and not skip_output:
+            for mod in reversed(list(self.modules.values())):
+                try:
+                    response = mod.on_output(response)
+                except Exception as e:
+                    logger.error("Module '%s' on_output error: %s", mod.name, e)
 
-        self.history.append({"role": "user", "content": processed})
-        self.history.append({"role": "assistant", "content": response})
-        self._trim_history()
+        # 5. Build outcome
+        outcome = PipelineOutcome(response=response, task_id=task_id)
 
-        return response
+        # Prepare mode: drain accumulated data from engine into outcome.metadata
+        if is_prepare:
+            outcome.metadata.update(self._authorization_engine.drain_prepare_data())
+
+        # 6. History (skip for prepare mode and when record_history=False)
+        if record_history and not is_prepare:
+            self.history.append({"role": "user", "content": processed})
+            self.history.append({"role": "assistant", "content": response})
+            self._trim_history()
+
+        return outcome
+
+    # ============================================================
+    # Task mode driving loop (v1.9.6)
+    # ============================================================
+
+    def _run_task_mode_turn(self, user_input: str) -> str:
+        """
+        Run one chat() turn through the task mode controller.
+
+        Drives the two-step protocol: handle_turn → pipeline → on_pipeline_done,
+        in a loop until a terminal action (reply/await_user/cancel) is reached.
+        """
+        action = self._controller.handle_turn(user_input)
+
+        for _ in range(self._MAX_MODE_STEPS):
+            # 1. Process authorization_update BEFORE break (cleanup must not be skipped)
+            if action.authorization_update is not None:
+                result = self._authorization_engine.apply_update(action.authorization_update)
+                for event_name, data in result.events:
+                    try:
+                        self.emit_hook(HookEvent(event_name), data)
+                    except ValueError:
+                        logger.warning("Unknown hook event from apply_update: %s", event_name)
+
+            # 2. Terminal actions exit loop
+            if action.kind in ("reply", "await_user", "cancel"):
+                break
+
+            # 3. Execute pipeline
+            outcome = None  # Prevent UnboundLocalError on BaseException
+
+            if action.kind == "run_prepare":
+                try:
+                    outcome = self._run_pipeline(
+                        action.query, mode="prepare",
+                        extra_system=action.extra_system,
+                        task_id=action.task_id,
+                        record_history=False,
+                    )
+                except Exception as e:
+                    outcome = PipelineOutcome(response=f"Error: {e}", task_id=action.task_id)
+                action = self._controller.on_pipeline_done(action, outcome)
+
+            elif action.kind == "run_execute":
+                self._current_task_id = action.task_id
+                try:
+                    try:
+                        outcome = self._run_pipeline(
+                            action.query, mode="normal",
+                            task_id=action.task_id,
+                            record_history=False,
+                        )
+                    except Exception as e:
+                        outcome = PipelineOutcome(response=f"Error: {e}", task_id=action.task_id)
+                    action = self._controller.on_pipeline_done(action, outcome)
+                finally:
+                    self._current_task_id = None
+        else:
+            # MAX_MODE_STEPS exhausted
+            action = ModeAction(kind="reply", response="Task mode exceeded maximum steps.")
+
+        # 4. Post-loop: hand-write history based on final action
+        self._write_task_mode_history(user_input, action)
+
+        return action.response or ""
+
+    def _write_task_mode_history(self, user_input: str, action: ModeAction) -> None:
+        """
+        Write history after task mode driving loop exits.
+
+        Agent does NOT read controller.state — all needed info comes from ModeAction fields:
+        - action.query: user message for history (set by controller)
+        - action.response: assistant message for history
+        """
+        if action.kind == "await_user":
+            # Prepare complete — action.query carries the user message
+            # (original_query for first prepare, supplementary input for re-prepare)
+            self.history.append({"role": "user", "content": action.query or user_input})
+            if action.response:
+                self.history.append({"role": "assistant", "content": action.response})
+        elif action.kind == "reply":
+            # Execute complete — write confirmation + result
+            self.history.append({"role": "user", "content": user_input})
+            if action.response:
+                self.history.append({"role": "assistant", "content": action.response})
+        elif action.kind == "cancel":
+            # Cancel — write cancel input + cancel message
+            self.history.append({"role": "user", "content": user_input})
+            if action.response:
+                self.history.append({"role": "assistant", "content": action.response})
+        else:
+            logger.warning("Unknown action kind '%s' in task mode history, skipping history write", action.kind)
 
     # ============================================================
     # Conversation (core capability)
@@ -998,7 +1002,8 @@ class LlamAgent:
             if not isinstance(response, ConfirmResponse):
                 # Backward compat: if handler returns bool, wrap it
                 response = ConfirmResponse(allow=bool(response))
-        except Exception:
+        except Exception as e:
+            logger.warning("confirm_handler raised exception, defaulting to deny: %s", e)
             response = ConfirmResponse(allow=False)
         self._confirm_wait_time += time.time() - t0
         return response
@@ -1031,9 +1036,9 @@ class LlamAgent:
         blocked_by = None
         response = ""
 
-        # --- Task mode branch (v1.9.1) ---
-        if self.mode == "task" and self._task_mode_state is not None:
-            response = self._handle_task_mode_turn(user_input)
+        # --- Task mode branch (v1.9.6: driving loop) ---
+        if self.mode == "task" and self._controller is not None:
+            response = self._run_task_mode_turn(user_input)
             self.emit_hook(HookEvent.POST_CHAT, {
                 "user_input": user_input, "response": response,
                 "blocked": False, "blocked_by": None, "completed": True,
@@ -1043,48 +1048,12 @@ class LlamAgent:
         # --- Before conversation: context management (reserved for token compression) ---
         self._check_context_compression()
 
-        # --- 1. on_input: modules preprocess input (forward registration order) ---
-        processed = user_input
-        for mod in self.modules.values():
-            try:
-                processed = mod.on_input(processed)
-            except Exception as e:
-                logger.error("Module '%s' on_input error: %s", mod.name, e)
-
-        # Safety interception: if input is cleared (e.g., blocked by safety module)
-        if not processed or not processed.strip():
+        # --- Normal pipeline via unified _run_pipeline ---
+        outcome = self._run_pipeline(user_input, mode="normal", record_history=True)
+        response = outcome.response
+        if response == "Sorry, I cannot process this request.":
             blocked = True
             blocked_by = "safety"
-            response = "Sorry, I cannot process this request."
-        else:
-            # --- 2. on_context: modules enhance context (forward registration order) ---
-            context = ""
-            for mod in self.modules.values():
-                try:
-                    context = mod.on_context(processed, context)
-                except Exception as e:
-                    logger.error("Module '%s' on_context error: %s", mod.name, e)
-
-            # --- 3. Execution strategy ---
-            try:
-                response = self._execution_strategy.execute(processed, context, self)
-            except Exception as e:
-                logger.error("Execution strategy error: %s", e)
-                response = f"Error processing request: {e}"
-
-            # --- 4. on_output: modules post-process output (reverse registration order, onion model) ---
-            for mod in reversed(list(self.modules.values())):
-                try:
-                    response = mod.on_output(response)
-                except Exception as e:
-                    logger.error("Module '%s' on_output error: %s", mod.name, e)
-
-            # --- 5. Update conversation history (write processed input, not raw user_input) ---
-            self.history.append({"role": "user", "content": processed})
-            self.history.append({"role": "assistant", "content": response})
-
-            # --- 6. After conversation: turn window check ---
-            self._trim_history()
 
         # --- POST_CHAT (always-fire, all exit paths) ---
         self.emit_hook(HookEvent.POST_CHAT, {

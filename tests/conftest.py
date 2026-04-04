@@ -170,7 +170,7 @@ def bare_agent(mock_llm_client):
     agent._session_started = False
     agent._in_hook = False
     agent.mode = "interactive"
-    agent._task_mode_state = None
+    agent._controller = None
 
     from llamagent.core.agent import SimpleReAct
     from llamagent.core.authorization import AuthorizationEngine

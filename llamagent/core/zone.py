@@ -2,9 +2,11 @@
 Zone evaluation and authorization request/response types.
 
 ZoneVerdict / ZoneDecisionItem / ZoneEvaluation: pure zone judgment results.
+RequestedScope: authorization scope requested in a task contract.
 ConfirmRequest / ConfirmResponse: structured confirmation interface.
 
 These types are the foundation of the v1.9 authorization system.
+ApprovalScope was moved to authorization.py in v1.9.6.
 """
 
 from __future__ import annotations
@@ -79,22 +81,6 @@ class ConfirmRequest:
     message: str
     mode: str = "interactive"  # Informational field, not for decision logic
     requested_scopes: list[RequestedScope] | None = None  # v1.9.1: contract scopes
-
-
-@dataclass
-class ApprovalScope:
-    """One approved authorization scope, stored after contract confirmation."""
-    scope: str                    # "task" | "session"
-    zone: str                     # "project" | "external"
-    actions: list[str]            # ["write"] / ["execute"]
-    path_prefixes: list[str]      # ["project:src/", "project:docs/"]
-    tool_names: list[str] | None = None
-    # v1.9.4 governance fields
-    created_at: float | None = None     # time.time() when created
-    expires_at: float | None = None     # expiry time (None = no expiry)
-    max_uses: int | None = None         # max usage count (None = unlimited)
-    uses: int = 0                       # current usage count
-    source: str = "contract"            # "contract" | "seed" | "api"
 
 
 @dataclass
