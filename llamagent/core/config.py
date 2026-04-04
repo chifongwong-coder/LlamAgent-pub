@@ -431,6 +431,11 @@ class Config:
             self.web_search_provider = env_web_provider
         self.web_search_num_results = _safe_int("WEB_SEARCH_NUM_RESULTS", self.web_search_num_results)
 
+        # Authorization
+        env_auth_mode = os.getenv("AUTHORIZATION_MODE")
+        if env_auth_mode:
+            self.authorization_mode = env_auth_mode
+
         # Output
         env_output = os.getenv("OUTPUT_DIR")
         if env_output:
