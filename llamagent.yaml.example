@@ -78,7 +78,9 @@ memory:
 # ==================== Authorization ====================
 # authorization:
 #   mode: interactive          # interactive (default) | task | continuous
-#   # Seed scopes for continuous mode (pre-authorized operations):
+#   # Seed scopes for task/continuous mode (pre-authorized operations).
+#   # Task mode: configured seed_scopes skip the prepare/contract flow (auto_execute).
+#   # Continuous mode: defaults to project read/write when no seed_scopes configured.
 #   # seed_scopes:
 #   #   - scope: session
 #   #     zone: project

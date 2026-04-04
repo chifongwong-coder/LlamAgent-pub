@@ -174,6 +174,20 @@ class TestDataFlow:
     def test_drain_returns_empty_when_not_task_mode(self, bare_agent):
         assert bare_agent._authorization_engine.drain_prepare_data() == {}
 
+    def test_normalize_scopes_merge_and_separate(self):
+        """normalize_scopes merges same-zone/action scopes, separates different zones."""
+        assert normalize_scopes([]) == []
+        merged = normalize_scopes([
+            RequestedScope(zone="project", actions=["write"], path_prefixes=["/a/b/c.py"], tool_names=["w"]),
+            RequestedScope(zone="project", actions=["write"], path_prefixes=["/a/b/d.py"], tool_names=["w"]),
+        ])
+        assert len(merged) == 1
+        separate = normalize_scopes([
+            RequestedScope(zone="project", actions=["write"], path_prefixes=["a.py"]),
+            RequestedScope(zone="external", actions=["write"], path_prefixes=["b.py"]),
+        ])
+        assert len(separate) == 2
+
 
 # ============================================================
 # Controlled dry-run (call_tool level)
@@ -406,24 +420,51 @@ class TestIntegration:
         bare_agent.confirm_handler = lambda req: True  # legacy bool return
         assert bare_agent.call_tool("writer", {"path": os.path.join(str(tmp_path), "f.py")}) == "ok"
 
+    def test_max_mode_steps_exhaustion(self, bare_agent, mock_llm_client):
+        """Controller that never returns terminal action → loop exhausts and returns error."""
 
-# ============================================================
-# Scope normalization (pure function)
-# ============================================================
+        class InfiniteController(ModeController):
+            """Always returns run_prepare, never terminates."""
+            def __init__(self):
+                self.state = TaskModeState()
+                self.state.phase = "preparing"
+                self.state.task_id = "T_INF"
+                self.turn_count = 0
 
-class TestScopeNormalization:
-    def test_merge_and_separate(self):
-        assert normalize_scopes([]) == []
-        merged = normalize_scopes([
-            RequestedScope(zone="project", actions=["write"], path_prefixes=["/a/b/c.py"], tool_names=["w"]),
-            RequestedScope(zone="project", actions=["write"], path_prefixes=["/a/b/d.py"], tool_names=["w"]),
-        ])
-        assert len(merged) == 1
-        separate = normalize_scopes([
-            RequestedScope(zone="project", actions=["write"], path_prefixes=["a.py"]),
-            RequestedScope(zone="external", actions=["write"], path_prefixes=["b.py"]),
-        ])
-        assert len(separate) == 2
+            def handle_turn(self, user_input):
+                self.turn_count += 1
+                return ModeAction(kind="run_prepare", query=user_input, task_id="T_INF")
+
+            def on_pipeline_done(self, action, outcome):
+                self.turn_count += 1
+                return ModeAction(kind="run_prepare", query="again", task_id="T_INF")
+
+            def reset(self):
+                self.state.phase = "idle"
+                return []
+
+            def is_idle(self):
+                return self.state.phase == "idle"
+
+        ctrl = InfiniteController()
+        bare_agent.mode = "task"
+        bare_agent._controller = ctrl
+        from llamagent.core.authorization import TaskPolicy
+        bare_agent._authorization_engine.policy = TaskPolicy(ctrl.state)
+
+        result = bare_agent.chat("infinite task")
+        assert "exceeded maximum steps" in result.lower()
+        assert ctrl.turn_count == 1 + bare_agent._MAX_MODE_STEPS
+
+    def test_interactive_mode_unaffected(self, bare_agent, tmp_path, mock_llm_client):
+        """Interactive mode: normal chat and call_tool work without task/continuous setup."""
+        mock_llm_client.set_responses([make_llm_response("Hi")])
+        assert bare_agent.mode == "interactive"
+        assert bare_agent.chat("hi") == "Hi"
+
+        _setup_zone(bare_agent, tmp_path)
+        bare_agent.register_tool("t", lambda: "ok", "tool")
+        assert bare_agent.call_tool("t", {}) == "ok"
 
 
 # ============================================================
@@ -506,20 +547,6 @@ class TestTaskModeSessionScopes:
         result = bare_agent.chat("second task")
         assert "Done second." in result
 
-    def test_session_scopes_cleared_on_mode_switch(self, bare_agent, tmp_path):
-        """Session scopes cleared when switching back to interactive."""
-        _setup_zone(bare_agent, tmp_path)
-        bare_agent.config.seed_scopes = [
-            {"scope": "session", "zone": "project", "actions": ["read", "write"],
-             "path_prefixes": [str(tmp_path)]}
-        ]
-
-        bare_agent.set_mode("task")
-        assert len(bare_agent._authorization_engine.state.session_scopes) == 1
-
-        bare_agent.set_mode("interactive")
-        assert len(bare_agent._authorization_engine.state.session_scopes) == 0
-
     def test_execute_uses_session_scope_for_matching(self, bare_agent, tmp_path):
         """TaskPolicy._decide_execute matches against session_scopes."""
         _setup_zone(bare_agent, tmp_path)
@@ -593,59 +620,3 @@ class TestTaskModeSessionScopes:
         assert action.kind == "run_execute"
         assert ctrl.state.phase == "executing"
         assert ctrl.state.confirmed is True
-
-
-# ============================================================
-# Interactive isolation
-# ============================================================
-
-class TestMaxModeStepsExhaustion:
-    """Driving loop terminates when MAX_MODE_STEPS is exhausted."""
-
-    def test_max_mode_steps_exhaustion(self, bare_agent, mock_llm_client):
-        """Controller that never returns terminal action → loop exhausts and returns error."""
-
-        class InfiniteController(ModeController):
-            """Always returns run_prepare, never terminates."""
-            def __init__(self):
-                self.state = TaskModeState()
-                self.state.phase = "preparing"
-                self.state.task_id = "T_INF"
-                self.turn_count = 0
-
-            def handle_turn(self, user_input):
-                self.turn_count += 1
-                return ModeAction(kind="run_prepare", query=user_input, task_id="T_INF")
-
-            def on_pipeline_done(self, action, outcome):
-                self.turn_count += 1
-                return ModeAction(kind="run_prepare", query="again", task_id="T_INF")
-
-            def reset(self):
-                self.state.phase = "idle"
-                return []
-
-            def is_idle(self):
-                return self.state.phase == "idle"
-
-        ctrl = InfiniteController()
-        bare_agent.mode = "task"
-        bare_agent._controller = ctrl
-        from llamagent.core.authorization import TaskPolicy
-        bare_agent._authorization_engine.policy = TaskPolicy(ctrl.state)
-
-        result = bare_agent.chat("infinite task")
-        assert "exceeded maximum steps" in result.lower()
-        # handle_turn(1) + on_pipeline_done * MAX_MODE_STEPS
-        assert ctrl.turn_count == 1 + bare_agent._MAX_MODE_STEPS
-
-
-class TestInteractiveIsolation:
-    def test_chat_and_call_tool_unaffected(self, bare_agent, tmp_path, mock_llm_client):
-        mock_llm_client.set_responses([make_llm_response("Hi")])
-        assert bare_agent.mode == "interactive"
-        assert bare_agent.chat("hi") == "Hi"
-
-        _setup_zone(bare_agent, tmp_path)
-        bare_agent.register_tool("t", lambda: "ok", "tool")
-        assert bare_agent.call_tool("t", {}) == "ok"

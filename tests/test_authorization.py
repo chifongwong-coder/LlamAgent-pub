@@ -8,6 +8,7 @@ import time
 
 import pytest
 
+from llamagent.core.agent import LlamAgent
 from llamagent.core.zone import ConfirmRequest, ConfirmResponse, RequestedScope
 from llamagent.core.authorization import ApprovalScope, infer_action, _find_matching_scope, _path_in_prefixes, AuthorizationResult
 from llamagent.core.hooks import HookEvent, HookResult
@@ -204,14 +205,84 @@ class TestContinuousMode:
         result = bare_agent.call_tool("w", {"path": os.path.join(str(tmp_path), "docs/r.md")})
         assert "denied" in result.lower() or "not covered" in result.lower()
 
-    def test_no_seed_scopes_and_mode_clear(self, bare_agent):
+    def test_default_project_scope_and_mode_clear(self, bare_agent):
+        """v1.9.9: no seed_scopes → default project scope; seed_scopes → use those; interactive → clear all."""
         bare_agent.set_mode("continuous")
-        assert bare_agent._authorization_engine.state.session_scopes == []
+        scopes = bare_agent._authorization_engine.state.session_scopes
+        assert len(scopes) == 1
+        assert scopes[0].source == "default"
+        assert scopes[0].zone == "project"
+        assert scopes[0].actions == ["read", "write"]
+
+        bare_agent.set_mode("interactive")
         bare_agent.config.seed_scopes = [{"zone": "project", "actions": ["write"], "path_prefixes": ["x"]}]
         bare_agent.set_mode("continuous")
-        assert len(bare_agent._authorization_engine.state.session_scopes) == 1
+        scopes = bare_agent._authorization_engine.state.session_scopes
+        assert len(scopes) == 1
+        assert scopes[0].source == "seed"
+
         bare_agent.set_mode("interactive")
         assert bare_agent._authorization_engine.state.session_scopes == []
+
+
+# ============================================================
+# Config-driven mode initialization (v1.9.9)
+# ============================================================
+
+class TestConfigDrivenMode:
+    """v1.9.9: agent.__init__ applies authorization_mode from config."""
+
+    def test_config_task_with_seed_scopes(self, mock_llm_client):
+        """Config task + seed_scopes → starts in task mode with auto_execute."""
+        from llamagent.core.config import Config
+        config = Config()
+        config.seed_scopes = [
+            {"zone": "project", "actions": ["read", "write"], "path_prefixes": ["src/"]}
+        ]
+        config.authorization_mode = "task"
+        agent = LlamAgent(config)
+        assert agent.mode == "task"
+        assert agent._controller is not None
+        assert agent._controller.auto_execute is True
+        assert len(agent._authorization_engine.state.session_scopes) == 1
+
+    def test_config_continuous(self, mock_llm_client):
+        """Config continuous → starts in continuous mode with default project scope."""
+        from llamagent.core.config import Config
+        config = Config()
+        config.authorization_mode = "continuous"
+        agent = LlamAgent(config)
+        assert agent.mode == "continuous"
+        assert agent._controller is None
+        scopes = agent._authorization_engine.state.session_scopes
+        assert len(scopes) == 1
+        assert scopes[0].source == "default"
+
+    def test_config_interactive_default(self, mock_llm_client):
+        """Default config (interactive) → no set_mode called, standard behavior."""
+        from llamagent.core.config import Config
+        agent = LlamAgent(Config())
+        assert agent.mode == "interactive"
+        assert agent._controller is None
+
+    def test_config_task_no_seed_scopes_no_handler(self, mock_llm_client):
+        """Config task + no seed_scopes + no confirm_handler → prepare flow (auto_execute=False)."""
+        from llamagent.core.config import Config
+        config = Config()
+        config.authorization_mode = "task"
+        agent = LlamAgent(config)
+        assert agent.mode == "task"
+        assert agent._controller is not None
+        assert agent._controller.auto_execute is False
+
+    def test_config_invalid_mode_falls_back(self, mock_llm_client):
+        """Invalid authorization_mode in config → warning + interactive."""
+        from llamagent.core.config import Config
+        config = Config()
+        config.authorization_mode = "invalid_mode"
+        agent = LlamAgent(config)
+        assert agent.mode == "interactive"
+        assert agent._controller is None
 
 
 # ============================================================
