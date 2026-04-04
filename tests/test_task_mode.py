@@ -267,7 +267,6 @@ class TestIntegration:
         _setup_zone(bare_agent, tmp_path)
         bare_agent.register_tool("writer", lambda path="": "ok", "write", safety_level=2,
                                  path_extractor=lambda a: [a.get("path", "")])
-        bare_agent.confirm_handler = lambda req: ConfirmResponse(allow=True)
 
         project_file = os.path.join(str(tmp_path), "main.py")
         mock_llm_client.set_responses([
@@ -276,6 +275,7 @@ class TestIntegration:
         ])
 
         bare_agent.set_mode("task")
+        bare_agent.confirm_handler = lambda req: ConfirmResponse(allow=True)
         result = bare_agent.chat("write main.py")
         assert "[Task Contract]" in result or "authorization" in result.lower()
         # History: user=query + assistant=contract
@@ -364,7 +364,6 @@ class TestIntegration:
         _setup_zone(bare_agent, tmp_path)
         bare_agent.register_tool("writer", lambda path="": "ok", "write", safety_level=2,
                                  path_extractor=lambda a: [a.get("path", "")])
-        bare_agent.confirm_handler = lambda req: ConfirmResponse(allow=True)
 
         project_file = os.path.join(str(tmp_path), "main.py")
         mock_llm_client.set_responses([
@@ -373,6 +372,7 @@ class TestIntegration:
         ])
 
         bare_agent.set_mode("task")
+        bare_agent.confirm_handler = lambda req: ConfirmResponse(allow=True)
         result = bare_agent.chat("write main.py")
         assert "[Task Contract]" in result
         first_history_len = len(bare_agent.history)
@@ -424,6 +424,188 @@ class TestScopeNormalization:
             RequestedScope(zone="external", actions=["write"], path_prefixes=["b.py"]),
         ])
         assert len(separate) == 2
+
+
+# ============================================================
+# ============================================================
+# v1.9.8: Task mode session scopes (shared authorization)
+# ============================================================
+
+class TestTaskModeSessionScopes:
+    """Task mode with session scopes: seed_scopes, user confirmation, auto_execute."""
+
+    def test_seed_scopes_enable_auto_execute(self, bare_agent, tmp_path, mock_llm_client):
+        """Config seed_scopes → session_scopes loaded → auto_execute=True → skip prepare."""
+        _setup_zone(bare_agent, tmp_path)
+        bare_agent.config.seed_scopes = [
+            {"scope": "session", "zone": "project", "actions": ["read", "write"],
+             "path_prefixes": [str(tmp_path)]}
+        ]
+        bare_agent.register_tool("writer", lambda path="": "written", "write",
+                                 safety_level=2, path_extractor=lambda a: [a.get("path", "")])
+        mock_llm_client.set_responses([make_llm_response("Done writing.")])
+
+        bare_agent.set_mode("task")
+        assert bare_agent._controller.auto_execute is True
+        assert len(bare_agent._authorization_engine.state.session_scopes) == 1
+
+        # chat goes directly to execute, no prepare/contract
+        result = bare_agent.chat("write something")
+        assert "Done writing" in result
+        assert bare_agent._controller.state.phase == "idle"
+
+    def test_user_allows_session_authorize(self, bare_agent, tmp_path, mock_llm_client):
+        """No seed_scopes + user allows session_authorize → auto_execute=True."""
+        _setup_zone(bare_agent, tmp_path)
+        bare_agent.confirm_handler = lambda req: ConfirmResponse(allow=True)
+        bare_agent.register_tool("writer", lambda path="": "written", "write",
+                                 safety_level=2, path_extractor=lambda a: [a.get("path", "")])
+        mock_llm_client.set_responses([make_llm_response("Done.")])
+
+        bare_agent.set_mode("task")
+        assert bare_agent._controller.auto_execute is True
+        scopes = bare_agent._authorization_engine.state.session_scopes
+        assert len(scopes) == 1
+        assert scopes[0].source == "session_authorize"
+        assert scopes[0].zone == "project"
+
+        result = bare_agent.chat("write file")
+        assert "Done." in result
+
+    def test_user_denies_session_authorize(self, bare_agent, tmp_path, mock_llm_client):
+        """No seed_scopes + user denies → auto_execute=False → prepare/contract flow."""
+        _setup_zone(bare_agent, tmp_path)
+        bare_agent.confirm_handler = lambda req: ConfirmResponse(allow=False)
+
+        bare_agent.set_mode("task")
+        assert bare_agent._controller.auto_execute is False
+        assert len(bare_agent._authorization_engine.state.session_scopes) == 0
+
+    def test_no_confirm_handler_falls_back(self, bare_agent, tmp_path):
+        """No seed_scopes + no confirm_handler → auto_execute=False."""
+        _setup_zone(bare_agent, tmp_path)
+        bare_agent.confirm_handler = None
+
+        bare_agent.set_mode("task")
+        assert bare_agent._controller.auto_execute is False
+
+    def test_session_scopes_survive_task_cancel(self, bare_agent, tmp_path, mock_llm_client):
+        """Session scopes persist after task cancellation."""
+        _setup_zone(bare_agent, tmp_path)
+        bare_agent.config.seed_scopes = [
+            {"scope": "session", "zone": "project", "actions": ["read", "write"],
+             "path_prefixes": [str(tmp_path)]}
+        ]
+        mock_llm_client.set_responses([make_llm_response("Done first.")])
+
+        bare_agent.set_mode("task")
+        # First task: execute and complete
+        bare_agent.chat("first task")
+        assert bare_agent._controller.state.phase == "idle"
+
+        # Session scopes still present
+        assert len(bare_agent._authorization_engine.state.session_scopes) == 1
+
+        # Second task: also works with session scopes
+        mock_llm_client.set_responses([make_llm_response("Done second.")])
+        result = bare_agent.chat("second task")
+        assert "Done second." in result
+
+    def test_session_scopes_cleared_on_mode_switch(self, bare_agent, tmp_path):
+        """Session scopes cleared when switching back to interactive."""
+        _setup_zone(bare_agent, tmp_path)
+        bare_agent.config.seed_scopes = [
+            {"scope": "session", "zone": "project", "actions": ["read", "write"],
+             "path_prefixes": [str(tmp_path)]}
+        ]
+
+        bare_agent.set_mode("task")
+        assert len(bare_agent._authorization_engine.state.session_scopes) == 1
+
+        bare_agent.set_mode("interactive")
+        assert len(bare_agent._authorization_engine.state.session_scopes) == 0
+
+    def test_execute_uses_session_scope_for_matching(self, bare_agent, tmp_path):
+        """TaskPolicy._decide_execute matches against session_scopes."""
+        _setup_zone(bare_agent, tmp_path)
+        bare_agent.config.seed_scopes = [
+            {"scope": "session", "zone": "project", "actions": ["read", "write"],
+             "path_prefixes": [str(tmp_path)]}
+        ]
+        bare_agent.set_mode("task")
+
+        # Manually set state to executing for direct call_tool test
+        state = bare_agent._controller.state
+        state.phase = "executing"
+        state.task_id = "T_SESS"
+        bare_agent._current_task_id = "T_SESS"
+
+        call_count = [0]
+        bare_agent.register_tool(
+            "writer",
+            lambda path="": (call_count.__setitem__(0, call_count[0]+1), "written")[1],
+            "write", safety_level=2, path_extractor=lambda a: [a.get("path", "")]
+        )
+
+        # No task_scopes for T_SESS, but session_scopes cover project
+        result = bare_agent.call_tool("writer", {"path": os.path.join(str(tmp_path), "src/main.py")})
+        assert result == "written"
+        assert call_count[0] == 1
+
+    def test_task_scopes_take_priority_over_session(self, bare_agent, tmp_path):
+        """Task-specific scopes are checked before session scopes."""
+        _setup_zone(bare_agent, tmp_path)
+        bare_agent.config.seed_scopes = [
+            {"scope": "session", "zone": "project", "actions": ["read", "write"],
+             "path_prefixes": [str(tmp_path)], "tool_names": ["writer"]}
+        ]
+        bare_agent.set_mode("task")
+
+        state = bare_agent._controller.state
+        state.phase = "executing"
+        state.task_id = "T_PRI"
+        bare_agent._current_task_id = "T_PRI"
+
+        # Add a task scope with max_uses=1
+        bare_agent._authorization_engine.state.task_scopes["T_PRI"] = [
+            ApprovalScope(scope="task", zone="project", actions=["write"],
+                          path_prefixes=[os.path.join(str(tmp_path), "src/")],
+                          max_uses=1)
+        ]
+
+        call_count = [0]
+        bare_agent.register_tool(
+            "writer",
+            lambda path="": (call_count.__setitem__(0, call_count[0]+1), "written")[1],
+            "write", safety_level=2, path_extractor=lambda a: [a.get("path", "")]
+        )
+
+        # First call: matches task_scope (more specific), consumes it
+        bare_agent.call_tool("writer", {"path": os.path.join(str(tmp_path), "src/main.py")})
+        task_scope = bare_agent._authorization_engine.state.task_scopes["T_PRI"][0]
+        assert task_scope.uses == 1
+
+        # Second call: task_scope exhausted (max_uses=1), falls to session_scope
+        bare_agent.call_tool("writer", {"path": os.path.join(str(tmp_path), "src/other.py")})
+        session_scope = bare_agent._authorization_engine.state.session_scopes[0]
+        assert session_scope.uses == 1
+
+    def test_auto_execute_controller_handle_turn(self):
+        """Controller with auto_execute skips prepare from idle."""
+        ctrl = TaskModeController()
+        ctrl.auto_execute = True
+        action = ctrl.handle_turn("do something")
+        assert action.kind == "run_execute"
+        assert ctrl.state.phase == "executing"
+        assert ctrl.state.confirmed is True
+
+    def test_auto_execute_false_preserves_prepare(self):
+        """Controller without auto_execute goes through prepare."""
+        ctrl = TaskModeController()
+        ctrl.auto_execute = False
+        action = ctrl.handle_turn("do something")
+        assert action.kind == "run_prepare"
+        assert ctrl.state.phase == "preparing"
 
 
 # ============================================================

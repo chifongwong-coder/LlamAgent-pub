@@ -379,7 +379,8 @@ class LlamAgent:
         Switch authorization mode. Single public entry point.
 
         Sequence: check idle → prepare new controller → clear old scopes →
-                  switch policy (loads seed scopes) → commit controller →
+                  switch policy (loads seed scopes, may ask user) →
+                  configure controller auto_execute → commit controller →
                   update mode → emit events.
 
         Args:
@@ -404,16 +405,20 @@ class LlamAgent:
         # 3. Clear old scopes, collect SCOPE_REVOKED events (before switching policy)
         clear_result = self._authorization_engine._clear_all_scopes(reason="mode_switch")
 
-        # 4. Switch policy (loads seed scopes for continuous mode, returns events)
+        # 4. Switch policy (loads seed scopes, may ask user for project access in task mode)
         switch_result = self._authorization_engine._switch_policy(mode, state=new_state)
 
-        # 5. Commit controller reference
+        # 5. Configure controller based on policy result (before commit)
+        if new_controller is not None:
+            new_controller.auto_execute = switch_result.has_session_scopes
+
+        # 6. Commit controller reference
         self._controller = new_controller
 
-        # 6. Update mode
+        # 7. Update mode
         self.mode = mode
 
-        # 7. Emit events from clearing + switching (agent doesn't inspect, just forwards)
+        # 8. Emit events from clearing + switching (agent doesn't inspect, just forwards)
         for event_name, data in clear_result.events + switch_result.events:
             try:
                 self.emit_hook(HookEvent(event_name), data)
