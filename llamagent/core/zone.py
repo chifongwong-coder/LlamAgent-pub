@@ -73,9 +73,9 @@ class RequestedScope:
 @dataclass
 class ConfirmRequest:
     """Structured confirmation request passed to confirm_handler."""
-    kind: str               # "operation_confirm" | "task_contract"
+    kind: str               # "operation_confirm" | "session_authorize"
     tool_name: str
-    action: str             # "read" | "write" | "execute"
+    action: str             # "read" | "write" | "execute" | "read_write"
     zone: str               # "playground" | "project" | "external"
     target_paths: list[str]
     message: str
