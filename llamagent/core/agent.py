@@ -433,7 +433,10 @@ class LlamAgent:
         except Exception as e:
             # Roll back to consistent interactive state
             logger.error("set_mode('%s') failed, falling back to interactive: %s", mode, e)
-            self._authorization_engine._switch_policy("interactive")
+            try:
+                self._authorization_engine._switch_policy("interactive")
+            except Exception as fallback_e:
+                logger.error("Fallback to interactive also failed: %s", fallback_e)
             self._controller = None
             self.mode = "interactive"
             raise
