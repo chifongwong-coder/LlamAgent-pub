@@ -40,15 +40,13 @@ def _make_config(**overrides):
     return SimpleNamespace(**defaults)
 
 
-# ============================================================
-# Complexity routing
-# ============================================================
+class TestComplexityRoutingAndPlanGeneration:
+    """Complexity routing (simple/complex/fallback) + plan generation and DAG validation."""
 
-class TestComplexityRouting:
-    """PlanReAct routes simple tasks to ReAct, complex tasks to planning."""
-
-    def test_simple_task_uses_react(self, bare_agent, mock_llm_client):
-        """LLM judges task as simple -> direct ReAct path."""
+    def test_complexity_routing_and_plan_generation(self, bare_agent, mock_llm_client):
+        """Simple task uses ReAct; complex task uses planning; judgment failure defaults
+        to simple. Valid linear plan passes DAG validation; circular dependency raises."""
+        # --- Simple task -> ReAct ---
         strategy = _make_plan_react(mock_llm_client, _make_config())
         mock_llm_client.set_responses([
             make_llm_response('{"complex": false, "reason": "simple question"}'),
@@ -57,9 +55,8 @@ class TestComplexityRouting:
         result = strategy.execute("hello", "", bare_agent)
         assert result == "simple answer"
 
-    def test_complex_task_uses_planning(self, bare_agent, mock_llm_client):
-        """LLM judges task as complex -> plan + execute + summarize."""
-        strategy = _make_plan_react(mock_llm_client, _make_config())
+        # --- Complex task -> planning ---
+        strategy2 = _make_plan_react(mock_llm_client, _make_config())
         mock_llm_client.set_responses([
             make_llm_response('{"complex": true}'),
             make_llm_response(json.dumps({
@@ -71,29 +68,19 @@ class TestComplexityRouting:
             make_llm_response("step completed"),
             make_llm_response("final summary"),
         ])
-        result = strategy.execute("complex research task", "", bare_agent)
-        assert "summary" in result or "step completed" in result
+        result2 = strategy2.execute("complex research task", "", bare_agent)
+        assert "summary" in result2 or "step completed" in result2
 
-    def test_judgment_failure_defaults_simple(self, bare_agent, mock_llm_client):
-        """When complexity judgment fails (invalid JSON), defaults to simple path."""
-        strategy = _make_plan_react(mock_llm_client, _make_config())
+        # --- Judgment failure defaults to simple ---
+        strategy3 = _make_plan_react(mock_llm_client, _make_config())
         mock_llm_client.set_responses([
             make_llm_response("not valid JSON"),
             make_llm_response("default answer"),
         ])
-        result = strategy.execute("test", "", bare_agent)
-        assert result == "default answer"
+        result3 = strategy3.execute("test", "", bare_agent)
+        assert result3 == "default answer"
 
-
-# ============================================================
-# Plan generation + DAG validation
-# ============================================================
-
-class TestPlanGeneration:
-    """TaskPlanner generates validated execution plans."""
-
-    def test_valid_plan(self, mock_llm_client):
-        """Valid linear plan passes DAG validation."""
+        # --- Valid plan with DAG validation ---
         planner = _make_planner(mock_llm_client)
         mock_llm_client.set_responses([
             make_llm_response(json.dumps({
@@ -105,13 +92,12 @@ class TestPlanGeneration:
                 ]
             })),
         ])
-        result = planner.plan("analyze something")
-        assert len(result["steps"]) == 2
-        assert isinstance(result["steps"][0], Step)
+        plan_result = planner.plan("analyze something")
+        assert len(plan_result["steps"]) == 2
+        assert isinstance(plan_result["steps"][0], Step)
 
-    def test_circular_dependency_raises(self, mock_llm_client):
-        """Circular dependency in plan raises ValueError."""
-        planner = _make_planner(mock_llm_client)
+        # --- Circular dependency raises ValueError ---
+        planner2 = _make_planner(mock_llm_client)
         mock_llm_client.set_responses([
             make_llm_response(json.dumps({
                 "steps": [
@@ -123,18 +109,16 @@ class TestPlanGeneration:
             })),
         ])
         with pytest.raises(ValueError, match="Plan validation failed"):
-            planner.plan("task")
+            planner2.plan("task")
 
-
-# ============================================================
-# Deadlock detection + replan
-# ============================================================
 
 class TestDeadlockAndReplan:
     """Step scheduling, deadlock detection, and replan mechanisms."""
 
-    def test_ready_step_selection(self):
-        """Among ready steps, the one with smallest order is selected."""
+    def test_deadlock_and_replan(self, bare_agent, mock_llm_client):
+        """Ready step selection by order; failed dep skips step; mutual dependency
+        deadlock triggers replan; model replan tool call interrupts and replans."""
+        # --- Ready step selection ---
         steps = [
             Step(step_id="s1", order=3, action="late", expected_output=""),
             Step(step_id="s2", order=1, action="first", expected_output=""),
@@ -145,8 +129,7 @@ class TestDeadlockAndReplan:
         selected = min(ready, key=lambda s: s.order)
         assert selected.step_id == "s2"
 
-    def test_failed_dep_skips_step(self, bare_agent, mock_llm_client):
-        """When a dependency fails, dependent steps are skipped."""
+        # --- Failed dep skips step ---
         config = _make_config()
         strategy = _make_plan_react(mock_llm_client, config)
         mock_llm_client.set_responses([
@@ -159,15 +142,14 @@ class TestDeadlockAndReplan:
                      "expected_output": "result", "depends_on": ["s1"]},
                 ]
             })),
-            RuntimeError("LLM error"),  # s1 fails
+            RuntimeError("LLM error"),
         ])
         result = strategy.execute("test", "", bare_agent)
         assert "failed" in result.lower()
 
-    def test_deadlock_triggers_replan(self, bare_agent, mock_llm_client):
-        """Mutual dependency deadlock triggers automatic replan."""
-        config = _make_config(max_plan_adjustments=2)
-        strategy = _make_plan_react(mock_llm_client, config)
+        # --- Deadlock triggers replan ---
+        config2 = _make_config(max_plan_adjustments=2)
+        strategy2 = _make_plan_react(mock_llm_client, config2)
         mock_llm_client.set_responses([
             make_llm_response('{"complex": true}'),
             make_llm_response(json.dumps({
@@ -180,8 +162,7 @@ class TestDeadlockAndReplan:
                      "expected_output": "b", "depends_on": ["s0", "s1"]},
                 ]
             })),
-            make_llm_response("s0 done"),  # s0 executes
-            # deadlock -> replan
+            make_llm_response("s0 done"),
             make_llm_response(json.dumps({
                 "adjusted_steps": [
                     {"step_id": "s0", "order": 1, "action": "prepare",
@@ -191,20 +172,17 @@ class TestDeadlockAndReplan:
                 ],
                 "summary": "deadlock resolved"
             })),
-            make_llm_response("merge done"),  # s3 executes
-            make_llm_response("final result"),  # summarize
+            make_llm_response("merge done"),
+            make_llm_response("final result"),
         ])
-        # Patch validate_plan to let the circular plan pass validation,
-        # so we reach the runtime deadlock detection code
         with patch('llamagent.modules.reasoning.planner.validate_plan', return_value=(True, "")), \
              patch('llamagent.modules.reasoning.module.validate_plan', return_value=(True, "")):
-            result = strategy.execute("deadlock test", "", bare_agent)
-        assert result is not None
+            result2 = strategy2.execute("deadlock test", "", bare_agent)
+        assert result2 is not None
 
-    def test_replan_closure_interrupt(self, bare_agent, mock_llm_client):
-        """Model calls replan tool during step execution -> interrupt + replan."""
-        config = _make_config(max_plan_adjustments=3)
-        strategy = _make_plan_react(mock_llm_client, config)
+        # --- Replan closure interrupt ---
+        config3 = _make_config(max_plan_adjustments=3)
+        strategy3 = _make_plan_react(mock_llm_client, config3)
         mock_llm_client.set_responses([
             make_llm_response('{"complex": true}'),
             make_llm_response(json.dumps({
@@ -213,11 +191,9 @@ class TestDeadlockAndReplan:
                      "expected_output": "result", "depends_on": []},
                 ]
             })),
-            # During s1 execution, model calls replan tool
             make_llm_response("", tool_calls=[
                 make_tool_call("adjust_plan", {"feedback": "need different approach"}, "c1"),
             ]),
-            # replan() returns new plan
             make_llm_response(json.dumps({
                 "adjusted_steps": [
                     {"step_id": "s2", "order": 1, "action": "better approach",
@@ -225,24 +201,20 @@ class TestDeadlockAndReplan:
                 ],
                 "summary": "plan adjusted"
             })),
-            # s2 execution
             make_llm_response("success"),
-            # summarize
             make_llm_response("task completed successfully"),
         ])
-        result = strategy.execute("test", "", bare_agent)
-        assert result is not None
+        result3 = strategy3.execute("test", "", bare_agent)
+        assert result3 is not None
 
-
-# ============================================================
-# Quality evaluation
-# ============================================================
 
 class TestQualityEvaluation:
     """Quality-driven replan via reflection engine."""
 
-    def test_quality_check_pass(self, bare_agent, mock_llm_client):
-        """Score above threshold -> no replan."""
+    def test_quality_evaluation(self, bare_agent, mock_llm_client):
+        """Score above threshold -> no replan. Score below threshold -> triggers
+        quality-driven replan with additional steps."""
+        # --- Quality check pass ---
         mock_reflection = MagicMock()
         mock_reflection.evaluate_result.return_value = {
             "score": 9.0,
@@ -261,25 +233,24 @@ class TestQualityEvaluation:
                 ]
             })),
             make_llm_response("step done"),
-            make_llm_response("great result"),  # summarize
+            make_llm_response("great result"),
         ])
         result = strategy.execute("test", "", bare_agent)
         assert result is not None
         mock_reflection.evaluate_result.assert_called_once()
 
-    def test_quality_check_fail_triggers_replan(self, bare_agent, mock_llm_client):
-        """Score below threshold -> triggers quality-driven replan."""
-        mock_reflection = MagicMock()
-        mock_reflection.evaluate_result.return_value = {
+        # --- Quality check fail triggers replan ---
+        mock_reflection2 = MagicMock()
+        mock_reflection2.evaluate_result.return_value = {
             "score": 3.0, "weaknesses": ["not detailed enough"],
         }
-        config = _make_config(
+        config2 = _make_config(
             reflection_enabled=True,
             reflection_score_threshold=7.0,
             max_plan_adjustments=3,
         )
-        strategy = _make_plan_react(mock_llm_client, config,
-                                     reflection_engine=mock_reflection)
+        strategy2 = _make_plan_react(mock_llm_client, config2,
+                                      reflection_engine=mock_reflection2)
         mock_llm_client.set_responses([
             make_llm_response('{"complex": true}'),
             make_llm_response(json.dumps({
@@ -290,7 +261,6 @@ class TestQualityEvaluation:
             })),
             make_llm_response("step completed"),
             make_llm_response("initial summary"),
-            # Quality not met -> replan
             make_llm_response(json.dumps({
                 "adjusted_steps": [
                     {"step_id": "s1", "order": 1, "action": "do",
@@ -302,5 +272,5 @@ class TestQualityEvaluation:
             make_llm_response("details added"),
             make_llm_response("detailed summary"),
         ])
-        result = strategy.execute("test", "", bare_agent)
-        assert result is not None
+        result2 = strategy2.execute("test", "", bare_agent)
+        assert result2 is not None
