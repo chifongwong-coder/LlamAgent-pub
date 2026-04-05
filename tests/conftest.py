@@ -171,6 +171,10 @@ def bare_agent(mock_llm_client):
     agent._in_hook = False
     agent.mode = "interactive"
     agent._controller = None
+    agent._current_task_id = None
+    agent._abort = False
+    agent._open_questions_buffer = []
+    agent._interactive_config = {k: getattr(config, k) for k in LlamAgent._MODE_KEYS}
 
     from llamagent.core.agent import SimpleReAct
     from llamagent.core.authorization import AuthorizationEngine

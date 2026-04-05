@@ -16,8 +16,8 @@ model:
 #   context_compress_threshold: 0.7
 #   compress_keep_turns: 3
 #   react:
-#     max_steps: 10
-#     max_duplicate_actions: 2
+#     max_steps: 10                    # -1 = unlimited (no step limit)
+#     max_duplicate_actions: 2         # -1 = disabled (duplicates never abort)
 #     timeout: 210.0
 #   max_observation_tokens: 2000
 
@@ -76,6 +76,10 @@ memory:
 #   search_num_results: 5            # Default number of results per search
 
 # ==================== Authorization ====================
+# Note: set_mode() automatically adjusts agent efficiency params (max_react_steps,
+# max_duplicate_actions, react_timeout, max_observation_tokens) per mode.
+# Task mode raises limits; continuous mode uses -1 (unlimited).
+# Switching back to interactive restores original values.
 # authorization:
 #   mode: interactive          # interactive (default) | task | continuous
 #   # Seed scopes for task/continuous mode (pre-authorized operations).
