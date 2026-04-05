@@ -228,6 +228,13 @@ class PlanReAct(ExecutionStrategy):
             )
 
             # 6. Handle ReactResult
+            # v2.0: terminal results (abort, context overflow) stop the entire plan
+            if result.terminal:
+                step_i.status = "failed"
+                step_i.result = result.text
+                logger.warning("Step %s terminated (status=%s), stopping plan execution",
+                               step_i.step_id, result.status)
+                break
             if result.status == "interrupted":
                 # After replan, steps[:] has been replaced; step_i points to old object
                 current = next(
@@ -321,6 +328,10 @@ class PlanReAct(ExecutionStrategy):
                     step_i, query, context, agent, steps, self.planner, replan_closure, should_continue
                 )
 
+                if result.terminal:
+                    step_i.status = "failed"
+                    step_i.result = result.text
+                    break
                 if result.status == "completed":
                     step_i.status = "completed"
                     step_i.result = result.text

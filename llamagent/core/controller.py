@@ -92,6 +92,9 @@ class TaskModeController(ModeController):
           awaiting_confirmation → idle (cancel)
     """
 
+    # v2.0: maximum re-prepare rounds before forcing a decision
+    MAX_CLARIFICATION_TURNS = 3
+
     def __init__(self):
         self.state = TaskModeState()
         self.auto_execute = False
@@ -174,8 +177,17 @@ class TaskModeController(ModeController):
                 )
             else:
                 # Additional info — re-prepare
-                self.state.phase = "preparing"
                 self.state.clarification_turns += 1
+                if self.state.clarification_turns > self.MAX_CLARIFICATION_TURNS:
+                    return ModeAction(
+                        kind="await_user",
+                        query=user_input,
+                        response=(
+                            f"Maximum clarification rounds ({self.MAX_CLARIFICATION_TURNS}) reached. "
+                            "Reply 'yes' to execute with the current plan, or 'no' to cancel."
+                        ),
+                    )
+                self.state.phase = "preparing"
                 return ModeAction(
                     kind="run_prepare",
                     query=user_input,
@@ -226,6 +238,11 @@ class TaskModeController(ModeController):
                 authorization_update=auth_update,
             )
 
+        # v2.0: extract open_questions from outcome metadata
+        open_questions = outcome.metadata.get("open_questions", [])
+        if not isinstance(open_questions, list):
+            open_questions = []
+
         # Build contract
         contract = TaskContract(
             task_summary=self.state.original_query,
@@ -234,7 +251,7 @@ class TaskModeController(ModeController):
                 for s in normalized
             ],
             requested_scopes=normalized,
-            open_questions=[],
+            open_questions=open_questions,
             risk_summary=f"{len(normalized)} operations require authorization.",
         )
         self.state.contract = contract
@@ -245,6 +262,10 @@ class TaskModeController(ModeController):
         lines.append("Planned operations requiring authorization:")
         for op in contract.planned_operations:
             lines.append(f"  - {op}")
+        if contract.open_questions:
+            lines.append("\nOpen questions:")
+            for q in contract.open_questions:
+                lines.append(f"  ? {q}")
         lines.append(f"\nRisk: {contract.risk_summary}")
         lines.append("\nReply 'yes' to confirm, 'no' to cancel, or provide more details.")
 
