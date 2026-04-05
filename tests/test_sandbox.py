@@ -199,6 +199,10 @@ class TestSandboxIntegrationAndCompat:
         agent2._in_hook = False
         agent2.mode = "interactive"
         agent2._controller = None
+        agent2._current_task_id = None
+        agent2._abort = False
+        agent2._open_questions_buffer = []
+        agent2._interactive_config = {k: getattr(agent2.config, k) for k in LlamAgent._MODE_KEYS}
         agent2._authorization_engine = AuthorizationEngine(agent2)
 
         custom = ExecutionPolicy(isolation="container", timeout_seconds=999)
@@ -237,6 +241,10 @@ class TestSandboxIntegrationAndCompat:
         agent3._in_hook = False
         agent3.mode = "interactive"
         agent3._controller = None
+        agent3._current_task_id = None
+        agent3._abort = False
+        agent3._open_questions_buffer = []
+        agent3._interactive_config = {k: getattr(agent3.config, k) for k in LlamAgent._MODE_KEYS}
         agent3._authorization_engine = AuthorizationEngine(agent3)
 
         agent3.register_tool("greet", lambda name: f"hello {name}", "Greeting tool", safety_level=1)

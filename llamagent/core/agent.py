@@ -50,10 +50,11 @@ logger = logging.getLogger(__name__)
 class ReactResult:
     """Structured return result from the ReAct loop."""
     text: str
-    status: Literal["completed", "max_steps", "timeout", "error", "interrupted", "context_overflow"]
+    status: Literal["completed", "max_steps", "timeout", "error", "interrupted", "context_overflow", "aborted"]
     error: str | None = None
     steps_used: int = 0
     reason: str | None = None
+    terminal: bool = False  # v2.0: non-recoverable result, caller should stop (not retry/replan)
 
 
 # ======================================================================
@@ -304,6 +305,14 @@ class LlamAgent:
         # Register YAML-configured hooks
         self._register_yaml_hooks()
 
+        # v2.0: abort mechanism
+        self._abort = False
+        # v2.0: open_questions buffer for prepare phase
+        self._open_questions_buffer: list[str] = []
+
+        # v2.0: snapshot interactive config values before any mode switch
+        self._interactive_config = {k: getattr(self.config, k) for k in self._MODE_KEYS}
+
         # v1.9.9: config-driven mode initialization
         config_mode = getattr(self.config, "authorization_mode", "interactive")
         if config_mode != "interactive":
@@ -430,6 +439,14 @@ class LlamAgent:
 
             # 7. Update mode
             self.mode = mode
+
+            # 8. Apply mode-aware config defaults (v2.0)
+            if mode == "interactive":
+                defaults = self._interactive_config
+            else:
+                defaults = self._MODE_DEFAULTS.get(mode, {})
+            for k, v in defaults.items():
+                setattr(self.config, k, v)
         except Exception as e:
             # Roll back to consistent interactive state
             logger.error("set_mode('%s') failed, falling back to interactive: %s", mode, e)
@@ -439,9 +456,11 @@ class LlamAgent:
                 logger.error("Fallback to interactive also failed: %s", fallback_e)
             self._controller = None
             self.mode = "interactive"
+            for k, v in self._interactive_config.items():
+                setattr(self.config, k, v)
             raise
 
-        # 8. Emit events from clearing + switching (agent doesn't inspect, just forwards)
+        # 9. Emit events from clearing + switching (agent doesn't inspect, just forwards)
         for event_name, data in clear_result.events + switch_result.events:
             try:
                 self.emit_hook(HookEvent(event_name), data)
@@ -449,6 +468,14 @@ class LlamAgent:
                 logger.warning("Unknown hook event: %s", event_name)
 
         logger.info("Authorization mode switched to: %s", mode)
+
+    def abort(self) -> None:
+        """Signal the agent to stop after the current atomic operation.
+
+        The flag is checked at two points in run_react (loop top + after each tool call).
+        chat() resets the flag at entry, so stale abort signals don't affect new tasks.
+        """
+        self._abort = True
 
     def set_execution_strategy(self, strategy: ExecutionStrategy) -> None:
         """
@@ -832,6 +859,40 @@ class LlamAgent:
     # Maximum iterations for the task mode driving loop (defensive guard)
     _MAX_MODE_STEPS = 10
 
+    # v2.0: mode-aware config defaults. -1 = unlimited/disabled.
+    _MODE_KEYS = {"max_react_steps", "max_duplicate_actions", "react_timeout",
+                  "max_observation_tokens"}
+    _MODE_DEFAULTS = {
+        "task":       {"max_react_steps": 50, "react_timeout": 600,
+                       "max_duplicate_actions": 5, "max_observation_tokens": 5000},
+        "continuous": {"max_react_steps": -1, "react_timeout": 600,
+                       "max_duplicate_actions": -1, "max_observation_tokens": 10000},
+    }
+
+    _PREPARE_TOOL_NAME = "_report_question"
+
+    def _register_prepare_tools(self) -> None:
+        """Register prepare-only tools (available during dry-run, removed after)."""
+        if self._PREPARE_TOOL_NAME not in self._tools:
+            self.register_tool(
+                name=self._PREPARE_TOOL_NAME,
+                func=lambda question: self._open_questions_buffer.append(question) or f"Question recorded: {question}",
+                description="Report an open question or uncertainty during task planning. Use this when you need clarification from the user before execution.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string", "description": "The question or uncertainty to report"},
+                    },
+                    "required": ["question"],
+                },
+                tier="default",
+                safety_level=0,
+            )
+
+    def _unregister_prepare_tools(self) -> None:
+        """Remove prepare-only tools after dry-run completes."""
+        self._tools.pop(self._PREPARE_TOOL_NAME, None)
+
     def _run_pipeline(
         self,
         query: str,
@@ -851,9 +912,11 @@ class LlamAgent:
         """
         is_prepare = mode == "prepare"
 
-        # Prepare mode: clear stale pending buffer before starting
+        # Prepare mode: clear stale buffers and inject report_question tool
         if is_prepare:
             self._authorization_engine.clear_pending_buffer()
+            self._open_questions_buffer.clear()
+            self._register_prepare_tools()
 
         # 1. on_input
         processed = query
@@ -864,6 +927,8 @@ class LlamAgent:
                 logger.error("Module '%s' on_input error: %s", mod.name, e)
 
         if not processed or not processed.strip():
+            if is_prepare:
+                self._unregister_prepare_tools()
             return PipelineOutcome(response="Sorry, I cannot process this request.", task_id=task_id, blocked=True)
 
         # 2. on_context
@@ -906,6 +971,10 @@ class LlamAgent:
         # Prepare mode: drain accumulated data from engine into outcome.metadata
         if is_prepare:
             outcome.metadata.update(self._authorization_engine.drain_prepare_data())
+            if self._open_questions_buffer:
+                outcome.metadata["open_questions"] = list(self._open_questions_buffer)
+                self._open_questions_buffer.clear()
+            self._unregister_prepare_tools()
 
         # 6. History (skip for prepare mode and when record_history=False)
         if record_history and not is_prepare:
@@ -1051,6 +1120,9 @@ class LlamAgent:
         Returns:
             The Agent's response text
         """
+        # --- v2.0: reset abort flag (clear stale signal from previous task) ---
+        self._abort = False
+
         # --- SESSION_START (fires once on first chat) ---
         if not self._session_started:
             self.emit_hook(HookEvent.SESSION_START, {"modules": list(self.modules.keys())})
@@ -1134,7 +1206,12 @@ class LlamAgent:
         duplicate_count = 0
         last_text_response = ""  # Record the last successful text response
 
-        while steps < self.config.max_react_steps:
+        while self.config.max_react_steps == -1 or steps < self.config.max_react_steps:
+            # --- v2.0: abort check (before LLM call) ---
+            if self._abort:
+                return ReactResult(text="Operation aborted.", status="aborted",
+                                   terminal=True, steps_used=steps)
+
             # --- Timeout protection ---
             step_start = time.time()
             self._confirm_wait_time = 0.0  # Reset per step
@@ -1149,7 +1226,7 @@ class LlamAgent:
                     logger.warning("Context window overflow during ReAct loop, aborting")
                     text = last_text_response or "The task is too complex. Consider enabling the Planning module for step-by-step execution, or use /clear to clear conversation history."
                     return ReactResult(text=text, status="context_overflow",
-                                       error=str(e), steps_used=steps)
+                                       error=str(e), steps_used=steps, terminal=True)
                 logger.error("ReAct LLM call failed: %s", e)
                 return ReactResult(text=f"ReAct execution error: {e}", status="error",
                                    error=str(e), steps_used=steps)
@@ -1181,7 +1258,7 @@ class LlamAgent:
                 current_action = (tool_name, json.dumps(tool_args, sort_keys=True))
                 if current_action == last_action:
                     duplicate_count += 1
-                    if duplicate_count >= self.config.max_duplicate_actions:
+                    if self.config.max_duplicate_actions != -1 and duplicate_count >= self.config.max_duplicate_actions:
                         logger.warning(
                             "Duplicate action detected (%s), %d consecutive times, aborting",
                             tool_name,
@@ -1211,6 +1288,11 @@ class LlamAgent:
                     "tool_call_id": tool_call.id,
                     "content": result,
                 })
+
+                # --- v2.0: abort check (after tool call) ---
+                if self._abort:
+                    return ReactResult(text="Operation aborted.", status="aborted",
+                                       terminal=True, steps_used=steps)
 
                 # --- should_continue check ---
                 if should_continue is not None:
