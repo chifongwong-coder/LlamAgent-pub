@@ -235,6 +235,7 @@ class TestZoneInheritanceAndBackwardCompat:
         agent2.config = config2
         agent2.persona = None
         agent2.llm = mock_llm_client
+        agent2._llm_cache = {config2.model: mock_llm_client}
         agent2.modules = {}
         agent2.history = []
         agent2.summary = None

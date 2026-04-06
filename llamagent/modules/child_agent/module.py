@@ -298,9 +298,9 @@ class ChildAgentModule(Module):
         # Build child LLM (budget-wrapped or shared)
         if spec.policy and spec.policy.budget:
             tracker = BudgetTracker(spec.policy.budget)
-            child_llm = BudgetedLLM(parent.llm, tracker)
+            child_llm = BudgetedLLM(self.llm, tracker)
         else:
-            child_llm = parent.llm
+            child_llm = self.llm
 
         # Create child agent via normal constructor, then replace internals
         child = LlamAgent(config)

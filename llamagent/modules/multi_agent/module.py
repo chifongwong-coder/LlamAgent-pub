@@ -25,7 +25,7 @@ class MultiAgentModule(Module):
     def on_attach(self, agent):
         """Initialize orchestrator + register preset roles + register collaboration tools."""
         super().on_attach(agent)
-        self.orchestrator = MultiAgentOrchestrator(llm=agent.llm)
+        self.orchestrator = MultiAgentOrchestrator(llm=self.llm)
 
         # Register preset roles
         self._register_preset_roles()

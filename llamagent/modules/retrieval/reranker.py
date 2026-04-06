@@ -38,7 +38,7 @@ class LLMReranker(Reranker):
     def __init__(self, llm):
         """
         Args:
-            llm: LLMClient instance (agent.llm) with an ask_json method.
+            llm: LLMClient instance with an ask_json method.
         """
         self.llm = llm
 

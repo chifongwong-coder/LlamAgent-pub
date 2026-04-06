@@ -208,7 +208,7 @@ class SkillModule(Module):
                 query=query,
                 candidates=format_skill_list(candidates),
             )
-            result = self.agent.llm.ask_json(
+            result = self.llm.ask_json(
                 prompt=prompt, system=DISAMBIGUATE_SYSTEM, temperature=0.3
             )
             selected_names = result.get("selected", [])
@@ -257,7 +257,7 @@ class SkillModule(Module):
                 query=query,
                 skills=format_skill_list(eligible),
             )
-            result = self.agent.llm.ask_json(
+            result = self.llm.ask_json(
                 prompt=prompt, system=FALLBACK_SYSTEM, temperature=0.3
             )
             selected_names = result.get("selected", [])

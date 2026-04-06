@@ -555,3 +555,102 @@ def test_runner_task_log(bare_agent, mock_llm_client):
     assert log[0].output == "response1"
     assert log[0].status == "completed"
     assert log[0].duration > 0
+
+
+# ============================================================
+# v2.1: Per-module model
+# ============================================================
+
+def test_module_models_different_llm(bare_agent, mock_llm_client):
+    """module_models configures a different LLM for a module; module.llm != agent.llm."""
+    from llamagent.core.agent import Module
+
+    # Configure module_models to use a different model for "custom"
+    bare_agent.config.module_models = {"custom": "gpt-4o-mini"}
+
+    class CustomModule(Module):
+        name = "custom"
+        description = "test module"
+
+    mod = CustomModule()
+    bare_agent.register_module(mod)
+
+    # module.llm should differ from agent.llm (different model)
+    assert mod.llm is not bare_agent.llm
+    assert mod.llm.model == "gpt-4o-mini"
+
+
+def test_module_models_default_fallback(bare_agent, mock_llm_client):
+    """Without module_models entry, module.llm == agent.llm (backward compat)."""
+    from llamagent.core.agent import Module
+
+    # No module_models entry for "basic"
+    bare_agent.config.module_models = {}
+
+    class BasicModule(Module):
+        name = "basic"
+        description = "test module"
+
+    mod = BasicModule()
+    bare_agent.register_module(mod)
+
+    # module.llm should be the same as agent.llm
+    assert mod.llm is bare_agent.llm
+
+
+# ============================================================
+# v2.1: Compression module
+# ============================================================
+
+def test_compression_module_auto_compress(bare_agent, mock_llm_client):
+    """With compression module loaded, history is compressed when tokens exceed threshold."""
+    from llamagent.modules.compression.module import CompressionModule
+
+    # Set low threshold so compression triggers easily
+    bare_agent.config.max_context_tokens = 100
+    bare_agent.config.context_compress_threshold = 0.5  # 50 tokens
+    bare_agent.config.compress_keep_turns = 1
+
+    mod = CompressionModule()
+    bare_agent.register_module(mod)
+
+    # Fill history with enough messages (4 turns = 8 messages)
+    for i in range(4):
+        bare_agent.history.append({"role": "user", "content": f"message {i}"})
+        bare_agent.history.append({"role": "assistant", "content": f"reply {i}"})
+
+    assert len(bare_agent.history) == 8
+
+    # Mock count_tokens to return above threshold
+    bare_agent.llm.count_tokens = lambda msgs: 60  # above 50
+    # Mock llm.ask for summarization
+    bare_agent.llm.ask = lambda prompt, **kw: "Summarized conversation"
+
+    # Trigger on_input — should compress
+    result = mod.on_input("new message")
+
+    # on_input returns input unchanged
+    assert result == "new message"
+    # History should be trimmed to keep_turns*2 = 2 messages
+    assert len(bare_agent.history) == 2
+    assert bare_agent.summary == "Summarized conversation"
+
+
+def test_no_compression_module_overflow_clears(bare_agent, mock_llm_client):
+    """Without compression module, overflow fallback clears conversation entirely."""
+    bare_agent.config.max_context_tokens = 100
+
+    # Fill history
+    for i in range(4):
+        bare_agent.history.append({"role": "user", "content": f"message {i}"})
+        bare_agent.history.append({"role": "assistant", "content": f"reply {i}"})
+
+    # Mock count_tokens to return at hard limit
+    bare_agent.llm.count_tokens = lambda msgs: 100
+
+    # Call the fallback check
+    bare_agent._check_context_compression()
+
+    # Should have cleared everything
+    assert len(bare_agent.history) == 0
+    assert bare_agent.summary is None
