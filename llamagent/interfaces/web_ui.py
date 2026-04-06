@@ -88,9 +88,10 @@ def _get_persona_choices():
 # Agent builder
 # ============================================================
 
-def _build_agent(modules_list, role, persona_name, persona_desc):
-    """Build a LlamAgent with the given config."""
+def _build_agent(modules_list, role, persona_name, persona_desc, mode="interactive"):
+    """Build a LlamAgent with the given config and mode."""
     from llamagent.core import LlamAgent, Config, Persona
+    from llamagent.core.zone import ConfirmResponse
     from llamagent.main import load_module
 
     config = Config()
@@ -101,6 +102,13 @@ def _build_agent(modules_list, role, persona_name, persona_desc):
         mod = load_module(mod_name)
         if mod:
             agent.register_module(mod)
+
+    # Auto-approve for Web UI (Gradio cannot show mid-flow confirm dialogs;
+    # task mode contract provides the confirmation step)
+    agent.confirm_handler = lambda req: ConfirmResponse(allow=True)
+
+    if mode != "interactive":
+        agent.set_mode(mode)
 
     return agent
 
@@ -119,6 +127,7 @@ def create_web_ui() -> "gr.Blocks":
 
     # Shared state
     current_agent = {"agent": None}
+    runner_state = {"runner": None, "thread": None, "log": []}
 
     # ---- Callback functions ----
 
@@ -141,17 +150,37 @@ def create_web_ui() -> "gr.Blocks":
 
         return "user", "LlamAgent", "A helpful AI assistant", gr.update(visible=True)
 
-    def build_agent_click(modules, role, name, desc, save_check):
+    def build_agent_click(modules, role, name, desc, save_check, mode):
         """Build agent from config panel."""
         if not name.strip():
             return (
                 gr.update(interactive=False),
                 "Please enter an agent name.",
                 gr.update(),
+                gr.update(visible=False),
             )
 
+        # Stop old runner first (before agent shutdown, since runner calls agent.chat)
+        old_runner = runner_state.get("runner")
+        if old_runner:
+            old_runner.stop()
+            old_thread = runner_state.get("thread")
+            if old_thread:
+                old_thread.join(timeout=5)
+            runner_state["runner"] = None
+            runner_state["thread"] = None
+            runner_state["original_chat"] = None
+
+        # Shutdown old agent after runner is stopped
+        old_agent = current_agent.get("agent")
+        if old_agent:
+            try:
+                old_agent.shutdown()
+            except Exception:
+                pass
+
         try:
-            agent = _build_agent(modules, role, name.strip(), desc.strip())
+            agent = _build_agent(modules, role, name.strip(), desc.strip(), mode=mode)
             current_agent["agent"] = agent
 
             # Save persona if requested
@@ -163,13 +192,21 @@ def create_web_ui() -> "gr.Blocks":
                 f"**Agent Ready!**\n\n"
                 f"**Name**: {name}\n"
                 f"**Role**: {role}\n"
+                f"**Mode**: {mode}\n"
                 f"**Model**: {agent.config.model}\n"
                 f"**Modules**: {mod_count} loaded"
             )
+
+            # Show continuous panel only for continuous mode
+            show_continuous = mode == "continuous"
+            # In continuous mode, disable chat input (runner drives chat)
+            chat_interactive = mode != "continuous"
+
             return (
-                gr.update(interactive=True),
+                gr.update(interactive=chat_interactive),
                 status,
                 [],  # Clear chat history
+                gr.update(visible=show_continuous),
             )
 
         except Exception as e:
@@ -177,6 +214,7 @@ def create_web_ui() -> "gr.Blocks":
                 gr.update(interactive=False),
                 f"**Build failed**: {e}",
                 gr.update(),
+                gr.update(visible=False),
             )
 
     def chat_respond(message, history):
@@ -231,6 +269,86 @@ def create_web_ui() -> "gr.Blocks":
                 results.append(f"Failed: {os.path.basename(str(file))} ({e})")
 
         return "\n".join(results)
+
+    def start_runner_click(trigger_type, timer_interval, timer_message, file_watch_dir):
+        """Start ContinuousRunner with configured trigger."""
+        agent = current_agent.get("agent")
+        if not agent:
+            return "Please build an agent first."
+
+        if runner_state.get("runner"):
+            return "Runner is already active. Stop it first."
+
+        import threading
+        from llamagent.core.runner import ContinuousRunner, TimerTrigger, FileTrigger
+
+        triggers = []
+        if trigger_type == "Timer":
+            try:
+                interval = float(timer_interval or "60")
+            except ValueError:
+                return "Invalid interval value."
+            triggers.append(TimerTrigger(interval=interval, message=timer_message or "check status"))
+        else:
+            watch_dir = file_watch_dir or "."
+            triggers.append(FileTrigger(watch_dir))
+
+        # Wrap agent.chat to log results
+        original_chat = agent.chat
+        runner_state["original_chat"] = original_chat
+        def logging_chat(user_input):
+            result = original_chat(user_input)
+            runner_state["log"].append({"input": user_input, "output": result})
+            return result
+        agent.chat = logging_chat
+
+        runner = ContinuousRunner(agent, triggers, poll_interval=1.0)
+        runner_state["runner"] = runner
+        runner_state["log"] = []
+
+        t = threading.Thread(target=runner.run, daemon=True)
+        runner_state["thread"] = t
+        t.start()
+
+        return "Runner started. Click 'Refresh' to see results, 'Stop' to end."
+
+    def stop_runner_click():
+        """Stop ContinuousRunner."""
+        runner = runner_state.get("runner")
+        if not runner:
+            return [], "No runner active."
+
+        runner.stop()
+        t = runner_state.get("thread")
+        if t:
+            t.join(timeout=5)
+
+        # Restore original chat method
+        agent = current_agent.get("agent")
+        if agent and runner_state.get("original_chat"):
+            agent.chat = runner_state["original_chat"]
+            runner_state["original_chat"] = None
+
+        runner_state["runner"] = None
+        runner_state["thread"] = None
+
+        # Convert log to chat history
+        history = []
+        for entry in runner_state["log"]:
+            history.append({"role": "user", "content": f"[Trigger] {entry['input']}"})
+            history.append({"role": "assistant", "content": entry["output"]})
+
+        return history, f"Runner stopped. {len(runner_state['log'])} task(s) completed."
+
+    def refresh_runner_click():
+        """Refresh chatbot with runner results so far."""
+        history = []
+        for entry in runner_state.get("log", []):
+            history.append({"role": "user", "content": f"[Trigger] {entry['input']}"})
+            history.append({"role": "assistant", "content": entry["output"]})
+
+        active = "Active" if runner_state.get("runner") else "Stopped"
+        return history, f"Runner: {active} | Tasks completed: {len(runner_state.get('log', []))}"
 
     # ---- Build the interface ----
 
@@ -298,6 +416,19 @@ def create_web_ui() -> "gr.Blocks":
                         outputs=[role_radio, persona_name_input, persona_desc_input, create_fields],
                     )
 
+            # Mode selection
+            with gr.Row():
+                mode_dropdown = gr.Dropdown(
+                    choices=["interactive", "task", "continuous"],
+                    value="interactive",
+                    label="Agent Mode",
+                    scale=1,
+                )
+                gr.Markdown(
+                    "*interactive: per-turn chat | task: prepare/confirm/execute | continuous: trigger-driven*",
+                    scale=3,
+                )
+
             # Build button + status
             with gr.Row():
                 build_btn = gr.Button("Build Agent", variant="primary", scale=1)
@@ -324,6 +455,25 @@ def create_web_ui() -> "gr.Blocks":
         with gr.Row():
             clear_btn = gr.Button("Clear Chat", size="sm")
 
+        # Continuous mode runner panel (hidden by default)
+        with gr.Accordion("Continuous Runner", open=True, visible=False) as continuous_panel:
+            with gr.Row():
+                trigger_type = gr.Dropdown(
+                    choices=["Timer", "File"],
+                    value="Timer",
+                    label="Trigger Type",
+                    scale=1,
+                )
+                timer_interval = gr.Textbox(value="60", label="Interval (seconds)", scale=1)
+                timer_message = gr.Textbox(value="check system status", label="Task Message", scale=2)
+            with gr.Row():
+                file_watch_dir = gr.Textbox(value=".", label="Watch Directory (for File trigger)", scale=3)
+            with gr.Row():
+                start_runner_btn = gr.Button("Start Runner", variant="primary", scale=1)
+                stop_runner_btn = gr.Button("Stop Runner", variant="stop", scale=1)
+                refresh_runner_btn = gr.Button("Refresh Results", scale=1)
+            runner_status = gr.Textbox(label="Runner Status", interactive=False, lines=1)
+
         # Document upload
         with gr.Accordion("Document Upload (RAG)", open=False):
             with gr.Row():
@@ -340,8 +490,8 @@ def create_web_ui() -> "gr.Blocks":
 
         build_btn.click(
             fn=build_agent_click,
-            inputs=[module_checkboxes, role_radio, persona_name_input, persona_desc_input, save_checkbox],
-            outputs=[msg_input, status_display, chatbot],
+            inputs=[module_checkboxes, role_radio, persona_name_input, persona_desc_input, save_checkbox, mode_dropdown],
+            outputs=[msg_input, status_display, chatbot, continuous_panel],
         )
 
         send_btn.click(
@@ -356,7 +506,23 @@ def create_web_ui() -> "gr.Blocks":
         )
         clear_btn.click(fn=clear_chat, outputs=[chatbot, msg_input])
 
-        gr.Markdown("---\n*LlamAgent v1.2.1 | Built with LiteLLM + Gradio*")
+        # Continuous runner bindings
+        start_runner_btn.click(
+            fn=start_runner_click,
+            inputs=[trigger_type, timer_interval, timer_message, file_watch_dir],
+            outputs=[runner_status],
+        )
+        stop_runner_btn.click(
+            fn=stop_runner_click,
+            outputs=[chatbot, runner_status],
+        )
+        refresh_runner_btn.click(
+            fn=refresh_runner_click,
+            outputs=[chatbot, runner_status],
+        )
+
+        from llamagent import __version__
+        gr.Markdown(f"---\n*LlamAgent v{__version__} | Built with LiteLLM + Gradio*")
 
     return demo
 

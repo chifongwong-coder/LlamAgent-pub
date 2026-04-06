@@ -108,7 +108,8 @@ def part2_builtin_modules():
         from llamagent.modules.tools import ToolsModule
         agent.register_module(ToolsModule())
         print("[OK] Tools module loaded")
-        print(f"     Tools available: {list(agent._tools.keys())}")
+        tool_schemas = agent.get_all_tool_schemas()
+        print(f"     Tools available: {[s['function']['name'] for s in tool_schemas]}")
     except ImportError:
         print("[SKIP] Tools module (missing dependencies)")
 

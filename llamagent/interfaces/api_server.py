@@ -129,6 +129,28 @@ if HAS_FASTAPI:
             description="Detailed info (only returned in DEBUG mode)",
         )
 
+    class ModeRequest(BaseModel):
+        """Mode switch request"""
+        mode: str = Field(
+            ...,
+            description="Target mode: interactive, task",
+            examples=["task"],
+        )
+        session_id: Optional[str] = Field(
+            default=None,
+            description="Session ID. If omitted, the default session is used",
+        )
+
+    class ModeResponse(BaseModel):
+        """Mode response"""
+        mode: str = Field(description="Current agent mode")
+        config: dict = Field(description="Mode-related config values")
+
+    class AbortResponse(BaseModel):
+        """Abort response"""
+        success: bool = Field(description="Whether abort signal was sent")
+        message: str = Field(description="Status message")
+
 
 # ============================================================
 # Helper functions
@@ -196,10 +218,17 @@ def create_api_server(
         )
 
     from llamagent.main import create_agent, AVAILABLE_MODULES
+    from llamagent.core.zone import ConfirmResponse
 
     # Set the Agent factory function for _get_agent() to use when creating new sessions
+    def _factory():
+        agent = create_agent(module_names, persona_name=persona_name)
+        # Auto-approve for API server (callers manage authorization via contract flow)
+        agent.confirm_handler = lambda req: ConfirmResponse(allow=True)
+        return agent
+
     global _agent_factory
-    _agent_factory = lambda: create_agent(module_names, persona_name=persona_name)
+    _agent_factory = _factory
 
     # --- Lifecycle management ---
 
@@ -223,10 +252,17 @@ def create_api_server(
 
         # Shutdown phase
         logger.info("LlamAgent API server shutting down...")
+        for sid, agent in agent_sessions.items():
+            try:
+                agent.shutdown()
+            except Exception as e:
+                logger.error("Failed to shutdown agent session=%s: %s", sid, e)
         agent_sessions.clear()
         logger.info("All Agent instances cleaned up")
 
     # --- Create FastAPI app ---
+
+    from llamagent import __version__
 
     app = FastAPI(
         title="LlamAgent API",
@@ -239,9 +275,12 @@ def create_api_server(
             "- GET /status — Agent status\n"
             "- GET /modules — Module list\n"
             "- POST /upload — Upload files to RAG\n"
+            "- POST /mode — Switch agent mode\n"
+            "- GET /mode — Get current mode\n"
+            "- POST /abort — Abort current task\n"
             "- WebSocket /ws/chat — Streaming chat\n"
         ),
-        version="1.2.1",
+        version=__version__,
         lifespan=lifespan,
         responses={
             401: {"model": ErrorResponse, "description": "Authentication failed"},
@@ -390,7 +429,7 @@ def create_api_server(
             status = agent.status()
             return StatusResponse(
                 status="healthy",
-                version="1.2.1",
+                version=__version__,
                 model=status.get("model", "Unknown"),
                 uptime_seconds=round(time.time() - START_TIME, 2),
                 modules=status.get("modules", {}),
@@ -398,7 +437,7 @@ def create_api_server(
         except Exception:
             return StatusResponse(
                 status="degraded",
-                version="1.2.1",
+                version=__version__,
                 model="Unknown",
                 uptime_seconds=round(time.time() - START_TIME, 2),
                 modules={},
@@ -448,7 +487,89 @@ def create_api_server(
         agent.clear_conversation()
         return {"message": "Conversation history cleared", "session_id": session_id or "default"}
 
-    # ---- 5. File upload endpoint ----
+    # ---- 5. Mode switch endpoint ----
+
+    @app.post(
+        "/mode",
+        response_model=ModeResponse,
+        tags=["Mode"],
+        summary="Switch agent mode",
+        description="Switch the agent's authorization mode. Supported: interactive, task. Continuous mode is not supported via API (use ContinuousRunner directly).",
+    )
+    async def set_mode(
+        request: ModeRequest,
+        token: str = Depends(verify_token),
+    ):
+        """Switch agent mode."""
+        if request.mode == "continuous":
+            raise HTTPException(
+                status_code=501,
+                detail={
+                    "error": "not_implemented",
+                    "message": "Continuous mode is not supported via API. Use ContinuousRunner directly.",
+                }
+            )
+
+        agent = _get_agent(request.session_id)
+        try:
+            await asyncio.to_thread(agent.set_mode, request.mode)
+        except (ValueError, RuntimeError) as e:
+            raise HTTPException(status_code=400, detail={"error": "mode_switch_failed", "message": str(e)})
+
+        config = agent.config
+        return ModeResponse(
+            mode=agent.mode,
+            config={
+                "max_react_steps": config.max_react_steps,
+                "max_duplicate_actions": config.max_duplicate_actions,
+                "react_timeout": config.react_timeout,
+                "max_observation_tokens": config.max_observation_tokens,
+            },
+        )
+
+    @app.get(
+        "/mode",
+        response_model=ModeResponse,
+        tags=["Mode"],
+        summary="Get current agent mode",
+        description="Returns the current agent mode and mode-related config values.",
+    )
+    async def get_mode(
+        session_id: str | None = None,
+        token: str = Depends(verify_token),
+    ):
+        """Get current agent mode."""
+        agent = _get_agent(session_id)
+        config = agent.config
+        return ModeResponse(
+            mode=agent.mode,
+            config={
+                "max_react_steps": config.max_react_steps,
+                "max_duplicate_actions": config.max_duplicate_actions,
+                "react_timeout": config.react_timeout,
+                "max_observation_tokens": config.max_observation_tokens,
+            },
+        )
+
+    # ---- 6. Abort endpoint ----
+
+    @app.post(
+        "/abort",
+        response_model=AbortResponse,
+        tags=["Mode"],
+        summary="Abort current task",
+        description="Send an abort signal to the agent. The current atomic operation will complete, but no further operations will execute.",
+    )
+    async def abort_task(
+        session_id: str | None = None,
+        token: str = Depends(verify_token),
+    ):
+        """Abort the current task."""
+        agent = _get_agent(session_id)
+        agent.abort()
+        return AbortResponse(success=True, message="Abort signal sent")
+
+    # ---- 7. File upload endpoint ----
 
     @app.post(
         "/upload",
