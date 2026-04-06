@@ -127,7 +127,7 @@ def create_web_ui() -> "gr.Blocks":
 
     # Shared state
     current_agent = {"agent": None}
-    runner_state = {"runner": None, "thread": None, "log": []}
+    runner_state = {"runner": None, "thread": None}
 
     # ---- Callback functions ----
 
@@ -169,7 +169,6 @@ def create_web_ui() -> "gr.Blocks":
                 old_thread.join(timeout=5)
             runner_state["runner"] = None
             runner_state["thread"] = None
-            runner_state["original_chat"] = None
 
         # Shutdown old agent after runner is stopped
         old_agent = current_agent.get("agent")
@@ -218,25 +217,36 @@ def create_web_ui() -> "gr.Blocks":
             )
 
     def chat_respond(message, history):
-        """Handle chat messages."""
+        """Handle chat messages with streaming support."""
         if not message.strip():
-            return history or [], ""
+            yield history or [], ""
+            return
 
         agent = current_agent.get("agent")
         if agent is None:
             history = history or []
             history.append({"role": "assistant", "content": "Please build an agent first using the configuration panel above."})
-            return history, ""
-
-        try:
-            response = agent.chat(message)
-        except Exception as e:
-            response = f"Error: {e}"
+            yield history, ""
+            return
 
         history = history or []
         history.append({"role": "user", "content": message})
-        history.append({"role": "assistant", "content": response})
-        return history, ""
+
+        if hasattr(agent, 'chat_stream') and agent.mode == "interactive":
+            # Streaming mode
+            partial = ""
+            for chunk in agent.chat_stream(message):
+                partial += chunk
+                yield history + [{"role": "assistant", "content": partial}], ""
+            if not partial:
+                yield history + [{"role": "assistant", "content": "(empty response)"}], ""
+        else:
+            # Non-streaming fallback
+            try:
+                response = agent.chat(message)
+            except Exception as e:
+                response = f"Error: {e}"
+            yield history + [{"role": "assistant", "content": response}], ""
 
     def clear_chat():
         """Clear chat history."""
@@ -293,24 +303,23 @@ def create_web_ui() -> "gr.Blocks":
             watch_dir = file_watch_dir or "."
             triggers.append(FileTrigger(watch_dir))
 
-        # Wrap agent.chat to log results
-        original_chat = agent.chat
-        runner_state["original_chat"] = original_chat
-        def logging_chat(user_input):
-            result = original_chat(user_input)
-            runner_state["log"].append({"input": user_input, "output": result})
-            return result
-        agent.chat = logging_chat
-
         runner = ContinuousRunner(agent, triggers, poll_interval=1.0)
         runner_state["runner"] = runner
-        runner_state["log"] = []
 
         t = threading.Thread(target=runner.run, daemon=True)
         runner_state["thread"] = t
         t.start()
 
         return "Runner started. Click 'Refresh' to see results, 'Stop' to end."
+
+    def _log_to_history(log: list):
+        """Convert task log entries to chat history format."""
+        history = []
+        for entry in log:
+            history.append({"role": "user", "content": f"[{entry.trigger_type}] {entry.input}"})
+            content = entry.output if entry.status == "completed" else f"Error: {entry.error}"
+            history.append({"role": "assistant", "content": content})
+        return history
 
     def stop_runner_click():
         """Stop ContinuousRunner."""
@@ -323,32 +332,23 @@ def create_web_ui() -> "gr.Blocks":
         if t:
             t.join(timeout=5)
 
-        # Restore original chat method
-        agent = current_agent.get("agent")
-        if agent and runner_state.get("original_chat"):
-            agent.chat = runner_state["original_chat"]
-            runner_state["original_chat"] = None
+        log = runner.get_log()  # thread-safe copy
+        history = _log_to_history(log)
 
         runner_state["runner"] = None
         runner_state["thread"] = None
 
-        # Convert log to chat history
-        history = []
-        for entry in runner_state["log"]:
-            history.append({"role": "user", "content": f"[Trigger] {entry['input']}"})
-            history.append({"role": "assistant", "content": entry["output"]})
-
-        return history, f"Runner stopped. {len(runner_state['log'])} task(s) completed."
+        return history, f"Runner stopped. {len(log)} task(s) completed."
 
     def refresh_runner_click():
         """Refresh chatbot with runner results so far."""
-        history = []
-        for entry in runner_state.get("log", []):
-            history.append({"role": "user", "content": f"[Trigger] {entry['input']}"})
-            history.append({"role": "assistant", "content": entry["output"]})
+        runner = runner_state.get("runner")
+        if not runner:
+            return [], "No runner active."
 
-        active = "Active" if runner_state.get("runner") else "Stopped"
-        return history, f"Runner: {active} | Tasks completed: {len(runner_state.get('log', []))}"
+        log = runner.get_log()  # thread-safe copy
+        history = _log_to_history(log)
+        return history, f"Runner: Active | Tasks completed: {len(log)}"
 
     # ---- Build the interface ----
 
