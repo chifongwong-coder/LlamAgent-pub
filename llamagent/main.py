@@ -17,6 +17,7 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 import traceback
 
@@ -217,13 +218,17 @@ Examples:
     # Launch the corresponding interface based on mode
     if args.mode == "cli":
         from llamagent.interfaces.cli import LlamAgentCLI
-        cli = LlamAgentCLI(module_names=module_names, persona_name=args.persona)
-        cli.chat_mode()
+        agent = create_agent(module_names, persona_name=args.persona)
+        cli = LlamAgentCLI(agent)
+        try:
+            cli.chat_mode()
+        finally:
+            agent.shutdown()
 
     elif args.mode == "web":
         from llamagent.interfaces.web_ui import create_web_ui, launch_web_ui
 
-        port = args.port or int(__import__("os").getenv("WEB_UI_PORT", "7860"))
+        port = args.port or int(os.getenv("WEB_UI_PORT", "7860"))
 
         try:
             demo = create_web_ui()
@@ -236,7 +241,7 @@ Examples:
     elif args.mode == "api":
         from llamagent.interfaces.api_server import launch_api_server
 
-        port = args.port or int(__import__("os").getenv("API_PORT", "8000"))
+        port = args.port or int(os.getenv("API_PORT", "8000"))
         launch_api_server(
             module_names=module_names,
             persona_name=args.persona,
