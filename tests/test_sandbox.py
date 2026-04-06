@@ -180,6 +180,7 @@ class TestSandboxIntegrationAndCompat:
         agent2.config = config2
         agent2.persona = None
         agent2.llm = bare_agent.llm
+        agent2._llm_cache = {config2.model: bare_agent.llm}
         agent2.modules = {}
         agent2.history = []
         agent2.summary = None
@@ -222,6 +223,7 @@ class TestSandboxIntegrationAndCompat:
         agent3.config = config2
         agent3.persona = None
         agent3.llm = bare_agent.llm
+        agent3._llm_cache = {config2.model: bare_agent.llm}
         agent3.modules = {}
         agent3.history = []
         agent3.summary = None

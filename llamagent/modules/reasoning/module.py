@@ -77,15 +77,18 @@ class PlanReAct(ExecutionStrategy):
         planner: TaskPlanner,
         reflection_engine: "ReflectionEngine | None" = None,
         config=None,
+        llm=None,
     ):
         """
         Args:
             planner:           Task planner
             reflection_engine: Reflection engine; enables quality evaluation when not None and reflection_enabled=True
             config:            Configuration object
+            llm:               LLM client for utility calls (complexity judgment, summarization)
         """
         self.planner = planner
         self.reflection_engine = reflection_engine
+        self.llm = llm or planner.llm
 
         # Read parameters from config, with reasonable defaults
         if config is not None:
@@ -384,7 +387,7 @@ Criteria:
 - Complex task (complex=true): Requires multiple steps, multi-tool collaboration, information integration"""
 
         try:
-            result = agent.llm.ask_json(prompt, temperature=0.1)
+            result = self.llm.ask_json(prompt, temperature=0.1)
             is_complex = result.get("complex", False)
             reason = result.get("reason", "")
             logger.info("Complexity judgment: complex=%s, reason=%s", is_complex, reason)
@@ -494,7 +497,7 @@ Results from each step:
 Please integrate the above results and provide a complete, coherent final answer."""
 
         try:
-            return agent.llm.ask(prompt)
+            return self.llm.ask(prompt)
         except Exception as e:
             logger.warning("Result summarization LLM call failed: %s", e)
             return "\n".join(results_text)
@@ -574,7 +577,7 @@ class PlanningModule(Module):
         """
         super().on_attach(agent)
 
-        planner = TaskPlanner(agent.llm)
+        planner = TaskPlanner(self.llm)
 
         # Check if Reflection module is available
         reflection_engine = None
@@ -586,6 +589,7 @@ class PlanningModule(Module):
             planner=planner,
             reflection_engine=reflection_engine,
             config=agent.config,
+            llm=self.llm,
         )
 
         # Target architecture: agent.set_execution_strategy(self.strategy)

@@ -51,7 +51,7 @@ class ReflectionModule(Module):
         """
         super().on_attach(agent)
 
-        self.engine = ReflectionEngine(llm=agent.llm, config=agent.config)
+        self.engine = ReflectionEngine(llm=self.llm, config=agent.config)
 
         # Lesson store: use shared retrieval pipeline via factory
         try:
