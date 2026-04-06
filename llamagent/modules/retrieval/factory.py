@@ -12,7 +12,7 @@ Usage:
         config=agent.config,
         collection_name="memory_default",
         enable_lexical=False,
-        llm=agent.llm,  # for LLMReranker, optional
+        llm=self.llm,  # for LLMReranker, optional
     )
 """
 

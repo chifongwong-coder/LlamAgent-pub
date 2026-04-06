@@ -274,6 +274,7 @@ class LlamAgent:
             model=self.config.model,
             api_retry_count=self.config.api_retry_count,
         )
+        self._llm_cache: dict[str, LLMClient] = {self.config.model: self.llm}
         self.modules: dict[str, Module] = {}
         self.history: list[dict] = []
         self.summary: str | None = None
@@ -341,6 +342,16 @@ class LlamAgent:
                     logger.warning("Failed to apply authorization_mode '%s' from config: %s", config_mode, e)
 
     # ============================================================
+    # LLM management
+    # ============================================================
+
+    def _get_llm(self, model: str) -> LLMClient:
+        """Get or create LLMClient for the given model."""
+        if model not in self._llm_cache:
+            self._llm_cache[model] = LLMClient(model, self.config.api_retry_count)
+        return self._llm_cache[model]
+
+    # ============================================================
     # Module management
     # ============================================================
 
@@ -353,10 +364,16 @@ class LlamAgent:
         - If the module only overrides attach() (legacy), call attach()
         - If both are overridden, on_attach() takes priority
 
+        Sets module.llm before on_attach so modules can use self.llm during initialization.
+
         Args:
             module: The module instance to register
         """
         try:
+            # Set module-specific LLM before on_attach (module.name is a class attribute, available here)
+            model_name = getattr(self.config, 'module_models', {}).get(module.name)
+            module.llm = self._get_llm(model_name) if model_name else self.llm
+
             # Check if the module overrides on_attach (new API)
             has_custom_on_attach = type(module).on_attach is not Module.on_attach
             has_custom_attach = type(module).attach is not Module.attach
@@ -1679,73 +1696,28 @@ class LlamAgent:
 
         return "\n\n".join(parts)
 
-    def _check_context_compression(self) -> None:
-        """
-        Pre-conversation context compression check.
+    def compress_conversation(self, new_summary: str, keep_turns: int) -> None:
+        """Replace old history with summary, keeping recent turns.
 
-        Triggers compression when conversation tokens exceed the threshold.
-        Phase 1: When tokens exceed the threshold, call _compress_history() to compress old messages into a summary.
+        Called by compression module. Agent manages its own state.
         """
+        keep_messages = keep_turns * 2
+        if len(self.history) > keep_messages:
+            self.history[:] = self.history[-keep_messages:]
+        self.summary = new_summary
+
+    def _check_context_compression(self) -> None:
+        """Fallback: clear conversation when tokens hit hard limit."""
         if not self.history:
             return
-
         try:
             token_count = self.llm.count_tokens(self.history)
-            threshold = int(self.config.max_context_tokens * self.config.context_compress_threshold)
-            if token_count >= threshold:
-                logger.info(
-                    "Conversation tokens (%d) reached compression threshold (%d), triggering context compression",
-                    token_count,
-                    threshold,
-                )
-                self._compress_history()
+            if token_count >= self.config.max_context_tokens:
+                logger.warning("Context tokens (%d) exceed limit (%d), clearing conversation",
+                               token_count, self.config.max_context_tokens)
+                self.clear_conversation()
         except Exception as e:
-            logger.debug("Context compression check error (non-fatal): %s", e)
-
-    def _compress_history(self) -> None:
-        """
-        Compress conversation history.
-
-        Phase 1: Keep the most recent N turns uncompressed, compress older conversations
-        (including old summary) into a new summary.
-        Summary is stored independently in self.summary, not mixed into self.history.
-        """
-        keep_turns = self.config.compress_keep_turns
-        keep_messages = keep_turns * 2  # 2 messages per turn
-
-        if len(self.history) <= keep_messages:
-            return
-
-        # Old messages to compress
-        old_messages = self.history[:-keep_messages]
-        recent_messages = self.history[-keep_messages:]
-
-        # Build compression input (including old summary)
-        compress_parts = []
-        if self.summary:
-            compress_parts.append(f"Previous summary: {self.summary}")
-        old_text = "\n".join(
-            f"{m['role']}: {m['content']}" for m in old_messages
-        )
-        compress_parts.append(old_text)
-
-        # Call LLM for compression
-        try:
-            new_summary = self.llm.ask(
-                f"Please compress the following conversation history into a concise summary, "
-                f"retaining key information (user preferences, important decisions, task progress, key facts):\n\n"
-                + "\n".join(compress_parts),
-                temperature=0.3,
-            )
-            if new_summary and not new_summary.startswith("[LLM"):
-                self.summary = new_summary
-                self.history[:] = recent_messages
-                logger.info("Conversation history compressed: %d messages -> %d messages (summary stored separately)",
-                            len(old_messages) + len(recent_messages), len(self.history))
-            else:
-                logger.warning("Conversation compression failed, skipping compression")
-        except Exception as e:
-            logger.warning("Conversation compression error: %s", e)
+            logger.debug("Context check error (non-fatal): %s", e)
 
     def _trim_history(self) -> None:
         """
