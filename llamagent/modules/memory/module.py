@@ -158,7 +158,7 @@ class MemoryModule(Module):
         # Build compiler (needs LLM for fact extraction)
         if self._write_mode != "off":
             try:
-                self.compiler = FactCompiler(agent.llm)
+                self.compiler = FactCompiler(self.llm)
             except Exception as e:
                 logger.warning("[Memory] Failed to create FactCompiler: %s", e)
                 self.compiler = None

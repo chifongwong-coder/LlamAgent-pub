@@ -33,11 +33,13 @@ def _create_test_agent(mock_llm_client):
     config.persona_file = "/tmp/llamagent_test_personas.json"
     config.agent_tools_dir = "/tmp/llamagent_test_tools"
     config.hooks_config = None
+    config.module_models = {}
 
     agent = LlamAgent.__new__(LlamAgent)
     agent.config = config
     agent.persona = None
     agent.llm = mock_llm_client
+    agent._llm_cache = {config.model: mock_llm_client}
     agent.modules = {}
     agent.history = []
     agent.summary = None

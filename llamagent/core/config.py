@@ -94,6 +94,7 @@ _YAML_MAP = [
     (("web", "search_provider"), "web_search_provider", str),
     (("web", "search_num_results"), "web_search_num_results", int),
     (("authorization", "mode"), "authorization_mode", str),
+    (("module_models",), "module_models", dict),
 ]
 
 # Build a set of valid YAML key paths for unknown-key detection
@@ -208,6 +209,9 @@ class Config:
         # Authorization
         self.authorization_mode: str = "interactive"
         self.seed_scopes: list | None = None  # Parsed from YAML, list of dicts
+
+        # Per-module model overrides (module_name -> model_name)
+        self.module_models: dict[str, str] = {}
 
         # Web
         self.web_search_provider: str = ""  # "" = auto-detect

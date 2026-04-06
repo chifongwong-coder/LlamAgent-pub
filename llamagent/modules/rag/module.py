@@ -85,7 +85,7 @@ class RAGModule(Module):
                 collection_name="llamagent_docs",
                 enable_lexical=True,
                 lexical_name="rag_fts",
-                llm=agent.llm,
+                llm=self.llm,
                 enable_reranker=getattr(cfg, "rag_rerank_enabled", False),
             )
         except Exception as e:

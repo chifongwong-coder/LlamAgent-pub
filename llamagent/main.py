@@ -34,6 +34,7 @@ from llamagent.core import LlamAgent, Config, Persona, PersonaManager
 
 AVAILABLE_MODULES = {
     "safety": "llamagent.modules.safety.SafetyModule",
+    "compression": "llamagent.modules.compression.CompressionModule",
     "sandbox": "llamagent.modules.sandbox.SandboxModule",       # Before job (provides tool_executor)
     "tools": "llamagent.modules.tools.ToolsModule",             # Before skill (pack reset)
     "job": "llamagent.modules.job.JobModule",                   # After sandbox (hard dependency)
