@@ -14,13 +14,27 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from llamagent.core.agent import LlamAgent
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TaskLogEntry:
+    """Single task execution record for ContinuousRunner."""
+    trigger_type: str        # trigger class name (e.g. "TimerTrigger")
+    input: str               # task input from trigger.poll()
+    output: str              # agent.chat() response
+    status: str              # "completed" | "error"
+    error: str | None        # error message if failed
+    started_at: float        # time.time() at start
+    duration: float          # elapsed seconds
 
 
 class Trigger(ABC):
@@ -73,6 +87,7 @@ class ContinuousRunner:
         self.task_timeout = task_timeout
         self.on_timeout = on_timeout
         self._stopped = threading.Event()
+        self.task_log: list[TaskLogEntry] = []
 
     def run(self) -> None:
         """Main loop. Blocks until stop() is called."""
@@ -84,37 +99,54 @@ class ContinuousRunner:
                     break
                 task_input = trigger.poll()
                 if task_input:
-                    try:
-                        self._run_task(task_input)
-                    except Exception as e:
-                        logger.error("Task failed: %s", e)
+                    self._run_task(task_input, trigger)
             self._stopped.wait(self.poll_interval)
         logger.info("ContinuousRunner stopped")
 
-    def _run_task(self, task_input: str) -> None:
-        """Execute one task with optional application-level timeout."""
-        if self.task_timeout <= 0:
-            self.agent.chat(task_input)
-            return
-
-        # Resolve timeout action
-        if callable(self.on_timeout):
-            timeout_action = self.on_timeout
-        else:
-            timeout_action = self.agent.abort
-
-        # Watchdog timer: fires timeout_action if task exceeds timeout
-        timer = threading.Timer(self.task_timeout, timeout_action)
-        timer.start()
+    def _run_task(self, task_input: str, trigger: Trigger) -> None:
+        """Execute one task with optional timeout, record to task_log."""
+        entry = TaskLogEntry(
+            trigger_type=type(trigger).__name__,
+            input=task_input, output="",
+            status="completed", error=None,
+            started_at=time.time(), duration=0,
+        )
+        start = time.time()
         try:
-            self.agent.chat(task_input)
-        finally:
-            timer.cancel()
+            if self.task_timeout <= 0:
+                entry.output = self.agent.chat(task_input)
+            else:
+                # Resolve timeout action
+                if callable(self.on_timeout):
+                    timeout_action = self.on_timeout
+                else:
+                    timeout_action = self.agent.abort
+                # Watchdog timer
+                timer = threading.Timer(self.task_timeout, timeout_action)
+                timer.start()
+                try:
+                    entry.output = self.agent.chat(task_input)
+                finally:
+                    timer.cancel()
+        except Exception as e:
+            entry.status = "error"
+            entry.error = str(e)
+            logger.error("Task failed: %s", e)
+        entry.duration = time.time() - start
+        self.task_log.append(entry)
 
     def stop(self) -> None:
         """Signal the runner to stop. Can be called from any thread."""
         self._stopped.set()
         self.agent.abort()
+
+    def get_log(self) -> list[TaskLogEntry]:
+        """Return a copy of the task log."""
+        return list(self.task_log)
+
+    def clear_log(self) -> None:
+        """Clear the task log."""
+        self.task_log.clear()
 
 
 # ======================================================================

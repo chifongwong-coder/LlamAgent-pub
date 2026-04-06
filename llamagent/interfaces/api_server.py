@@ -693,18 +693,44 @@ def create_api_server(
                     continue
 
                 try:
-                    # Call Agent to get the full reply, then send in chunks to simulate streaming
-                    reply = await asyncio.to_thread(agent.chat, user_message)
+                    if hasattr(agent, 'chat_stream') and agent.mode == "interactive":
+                        # Real streaming: producer thread puts chunks into queue,
+                        # event loop reads and sends immediately
+                        import queue
+                        chunk_queue: queue.Queue = queue.Queue()
+                        _DONE = object()
 
-                    # Simulate streaming output — send a small segment at a time
-                    chunk_size = 10
-                    for i in range(0, len(reply), chunk_size):
-                        chunk = reply[i:i + chunk_size]
+                        def _produce():
+                            try:
+                                for chunk in agent.chat_stream(user_message):
+                                    chunk_queue.put(chunk)
+                            except Exception as e:
+                                chunk_queue.put(e)
+                            finally:
+                                chunk_queue.put(_DONE)
+
+                        loop = asyncio.get_event_loop()
+                        loop.run_in_executor(None, _produce)
+
+                        reply = ""
+                        while True:
+                            item = await asyncio.to_thread(chunk_queue.get)
+                            if item is _DONE:
+                                break
+                            if isinstance(item, Exception):
+                                raise item
+                            reply += item
+                            await websocket.send_json({
+                                "type": "chunk",
+                                "content": item,
+                            })
+                    else:
+                        # Non-streaming fallback
+                        reply = await asyncio.to_thread(agent.chat, user_message)
                         await websocket.send_json({
                             "type": "chunk",
-                            "content": chunk,
+                            "content": reply,
                         })
-                        await asyncio.sleep(0.05)
 
                     await websocket.send_json({
                         "type": "done",

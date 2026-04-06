@@ -17,7 +17,7 @@ from llamagent.core.zone import ConfirmRequest, ConfirmResponse, RequestedScope
 from llamagent.core.contract import TaskContract
 from llamagent.core.controller import TaskModeController
 from llamagent.core.runner import ContinuousRunner, Trigger, TimerTrigger, FileTrigger
-from conftest import make_llm_response, make_tool_call
+from conftest import make_llm_response, make_tool_call, make_stream_chunks, make_stream_tool_call_chunks
 
 
 def _setup_zone(agent, tmp_path):
@@ -448,3 +448,110 @@ def test_clarification_turns_limit():
     # User can still confirm or cancel
     action = controller.handle_turn("yes")
     assert action.kind == "run_execute"
+
+
+# ============================================================
+# v2.0.2: Streaming
+# ============================================================
+
+def test_chat_stream_text_and_tool_call(bare_agent, mock_llm_client):
+    """chat_stream: pure text streaming + tool call status messages + history recording."""
+    # Part 1: pure text
+    mock_llm_client.set_stream_responses([make_stream_chunks("Hello, world!", chunk_size=5)])
+    chunks = list(bare_agent.chat_stream("hi"))
+    joined = "".join(chunks)
+    assert "Hello" in joined and "world" in joined
+    assert bare_agent.history[-1]["role"] == "assistant"
+
+    # Part 2: tool call + final text
+    bare_agent.register_tool("greet", lambda name="": f"Hello {name}!", "greet tool")
+    tool_chunks = make_stream_tool_call_chunks("greet", {"name": "Alice"})
+    text_chunks = make_stream_chunks("Greeted Alice", chunk_size=10)
+    mock_llm_client.set_stream_responses([tool_chunks, text_chunks])
+
+    chunks = list(bare_agent.chat_stream("greet Alice"))
+    joined = "".join(chunks)
+    assert "[Calling greet...]" in joined
+    assert "[greet done]" in joined
+    assert "Greeted Alice" in joined
+
+
+def test_chat_stream_fallback_and_abort(bare_agent, mock_llm_client, tmp_path):
+    """chat_stream: strategy fallback + abort + controller fallback."""
+    from llamagent.core.agent import ExecutionStrategy
+
+    # Part 1: non-streaming strategy fallback
+    class NoStreamStrategy(ExecutionStrategy):
+        def execute(self, query, context, agent):
+            return "non-stream result"
+
+    bare_agent._execution_strategy = NoStreamStrategy()
+    chunks = list(bare_agent.chat_stream("test"))
+    assert chunks == ["non-stream result"]
+
+    # Restore default strategy
+    from llamagent.core.agent import SimpleReAct
+    bare_agent._execution_strategy = SimpleReAct()
+
+    # Part 2: abort during tool dispatch
+    bare_agent.register_tool("slow", lambda: "done", "slow tool")
+    bare_agent._tools["slow"]["func"] = lambda **kw: (bare_agent.abort(), "done")[1]
+    tool_chunks = make_stream_tool_call_chunks("slow", {})
+    mock_llm_client.set_stream_responses([tool_chunks])
+    chunks = list(bare_agent.chat_stream("do it"))
+    assert "[Operation aborted]" in "".join(chunks)
+
+    # Part 3: task mode controller fallback
+    _setup_zone(bare_agent, tmp_path)
+    bare_agent.register_tool("writer", lambda path="": "ok", "write", safety_level=2,
+                             path_extractor=lambda a: [a.get("path", "")])
+    project_file = os.path.join(str(tmp_path), "main.py")
+    mock_llm_client.set_responses([
+        make_llm_response("", tool_calls=[make_tool_call("writer", {"path": project_file})]),
+        make_llm_response("Plan ready"),
+    ])
+    bare_agent.set_mode("task")
+    bare_agent.confirm_handler = lambda req: ConfirmResponse(allow=True)
+    chunks = list(bare_agent.chat_stream("write main.py"))
+    assert len("".join(chunks)) > 0
+
+
+# ============================================================
+# v2.0.2: Runner Task Log
+# ============================================================
+
+def test_runner_task_log(bare_agent, mock_llm_client):
+    """Runner task_log: records entries with correct fields, trigger_type, duration."""
+    from llamagent.core.runner import TaskLogEntry
+
+    mock_llm_client.set_responses([
+        make_llm_response("response1"),
+        make_llm_response("response2"),
+    ])
+
+    class CountingTrigger(Trigger):
+        def __init__(self):
+            self.count = 0
+        def poll(self):
+            self.count += 1
+            if self.count <= 2:
+                return f"task {self.count}"
+            return None
+
+    trigger = CountingTrigger()
+    runner = ContinuousRunner(bare_agent, [trigger], poll_interval=0.01)
+
+    t = threading.Thread(target=runner.run)
+    t.start()
+    time.sleep(0.2)
+    runner.stop()
+    t.join(timeout=2)
+
+    log = runner.get_log()
+    assert len(log) >= 2
+    assert isinstance(log[0], TaskLogEntry)
+    assert log[0].trigger_type == "CountingTrigger"
+    assert log[0].input == "task 1"
+    assert log[0].output == "response1"
+    assert log[0].status == "completed"
+    assert log[0].duration > 0

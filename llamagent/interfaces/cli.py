@@ -453,12 +453,24 @@ class LlamAgentCLI:
     # ============================================================
 
     def _process_chat(self, user_input: str):
-        """Process a single chat turn: send to Agent, display the response."""
+        """Process a single chat turn: stream or non-stream based on agent capability."""
         try:
-            with console.status("[bold cyan]LlamAgent is thinking...[/bold cyan]"):
-                response = self.agent.chat(user_input)
+            if hasattr(self.agent, 'chat_stream') and self.agent.mode == "interactive":
+                # Streaming mode
+                console.print()
+                accumulated = ""
+                for chunk in self.agent.chat_stream(user_input):
+                    print(chunk, end="", flush=True)
+                    accumulated += chunk
+                print()  # newline after stream
 
-            self._display_response(response)
+                # Display contract in special format if detected
+                if accumulated.startswith("[Task Contract]"):
+                    self._display_response(accumulated)
+            else:
+                with console.status("[bold cyan]LlamAgent is thinking...[/bold cyan]"):
+                    response = self.agent.chat(user_input)
+                self._display_response(response)
 
         except Exception as e:
             console.print(f"\n[red]Error: {e}[/red]")
