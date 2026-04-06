@@ -17,7 +17,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Generator, Literal
 
 from llamagent.core.authorization import AuthorizationEngine
 from llamagent.core.config import Config
@@ -89,6 +89,15 @@ class ExecutionStrategy:
         """
         raise NotImplementedError("Subclasses must implement the execute() method")
 
+    def execute_stream(self, query: str, context: str, agent: LlamAgent):
+        """
+        Streaming execution. Return a generator of text chunks, or None if not supported.
+
+        Strategies that don't support streaming return None (the default),
+        and the caller falls back to execute() + yield the full result.
+        """
+        return None
+
 
 class SimpleReAct(ExecutionStrategy):
     """
@@ -118,6 +127,13 @@ class SimpleReAct(ExecutionStrategy):
 
         react_result = agent.run_react(messages, tools_schema, tool_dispatch)
         return react_result.text
+
+    def execute_stream(self, query: str, context: str, agent: LlamAgent):
+        """Streaming execution via run_react_stream."""
+        tools_schema = agent.get_all_tool_schemas()
+        tool_dispatch = agent.call_tool
+        messages = agent.build_messages(query, context)
+        return agent.run_react_stream(messages, tools_schema, tool_dispatch)
 
 
 # ======================================================================
@@ -1165,6 +1181,101 @@ class LlamAgent:
 
         return response
 
+    def chat_stream(self, user_input: str) -> Generator[str, None, None]:
+        """
+        Streaming version of chat(). Yields text chunks.
+
+        - Pure text: streams LLM content token by token
+        - Tool calls: yields status messages
+        - on_output applied post-hoc to accumulated text for history recording
+        - Task mode / PlanReAct: fallback to non-streaming (full execute, yield at once)
+        """
+        # 1. Reset abort
+        self._abort = False
+
+        # 2. SESSION_START hook (once)
+        if not self._session_started:
+            self.emit_hook(HookEvent.SESSION_START, {"modules": list(self.modules.keys())})
+            self._session_started = True
+
+        # 3. PRE_CHAT hook
+        self.emit_hook(HookEvent.PRE_CHAT, {"user_input": user_input})
+
+        # 4. Controller guard: task mode doesn't support streaming, fallback
+        if self._controller is not None:
+            response = self._run_controller_turn(user_input)
+            yield response
+            self.emit_hook(HookEvent.POST_CHAT, {
+                "user_input": user_input, "response": response,
+                "blocked": False, "blocked_by": None, "completed": True,
+            })
+            return
+
+        # 5. on_input pipeline (safety — runs before streaming)
+        processed = user_input
+        for mod in self.modules.values():
+            try:
+                processed = mod.on_input(processed)
+            except Exception as e:
+                logger.error("Module '%s' on_input error: %s", mod.name, e)
+        if not processed or not processed.strip():
+            yield "[Input blocked by safety module]"
+            self.emit_hook(HookEvent.POST_CHAT, {
+                "user_input": user_input, "response": "",
+                "blocked": True, "blocked_by": "safety", "completed": False,
+            })
+            return
+
+        # 6. Context compression
+        self._check_context_compression()
+
+        # 7. on_context pipeline
+        context = ""
+        for mod in self.modules.values():
+            try:
+                context = mod.on_context(processed, context)
+            except Exception as e:
+                logger.error("Module '%s' on_context error: %s", mod.name, e)
+
+        # 8. Route through strategy interface (agent doesn't check strategy type)
+        stream_gen = self._execution_strategy.execute_stream(processed, context, self)
+
+        accumulated = ""
+        try:
+            if stream_gen is None:
+                # Strategy doesn't support streaming → fallback to full execute
+                response = self._execution_strategy.execute(processed, context, self)
+                accumulated = response
+                yield response
+            else:
+                # Strategy supports streaming → yield chunks
+                for chunk in stream_gen:
+                    accumulated += chunk
+                    yield chunk
+        except GeneratorExit:
+            # Generator abandoned (caller broke early / Ctrl+C / GC)
+            # Still record history with whatever was accumulated
+            pass
+        finally:
+            # 9. on_output post-processing (on accumulated full text)
+            final_text = accumulated
+            for mod in reversed(list(self.modules.values())):
+                try:
+                    final_text = mod.on_output(final_text)
+                except Exception as e:
+                    logger.error("Module '%s' on_output error: %s", mod.name, e)
+
+            # 10. Record history (on_output processed version)
+            if accumulated:
+                self.history.append({"role": "user", "content": processed})
+                self.history.append({"role": "assistant", "content": final_text})
+
+            # 11. POST_CHAT hook
+            self.emit_hook(HookEvent.POST_CHAT, {
+                "user_input": user_input, "response": final_text,
+                "blocked": False, "blocked_by": None, "completed": True,
+            })
+
     # ============================================================
     # ReAct loop engine
     # ============================================================
@@ -1325,6 +1436,146 @@ class LlamAgent:
         except Exception as e:
             logger.error("LLM call failed: %s", e)
             return ReactResult(text=f"Conversation error: {e}", status="error", error=str(e))
+
+    # ============================================================
+    # Streaming ReAct loop (v2.0.2)
+    # ============================================================
+
+    def run_react_stream(
+        self,
+        messages: list[dict],
+        tools_schema: list[dict],
+        tool_dispatch: Callable[[str, dict], str],
+    ) -> Generator[str, None, None]:
+        """
+        Streaming version of run_react(). Yields text chunks.
+
+        - Pure text: streams LLM content token by token
+        - Tool calls: yields status messages ("[Calling tool...]", "[tool done]")
+        - Includes full loop protections: abort, duplicate detection, timeout, max_steps
+        """
+        # No tools: pure stream
+        if not tools_schema:
+            try:
+                for chunk in self.llm.chat_stream(messages):
+                    delta = chunk.choices[0].delta
+                    if hasattr(delta, "content") and delta.content:
+                        yield delta.content
+            except Exception as e:
+                logger.error("LLM stream call failed: %s", e)
+                yield f"\n[Error: {e}]"
+            return
+
+        steps = 0
+        last_action: tuple | None = None
+        duplicate_count = 0
+
+        while self.config.max_react_steps == -1 or steps < self.config.max_react_steps:
+            # Abort check
+            if self._abort:
+                yield "\n[Operation aborted]"
+                return
+
+            step_start = time.time()
+            self._confirm_wait_time = 0.0
+
+            # Stream LLM call, yield content and accumulate tool_calls
+            accumulated_content = ""
+            accumulated_tool_calls: list[dict] = []
+
+            try:
+                for chunk in self.llm.chat_stream(messages, tools=tools_schema,
+                                                   timeout=self.config.react_timeout):
+                    delta = chunk.choices[0].delta
+                    if hasattr(delta, "content") and delta.content:
+                        accumulated_content += delta.content
+                        yield delta.content
+                    if hasattr(delta, "tool_calls") and delta.tool_calls:
+                        self._merge_tool_call_deltas(accumulated_tool_calls, delta.tool_calls)
+            except Exception as e:
+                error_name = type(e).__name__
+                if "ContextWindow" in error_name:
+                    yield "\n[Context window overflow]"
+                    return
+                logger.error("ReAct stream LLM call failed: %s", e)
+                yield f"\n[Error: {e}]"
+                return
+
+            # No tool calls → pure text (already yielded)
+            if not accumulated_tool_calls:
+                return
+
+            # Build assistant message and append to messages
+            assistant_msg: dict[str, Any] = {"role": "assistant", "content": accumulated_content or ""}
+            assistant_msg["tool_calls"] = [
+                {"id": tc["id"], "type": "function",
+                 "function": {"name": tc["function"]["name"],
+                              "arguments": tc["function"]["arguments"]}}
+                for tc in accumulated_tool_calls
+            ]
+            messages.append(assistant_msg)
+
+            # Dispatch each tool call
+            for tc in accumulated_tool_calls:
+                tool_name = tc["function"]["name"]
+                try:
+                    tool_args = json.loads(tc["function"]["arguments"]) if tc["function"]["arguments"] else {}
+                except json.JSONDecodeError:
+                    tool_args = {}
+
+                # Duplicate detection
+                current_action = (tool_name, json.dumps(tool_args, sort_keys=True))
+                if current_action == last_action:
+                    duplicate_count += 1
+                    if self.config.max_duplicate_actions != -1 and duplicate_count >= self.config.max_duplicate_actions:
+                        yield f"\n[Duplicate action detected ({tool_name}), aborting]"
+                        return
+                else:
+                    last_action = current_action
+                    duplicate_count = 1
+
+                yield f"\n[Calling {tool_name}...]\n"
+                try:
+                    result = tool_dispatch(tool_name, tool_args)
+                    result = str(result) if result is not None else ""
+                except Exception as e:
+                    logger.error("Tool '%s' dispatch error: %s", tool_name, e)
+                    result = f"Tool execution error: {e}"
+                result = self._truncate_observation(result)
+                yield f"[{tool_name} done]\n"
+
+                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+
+                # Abort check after each tool
+                if self._abort:
+                    yield "\n[Operation aborted]"
+                    return
+
+            # Timeout check
+            elapsed = time.time() - step_start - self._confirm_wait_time
+            if elapsed > self.config.react_timeout:
+                yield "\n[Step timeout]"
+                return
+
+            steps += 1
+
+        yield "\n[Maximum steps reached]"
+
+    @staticmethod
+    def _merge_tool_call_deltas(accumulated: list[dict], deltas: list) -> None:
+        """Merge incremental tool_call deltas into accumulated list (by index)."""
+        for delta in deltas:
+            idx = delta.index if hasattr(delta, "index") else 0
+            while len(accumulated) <= idx:
+                accumulated.append({"id": "", "function": {"name": "", "arguments": ""}})
+            tc = accumulated[idx]
+            if hasattr(delta, "id") and delta.id:
+                tc["id"] = delta.id
+            if hasattr(delta, "function") and delta.function:
+                if hasattr(delta.function, "name") and delta.function.name:
+                    tc["function"]["name"] += delta.function.name
+                if hasattr(delta.function, "arguments") and delta.function.arguments:
+                    tc["function"]["arguments"] += delta.function.arguments
 
     def _truncate_observation(self, text: str) -> str:
         """

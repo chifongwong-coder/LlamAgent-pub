@@ -145,6 +145,68 @@ class LLMClient:
                     logger.error("LLM call failed, all retries exhausted: %s", e)
         raise last_error  # type: ignore[misc]
 
+    def chat_stream(
+        self,
+        messages: list[dict],
+        temperature: float = 0.7,
+        tools: list[dict] | None = None,
+        timeout: float | None = None,
+    ):
+        """
+        Streaming LLM call. Returns an iterable of chunk objects.
+
+        Each chunk has: chunk.choices[0].delta.content (text fragment or None),
+        chunk.choices[0].delta.tool_calls (incremental tool call fragments or None),
+        chunk.choices[0].finish_reason ("stop", "tool_calls", or None).
+
+        Retry logic same as chat(): retries on failure with exponential backoff.
+
+        Args:
+            messages: Message list
+            temperature: Creativity parameter
+            tools: Tool schema list (optional)
+            timeout: Request timeout in seconds
+
+        Returns:
+            Iterable of streaming chunk objects
+        """
+        if not _LITELLM_AVAILABLE:
+            raise RuntimeError(
+                "litellm is not installed, cannot call LLM. Please run: pip install litellm"
+            )
+
+        kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": True,
+        }
+        if tools is not None:
+            kwargs["tools"] = tools
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+
+        last_error = None
+        for attempt in range(self.api_retry_count + 1):
+            try:
+                return completion(**kwargs)
+            except Exception as e:
+                last_error = e
+                if _LITELLM_AVAILABLE and isinstance(
+                    e, litellm.ContextWindowExceededError
+                ):
+                    raise
+                if attempt < self.api_retry_count:
+                    wait = 2 ** attempt
+                    logger.warning(
+                        "LLM stream call failed (attempt %d/%d), retrying in %ds: %s",
+                        attempt + 1, self.api_retry_count + 1, wait, e,
+                    )
+                    time.sleep(wait)
+                else:
+                    logger.error("LLM stream call failed, all retries exhausted: %s", e)
+        raise last_error  # type: ignore[misc]
+
     def ask(self, prompt: str, system: str = "", **kwargs) -> str:
         """
         Single-turn Q&A convenience method returning plain text.
