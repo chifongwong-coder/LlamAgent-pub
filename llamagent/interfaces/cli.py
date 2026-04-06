@@ -97,7 +97,7 @@ def _ask_confirm(prompt: str, default: bool = True) -> bool:
 # ============================================================
 # Version info and welcome banner
 # ============================================================
-VERSION = "1.2.1"
+from llamagent import __version__ as VERSION
 
 BANNER = """
 [bold cyan]
@@ -351,8 +351,22 @@ class LlamAgentCLI:
             agent: A configured LlamAgent instance
         """
         self.agent = agent
+        self._runner = None  # ContinuousRunner instance (if active)
 
-        # Slash command mapping
+        # Set up confirm_handler for interactive authorization prompts
+        from llamagent.core.zone import ConfirmRequest, ConfirmResponse
+        def _cli_confirm_handler(req: ConfirmRequest) -> ConfirmResponse:
+            console.print(f"\n[yellow]Authorization required: {req.tool_name}[/yellow]")
+            console.print(f"  Action: {req.action} | Zone: {req.zone}")
+            if req.target_paths:
+                console.print(f"  Paths: {', '.join(req.target_paths[:5])}")
+            console.print(f"  {req.message}")
+            yes = _ask_confirm("  Allow this operation?")
+            return ConfirmResponse(allow=yes)
+
+        self.agent.confirm_handler = _cli_confirm_handler
+
+        # Slash command mapping (commands with args handled separately)
         self._slash_commands = {
             "/quit": self._cmd_quit,
             "/exit": self._cmd_quit,
@@ -361,6 +375,7 @@ class LlamAgentCLI:
             "/status": self._cmd_status,
             "/modules": self._cmd_modules,
             "/clear": self._cmd_clear,
+            "/abort": self._cmd_abort,
         }
 
     # ============================================================
@@ -387,6 +402,14 @@ class LlamAgentCLI:
                 if user_input.startswith("/"):
                     cmd_parts = user_input.split(maxsplit=1)
                     cmd = cmd_parts[0].lower()
+                    cmd_arg = cmd_parts[1].strip() if len(cmd_parts) > 1 else ""
+
+                    # /mode takes an argument
+                    if cmd == "/mode":
+                        result = self._cmd_mode(cmd_arg)
+                        if result == "continuous_done":
+                            continue  # returned from continuous, resume chat loop
+                        continue
 
                     handler = self._slash_commands.get(cmd)
                     if handler:
@@ -443,16 +466,31 @@ class LlamAgentCLI:
 
     def _display_response(self, response: str):
         """Render Agent response with Rich Panel + Markdown, or plain text."""
+        is_contract = response.startswith("[Task Contract]")
+
         if HAS_RICH:
             console.print()
-            console.print(Panel(
-                Markdown(response),
-                title="[bold cyan]LlamAgent[/bold cyan]",
-                border_style="cyan",
-                padding=(1, 2),
-            ))
+            if is_contract:
+                console.print(Panel(
+                    response,
+                    title="[bold yellow]Task Contract[/bold yellow]",
+                    border_style="yellow",
+                    padding=(1, 2),
+                ))
+            else:
+                console.print(Panel(
+                    Markdown(response),
+                    title="[bold cyan]LlamAgent[/bold cyan]",
+                    border_style="cyan",
+                    padding=(1, 2),
+                ))
         else:
-            print(f"\nLlamAgent: {response}\n")
+            if is_contract:
+                print(f"\n{'=' * 50}")
+                print(response)
+                print(f"{'=' * 50}\n")
+            else:
+                print(f"\nLlamAgent: {response}\n")
 
     # ============================================================
     # Slash command implementations
@@ -476,6 +514,8 @@ class LlamAgentCLI:
 
             commands = [
                 ("/help", "Show this help message"),
+                ("/mode [name]", "Show/switch mode (interactive, task, continuous)"),
+                ("/abort", "Abort the current task"),
                 ("/status", "View Agent runtime status"),
                 ("/modules", "View loaded modules"),
                 ("/clear", "Clear conversation history"),
@@ -490,12 +530,14 @@ class LlamAgentCLI:
         else:
             print(
                 "\nAvailable Commands:\n"
-                "  /help       Show help\n"
-                "  /status     View Agent status\n"
-                "  /modules    View loaded modules\n"
-                "  /clear      Clear conversation history\n"
-                "  /quit       Exit\n"
-                "  Ctrl+C      Exit current agent, return to setup\n"
+                "  /help          Show help\n"
+                "  /mode [name]   Show/switch mode (interactive, task, continuous)\n"
+                "  /abort         Abort the current task\n"
+                "  /status        View Agent status\n"
+                "  /modules       View loaded modules\n"
+                "  /clear         Clear conversation history\n"
+                "  /quit          Exit\n"
+                "  Ctrl+C         Exit current agent, return to setup\n"
             )
 
     def _cmd_status(self):
@@ -512,6 +554,7 @@ class LlamAgentCLI:
             table.add_column("Value", style="white")
 
             table.add_row("Model", status.get("model", "Unknown"))
+            table.add_row("Mode", self.agent.mode)
             table.add_row(
                 "Persona",
                 status.get("persona") or "Default"
@@ -565,6 +608,85 @@ class LlamAgentCLI:
         """Clear conversation history."""
         self.agent.clear_conversation()
         console.print("[green]Conversation history cleared[/green]")
+
+    def _cmd_abort(self):
+        """Abort the current task."""
+        self.agent.abort()
+        console.print("[yellow]Abort signal sent[/yellow]")
+
+    def _cmd_mode(self, arg: str):
+        """Switch or display agent mode."""
+        if not arg:
+            # Display current mode and config
+            mode = self.agent.mode
+            config = self.agent.config
+            console.print(f"\n[bold]Current mode:[/bold] [cyan]{mode}[/cyan]")
+            console.print(f"  max_react_steps:      {config.max_react_steps}")
+            console.print(f"  max_duplicate_actions: {config.max_duplicate_actions}")
+            console.print(f"  react_timeout:        {config.react_timeout}")
+            console.print(f"  max_observation_tokens: {config.max_observation_tokens}")
+            return
+
+        target = arg.strip().lower()
+        if target not in ("interactive", "task", "continuous"):
+            console.print(f"[red]Invalid mode: {target}. Use: interactive, task, continuous[/red]")
+            return
+
+        if target == "continuous":
+            return self._start_continuous()
+
+        try:
+            self.agent.set_mode(target)
+            console.print(f"[green]Switched to {target} mode[/green]")
+        except RuntimeError as e:
+            console.print(f"[red]Cannot switch mode: {e}[/red]")
+
+    def _start_continuous(self):
+        """Configure triggers and run ContinuousRunner (blocks until Ctrl+C)."""
+        from llamagent.core.runner import ContinuousRunner, TimerTrigger, FileTrigger
+
+        console.print("\n[bold]Continuous Mode Setup[/bold]\n")
+        console.print("  [bold]1[/bold]. Timer — run a fixed task at regular intervals")
+        console.print("  [bold]2[/bold]. File  — watch a directory for new files")
+        trigger_choice = _ask_choice("Select trigger type", ["1", "2"], default="1")
+
+        triggers = []
+        if trigger_choice == "1":
+            interval = _ask("Interval in seconds", default="60")
+            message = _ask("Task message", default="check system status")
+            try:
+                triggers.append(TimerTrigger(interval=float(interval), message=message))
+            except ValueError:
+                console.print("[red]Invalid interval[/red]")
+                return
+        else:
+            watch_dir = _ask("Directory to watch", default=".")
+            triggers.append(FileTrigger(watch_dir))
+
+        try:
+            self.agent.set_mode("continuous")
+        except RuntimeError as e:
+            console.print(f"[red]Cannot switch mode: {e}[/red]")
+            return
+
+        runner = ContinuousRunner(self.agent, triggers, poll_interval=1.0)
+        self._runner = runner
+
+        console.print(f"\n[green]Continuous mode started. Press Ctrl+C to stop.[/green]\n")
+        try:
+            runner.run()
+        except KeyboardInterrupt:
+            runner.stop()
+            console.print("\n[yellow]Continuous mode stopped[/yellow]")
+        finally:
+            self._runner = None
+            try:
+                self.agent.set_mode("interactive")
+                console.print("[green]Switched back to interactive mode[/green]")
+            except Exception:
+                pass
+
+        return "continuous_done"
 
 
 # ============================================================
@@ -631,10 +753,13 @@ def main():
         console.print(BANNER)
         cli = LlamAgentCLI(agent)
 
-        if args.command == "ask":
-            cli.ask(args.question)
-        else:
-            cli.chat_mode()
+        try:
+            if args.command == "ask":
+                cli.ask(args.question)
+            else:
+                cli.chat_mode()
+        finally:
+            agent.shutdown()
         return
 
     # Ask mode with question
@@ -647,7 +772,10 @@ def main():
         }
         agent = build_agent(setup)
         cli = LlamAgentCLI(agent)
-        cli.ask(args.question)
+        try:
+            cli.ask(args.question)
+        finally:
+            agent.shutdown()
         return
 
     # Interactive setup loop
