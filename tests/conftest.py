@@ -62,6 +62,59 @@ def make_llm_response(content: str = "", tool_calls: list | None = None):
     return resp
 
 
+def make_stream_chunks(content: str, chunk_size: int = 5):
+    """Build mock streaming chunks for a text-only response (no tool calls)."""
+    chunks = []
+    for i in range(0, len(content), chunk_size):
+        chunk = SimpleNamespace()
+        chunk.choices = [SimpleNamespace(delta=SimpleNamespace(
+            content=content[i:i+chunk_size], tool_calls=None
+        ), finish_reason=None)]
+        chunks.append(chunk)
+    # Final chunk with finish_reason
+    final = SimpleNamespace()
+    final.choices = [SimpleNamespace(delta=SimpleNamespace(
+        content=None, tool_calls=None
+    ), finish_reason="stop")]
+    chunks.append(final)
+    return chunks
+
+
+def make_stream_tool_call_chunks(tool_name: str, arguments: dict, call_id: str = "call_1"):
+    """Build mock streaming chunks for a tool call response."""
+    import json
+    args_str = json.dumps(arguments)
+    chunks = []
+    # First chunk: tool call id + name
+    tc_delta = SimpleNamespace()
+    tc_delta.index = 0
+    tc_delta.id = call_id
+    tc_delta.function = SimpleNamespace(name=tool_name, arguments="")
+    chunk = SimpleNamespace()
+    chunk.choices = [SimpleNamespace(delta=SimpleNamespace(
+        content=None, tool_calls=[tc_delta]
+    ), finish_reason=None)]
+    chunks.append(chunk)
+    # Arguments in fragments
+    for i in range(0, len(args_str), 10):
+        tc_delta = SimpleNamespace()
+        tc_delta.index = 0
+        tc_delta.id = None
+        tc_delta.function = SimpleNamespace(name=None, arguments=args_str[i:i+10])
+        chunk = SimpleNamespace()
+        chunk.choices = [SimpleNamespace(delta=SimpleNamespace(
+            content=None, tool_calls=[tc_delta]
+        ), finish_reason=None)]
+        chunks.append(chunk)
+    # Final chunk
+    final = SimpleNamespace()
+    final.choices = [SimpleNamespace(delta=SimpleNamespace(
+        content=None, tool_calls=None
+    ), finish_reason="tool_calls")]
+    chunks.append(final)
+    return chunks
+
+
 # ============================================================
 # Fixtures
 # ============================================================
@@ -78,9 +131,20 @@ def mock_llm_client():
         client.max_context_tokens = 8192
 
         _responses = []
+        _stream_responses = []
         _call_index = [0]
+        _stream_index = [0]
 
         def _side_effect(**kwargs):
+            if kwargs.get("stream"):
+                idx = _stream_index[0]
+                if idx < len(_stream_responses):
+                    _stream_index[0] += 1
+                    r = _stream_responses[idx]
+                    if isinstance(r, Exception):
+                        raise r
+                    return iter(r)  # return iterator over chunks
+                return iter(make_stream_chunks("default stream response"))
             idx = _call_index[0]
             if idx < len(_responses):
                 _call_index[0] += 1
@@ -97,7 +161,14 @@ def mock_llm_client():
             _responses.extend(responses)
             _call_index[0] = 0
 
+        def set_stream_responses(responses: list):
+            """Set streaming responses. Each item is a list of chunks."""
+            _stream_responses.clear()
+            _stream_responses.extend(responses)
+            _stream_index[0] = 0
+
         client.set_responses = set_responses
+        client.set_stream_responses = set_stream_responses
         client._mock_completion = mock_completion
         yield client
 
