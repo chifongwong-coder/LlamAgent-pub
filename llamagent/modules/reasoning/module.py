@@ -82,7 +82,7 @@ class PlanReAct(ExecutionStrategy):
         """
         Args:
             planner:           Task planner
-            reflection_engine: Reflection engine; enables quality evaluation when not None and reflection_enabled=True
+            reflection_engine: Reflection engine; enables quality evaluation when not None and reflection_write_mode=auto
             config:            Configuration object
             llm:               LLM client for utility calls (complexity judgment, summarization)
         """
@@ -95,7 +95,7 @@ class PlanReAct(ExecutionStrategy):
             self.max_plan_adjustments: int = getattr(config, "max_plan_adjustments", 7)
             self.max_react_steps: int = getattr(config, "max_react_steps", 10)
             self.react_timeout: float = getattr(config, "react_timeout", 210.0)
-            self.reflection_enabled: bool = getattr(config, "reflection_enabled", False)
+            self.reflection_write_auto: bool = getattr(config, "reflection_write_mode", "off") == "auto"
             self.reflection_score_threshold: float = getattr(
                 config, "reflection_score_threshold", 7.0
             )
@@ -103,7 +103,7 @@ class PlanReAct(ExecutionStrategy):
             self.max_plan_adjustments = 7
             self.max_react_steps = 10
             self.react_timeout = 210.0
-            self.reflection_enabled = False
+            self.reflection_write_auto = False
             self.reflection_score_threshold = 7.0
 
     def execute(self, query: str, context: str, agent: "LlamAgent") -> str:
@@ -281,7 +281,7 @@ class PlanReAct(ExecutionStrategy):
         summary = self._summarize_results(query, steps, agent)
 
         # -- 6. Quality evaluation (optional, requires ReflectionEngine and enabled) --
-        if self.reflection_engine is None or not self.reflection_enabled:
+        if self.reflection_engine is None or not self.reflection_write_auto:
             return summary
 
         try:

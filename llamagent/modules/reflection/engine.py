@@ -288,6 +288,7 @@ class LessonStore:
                 tags = []
 
             lessons.append({
+                "lesson_id": r.get("id", ""),
                 "task": metadata.get("task", ""),
                 "error_description": metadata.get("error_description", ""),
                 "root_cause": metadata.get("root_cause", ""),
@@ -321,19 +322,73 @@ class LessonStore:
 
         lines = []
         for lesson in lessons:
+            lesson_id = lesson.get("lesson_id", "?")
             tags = lesson.get("tags", [])
             tag_text = tags[0] if tags else "Uncategorized"
 
             improvement = lesson.get("improvement", "")
             if improvement:
                 lines.append(
-                    f"- Issue type: {tag_text} | Lesson: {improvement}"
+                    f"- [{lesson_id}] {tag_text}: {improvement}"
                 )
             else:
                 root_cause = lesson.get("root_cause", "Unknown cause")
                 lines.append(
-                    f"- Issue type: {tag_text} | "
-                    f"Failure cause: {root_cause}, no effective improvement available"
+                    f"- [{lesson_id}] {tag_text}: {root_cause} (no improvement available)"
                 )
 
         return "\n".join(lines)
+
+    def get_lesson(self, lesson_id: str) -> dict | None:
+        """Get a lesson by ID via pipeline.vector.get().
+
+        Returns a dict with task/error_description/root_cause/improvement/tags/created_at,
+        or None if not found or unavailable.
+        """
+        if not self._available:
+            return None
+
+        try:
+            result = self._pipeline.vector.get(lesson_id)
+        except Exception as e:
+            logger.warning("Failed to get lesson '%s': %s", lesson_id, e)
+            return None
+
+        if not result:
+            return None
+
+        # pipeline.vector.get() returns {"id": ..., "text": ..., "metadata": {...}}
+        metadata = result.get("metadata", {})
+        if not metadata:
+            return None
+
+        try:
+            tags = json.loads(metadata.get("tags", "[]"))
+        except (json.JSONDecodeError, TypeError):
+            tags = []
+
+        return {
+            "lesson_id": lesson_id,
+            "task": metadata.get("task", ""),
+            "error_description": metadata.get("error_description", ""),
+            "root_cause": metadata.get("root_cause", ""),
+            "improvement": metadata.get("improvement", ""),
+            "tags": tags,
+            "created_at": metadata.get("created_at", ""),
+        }
+
+    def delete_lesson(self, lesson_id: str) -> bool:
+        """Delete a lesson by ID via pipeline.delete().
+
+        Returns True if deletion was attempted, False if unavailable.
+        """
+        if not self._available:
+            return False
+
+        try:
+            self._pipeline.delete(lesson_id)
+            logger.info("Lesson deleted: %s", lesson_id)
+            return True
+        except Exception as e:
+            logger.warning("Failed to delete lesson '%s': %s", lesson_id, e)
+            return False
