@@ -52,6 +52,27 @@ MEMORY_GUIDE_RECALL_ONLY = """\
 [Memory] You have long-term memory with stored information from previous conversations.
 - Use the recall_memory tool to recall past information when relevant."""
 
+# FS backend guides
+MEMORY_GUIDE_FS = """\
+[Memory] You have long-term memory stored as files.
+- Use list_memories to browse available memories (shows metadata).
+- Use read_memory to read the full content of a specific memory.
+- Use save_memory to save noteworthy content."""
+
+MEMORY_GUIDE_FS_AUTO = """\
+[Memory] You have long-term memory. The metadata of all active memories \
+is shown below. Use read_memory to access full details of any relevant memory.
+- Use save_memory to save noteworthy content."""
+
+MEMORY_GUIDE_FS_AUTO_RECALL_ONLY = """\
+[Memory] You have long-term memory. The metadata of all active memories \
+is shown below. Use read_memory to access full details of any relevant memory."""
+
+MEMORY_GUIDE_FS_RECALL_ONLY = """\
+[Memory] You have long-term memory stored as files.
+- Use list_memories to browse available memories (shows metadata).
+- Use read_memory to read the full content of a specific memory."""
+
 # Auto-recall context block template
 _AUTO_RECALL_BLOCK = """\
 [Memory] Relevant memories for this conversation:
@@ -106,6 +127,7 @@ class MemoryModule(Module):
         self.merger: FactMerger | None = None
         self._write_mode: str = "off"
         self._read_mode: str = "off"
+        self._backend: str = "rag"
         self._available: bool = False
         self._pending_query: str | None = None  # For hybrid mode on_output
 
@@ -114,7 +136,7 @@ class MemoryModule(Module):
     # ============================================================
 
     def on_attach(self, agent):
-        """Initialize retrieval pipeline, compiler, merger, and register tools."""
+        """Initialize storage backend, compiler, merger, and register tools."""
         super().on_attach(agent)
 
         # Resolve modes from config
@@ -140,20 +162,13 @@ class MemoryModule(Module):
             self._available = False
             return
 
-        # Build retrieval pipeline with graceful degradation
-        pipeline = self._build_pipeline(agent)
+        # Detect backend
+        self._backend = getattr(agent.config, "memory_backend", "rag")
 
-        if pipeline is not None:
-            self.store = MemoryStore(pipeline=pipeline)
-            self._available = True
+        if self._backend == "fs":
+            self._init_fs_backend(agent)
         else:
-            # Degraded: store exists but has no backend
-            self.store = MemoryStore()
-            self._available = False
-            logger.warning(
-                "[Memory] Storage unavailable (chromadb not installed?). "
-                "Tools will return friendly error messages."
-            )
+            self._init_rag_backend(agent)
 
         # Build compiler (needs LLM for fact extraction)
         if self._write_mode != "off":
@@ -171,7 +186,42 @@ class MemoryModule(Module):
         if self._write_mode != "off":
             self._register_save_tool()
         if self._read_mode != "off":
-            self._register_recall_tool()
+            if self._backend == "fs":
+                self._register_fs_recall_tools()
+            else:
+                self._register_recall_tool()
+
+    def _init_rag_backend(self, agent):
+        """Initialize the RAG (ChromaDB) backend for memory storage."""
+        pipeline = self._build_pipeline(agent)
+
+        if pipeline is not None:
+            self.store = MemoryStore(pipeline=pipeline)
+            self._available = True
+        else:
+            # Degraded: store exists but has no backend
+            self.store = MemoryStore()
+            self._available = False
+            logger.warning(
+                "[Memory] Storage unavailable (chromadb not installed?). "
+                "Tools will return friendly error messages."
+            )
+
+    def _init_fs_backend(self, agent):
+        """Initialize the FS backend for memory storage."""
+        import os
+        from llamagent.modules.memory.fs_store import FSMemoryStore
+
+        base_dir = getattr(agent.config, "memory_fs_dir", None)
+        if not base_dir:
+            base_dir = os.path.join(
+                getattr(agent.config, "fs_data_dir", "data/fs"), "memory"
+            )
+        if agent.persona:
+            base_dir = os.path.join(base_dir, agent.persona.persona_id)
+
+        self.store = FSMemoryStore(base_dir)
+        self._available = True
 
     def _build_pipeline(self, agent):
         """
@@ -181,7 +231,7 @@ class MemoryModule(Module):
         Memory uses vector-only retrieval (no lexical/reranker).
         """
         try:
-            from llamagent.modules.retrieval.factory import create_pipeline
+            from llamagent.modules.rag.factory import create_pipeline
         except ImportError:
             logger.warning("[Memory] Retrieval module not available")
             return None
@@ -262,6 +312,56 @@ class MemoryModule(Module):
             safety_level=1,
         )
 
+    def _register_fs_recall_tools(self):
+        """Register FS backend recall tools based on read mode.
+
+        - auto mode: only read_memory (metadata is injected via on_context)
+        - tool mode: both list_memories and read_memory
+        """
+        if self._read_mode == "tool":
+            self.agent.register_tool(
+                name="list_memories",
+                func=self._tool_list_memories,
+                description=(
+                    "List all available memories with their metadata. "
+                    "Returns a summary of each memory including fact_id, kind, subject, "
+                    "attribute, and value. Use this to browse what memories are available."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Optional keyword filter (empty string for all)",
+                        },
+                    },
+                    "required": [],
+                },
+                tier="default",
+                safety_level=1,
+            )
+
+        self.agent.register_tool(
+            name="read_memory",
+            func=self._tool_read_memory,
+            description=(
+                "Read the full content and source text of a specific memory by its fact_id. "
+                "Use this after seeing a memory in the metadata list to get full details."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "fact_id": {
+                        "type": "string",
+                        "description": "The fact_id of the memory to read",
+                    },
+                },
+                "required": ["fact_id"],
+            },
+            tier="default",
+            safety_level=1,
+        )
+
     # ============================================================
     # Tool implementations
     # ============================================================
@@ -325,6 +425,35 @@ class MemoryModule(Module):
 
         return "\n".join(lines)
 
+    def _tool_list_memories(self, query: str = "") -> str:
+        """List all active memories with metadata (FS backend)."""
+        if not self._available or self.store is None:
+            return "Memory storage is currently unavailable."
+
+        metadata_text = self.store.list_all_metadata()
+        if not metadata_text:
+            return "No memories stored yet."
+
+        if query:
+            # Simple keyword filter on the metadata text
+            query_lower = query.lower()
+            filtered_lines = [
+                line for line in metadata_text.splitlines()
+                if query_lower in line.lower()
+            ]
+            if not filtered_lines:
+                return f"No memories matching '{query}' found."
+            return "\n".join(filtered_lines)
+
+        return metadata_text
+
+    def _tool_read_memory(self, fact_id: str) -> str:
+        """Read full content of a specific memory by fact_id (FS backend)."""
+        if not self._available or self.store is None:
+            return "Memory storage is currently unavailable."
+
+        return self.store.read_fact_source(fact_id)
+
     # ============================================================
     # Pipeline Callbacks
     # ============================================================
@@ -333,8 +462,9 @@ class MemoryModule(Module):
         """
         Inject memory guide and perform auto-recall if enabled.
 
-        - Injects the appropriate MEMORY_GUIDE based on active tools
-        - If memory_recall_mode == "auto": perform threshold-gated auto recall
+        - Injects the appropriate MEMORY_GUIDE based on active tools and backend
+        - If memory_recall_mode == "auto": perform threshold-gated auto recall (RAG)
+          or inject all metadata (FS)
         - In hybrid mode: store query for on_output use
         """
         has_save = self._write_mode != "off"
@@ -347,18 +477,35 @@ class MemoryModule(Module):
         if self._write_mode == "hybrid":
             self._pending_query = query
 
-        # Choose the appropriate guide
-        if has_save and has_recall:
-            guide = MEMORY_GUIDE
-        elif has_save:
-            guide = MEMORY_GUIDE_SAVE_ONLY
+        # Choose the appropriate guide based on backend and modes
+        if self._backend == "fs":
+            if self._read_mode == "auto" and has_save:
+                guide = MEMORY_GUIDE_FS_AUTO
+            elif self._read_mode == "auto" and not has_save:
+                guide = MEMORY_GUIDE_FS_AUTO_RECALL_ONLY
+            elif has_save and has_recall:
+                guide = MEMORY_GUIDE_FS
+            elif has_save:
+                guide = MEMORY_GUIDE_SAVE_ONLY
+            else:
+                guide = MEMORY_GUIDE_FS_RECALL_ONLY
         else:
-            guide = MEMORY_GUIDE_RECALL_ONLY
+            if has_save and has_recall:
+                guide = MEMORY_GUIDE
+            elif has_save:
+                guide = MEMORY_GUIDE_SAVE_ONLY
+            else:
+                guide = MEMORY_GUIDE_RECALL_ONLY
 
         # Auto-recall injection
         auto_block = ""
         if self._read_mode == "auto" and self._available:
-            auto_block = self._do_auto_recall(query)
+            if self._backend == "fs":
+                raw_metadata = self.store.list_all_metadata()
+                if raw_metadata:
+                    auto_block = f"[Memory] Active memories:\n{raw_metadata}"
+            else:
+                auto_block = self._do_auto_recall(query)
 
         # Assemble context
         parts = []

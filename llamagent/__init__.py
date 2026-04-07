@@ -3,7 +3,7 @@ LlamAgent — A modular AI Agent framework.
 
 Core design:
 - core/ provides a standalone base Agent (conversation, LLM calls)
-- modules/ provides 13 pluggable enhanced capabilities (tools, RAG, memory, reasoning, reflection, multi-agent, MCP, safety, skill, sandbox, child agent, job, compression)
+- modules/ provides 13 pluggable enhanced capabilities (tools, retrieval, memory, reasoning, reflection, multi-agent, MCP, safety, skill, sandbox, child agent, job, compression)
 - interfaces/ provides multiple interaction methods (CLI, Web UI, API)
 
 Even without loading any modules, LlamAgent is a fully functional conversational Agent.
@@ -15,7 +15,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "2.1"
+__version__ = "2.2"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager

@@ -2,7 +2,7 @@
 
 ## Overview
 
-LlamAgent is a modular AI Agent framework. The core `LlamAgent` is a standalone chatbot; each pluggable module adds a capability (tools, RAG, memory, reasoning, reflection, multi-agent, MCP, safety, skill, sandbox, child agent, job, compression).
+LlamAgent is a modular AI Agent framework. The core `LlamAgent` is a standalone chatbot; each pluggable module adds a capability (tools, retrieval, memory, reasoning, reflection, multi-agent, MCP, safety, skill, sandbox, child agent, job, compression).
 
 ## Directory Structure
 
@@ -10,7 +10,9 @@ LlamAgent is a modular AI Agent framework. The core `LlamAgent` is a standalone 
 llamagent/                    # Git root
 ├── llamagent/                # Python package (PUBLIC)
 │   ├── core/                 # Agent, Config, LLM, Persona, Runner
-│   ├── modules/              # 13 pluggable modules
+│   ├── modules/              # 13 pluggable modules + shared infrastructure
+│   │   ├── rag/              # Shared retrieval backend (embedding, vector, lexical, pipeline, factory, chunker, retriever)
+│   │   ├── fs_store/         # Shared FS backend (markdown parser, atomic file store)
 │   │   └── job/              # Managed command execution
 │   └── interfaces/           # CLI, Web UI, API server
 ├── examples/                 # Tutorial scripts (PUBLIC)
@@ -49,10 +51,12 @@ llamagent/                    # Git root
 - Streaming (v2.0.2): `chat_stream()` parallel to `chat()`, strategy decides via `execute_stream()` (None = no support)
 - Per-module model (v2.1): `config.module_models` maps module name → model; `register_module()` sets `module.llm` before `on_attach()`
 - Compression module (v2.1): extracted from core; `on_input` side-effect checks token threshold; calls `agent.compress_conversation()`
+- Backend architecture (v2.2): `modules/rag/` = shared RAG backend infra; `modules/retrieval/` = RetrievalModule (pluggable); `modules/fs_store/` = shared FS backend
+- Retrieval/Memory backend switching (v2.2): `config.retrieval_backend` / `config.memory_backend` = `"rag"` or `"fs"`; FS backend uses markdown files with zero external dependencies
 
 ## Testing
 
-- **Public tests** (`tests/`): curated flow tests (public, tracked by git, used by CI) — 74 tests
+- **Public tests** (`tests/`): curated flow tests (public, tracked by git, used by CI) — 87 tests
   - `test_react.py` (2) — ReAct loop flow + weak model degradation
   - `test_pipeline.py` (2) — chat pipeline flow + safety/blocked
   - `test_integration.py` (2) — module integration flow + create_agent
@@ -67,20 +71,20 @@ llamagent/                    # Git root
   - `test_authorization.py` (5) — zone/confirm + scope governance/audit + continuous + config-driven init + apply_update
   - `test_task_mode.py` (8) — controller state machine + data flow + dry-run + happy path + cancel/mode switch + scope matching + session scopes + re-prepare/loop protection
   - `test_cross_module.py` (4) — pack-skill + pack-job + workspace-project + hook/context stacking
-  - `test_v2_features.py` (22) — mode-aware config + abort mechanism + ContinuousRunner/triggers + open_questions + clarification limit + streaming + runner task log + per-module model + compression module
+  - `test_v2_features.py` (35) — v2.0 (mode config, abort, runner, triggers, streaming) + v2.1 (per-module model, compression) + v2.2 (FS parser, FSStore, FSMemoryStore, retrieval/memory backend switching)
   - Run: `llamagent_env/bin/python -m pytest tests/ -v`
-- **Internal tests** (`tests_internal/`): detailed tests (private, gitignored) — 500 mock + 14 real
+- **Internal tests** (`tests_internal/`): detailed tests (private, gitignored) — 512 mock + 14 real
   - v1.1: `test_config.py`, `test_llm_mock.py`, `test_agent_*.py`, `test_persona.py`, `test_step.py`, `test_react_mock.py`, `test_chat_pipeline_mock.py`, `test_integration_mock.py`, `test_plan_react_mock.py`
   - v1.2: `test_sandbox_mock.py`, `test_child_agent_mock.py`
   - v1.8: `test_hooks_mock.py`
   - v1.8.1: `test_web_search_mock.py`
   - v1.8.2: `test_interaction_mock.py`
   - v1.9.0: `test_zone_mock.py`, `test_authorization_mock.py`
-  - v2.0-v2.1: `test_v2_features_mock.py`
+  - v2.0-v2.2: `test_v2_features_mock.py`
   - Real: `test_*_real.py` (require local Ollama qwen3:1.7b)
   - Run all mock: `llamagent_env/bin/python -m pytest tests_internal/test_*_mock.py tests_internal/test_config.py tests_internal/test_agent_*.py tests_internal/test_persona.py tests_internal/test_step.py -v`
 - conftest.py provides: `mock_llm_client`, `bare_agent`, `make_llm_response`, `make_tool_call`, `make_stream_chunks`, `make_stream_tool_call_chunks`
-- **Total: 588 tests** (74 public + 500 internal mock + 14 real)
+- **Total: 613 tests** (87 public + 512 internal mock + 14 real)
 
 ## Version Update Workflow
 

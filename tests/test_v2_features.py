@@ -558,6 +558,192 @@ def test_runner_task_log(bare_agent, mock_llm_client):
 
 
 # ============================================================
+# v2.2: FS Store — parser and store
+# ============================================================
+
+def test_fs_parser_frontmatter_basic():
+    """parse_frontmatter: extract metadata and body from standard markdown."""
+    from llamagent.modules.fs_store.parser import parse_frontmatter
+
+    content = "---\ntitle: Test Doc\ntags: [a, b]\nenabled: true\n---\n\nBody text here."
+    meta, body = parse_frontmatter(content)
+    assert meta["title"] == "Test Doc"
+    assert meta["tags"] == ["a", "b"]
+    assert meta["enabled"] is True
+    assert "Body text here" in body
+
+
+def test_fs_parser_frontmatter_with_dashes_in_value():
+    """parse_frontmatter: --- inside a value must NOT break parsing."""
+    from llamagent.modules.fs_store.parser import parse_frontmatter
+
+    content = "---\ntitle: My --- Document\ndescription: Use --- as separator\n---\n\nBody."
+    meta, body = parse_frontmatter(content)
+    assert meta["title"] == "My --- Document"
+    assert meta["description"] == "Use --- as separator"
+    assert "Body" in body
+
+
+def test_fs_parser_no_frontmatter():
+    """parse_frontmatter: content without frontmatter returns empty dict."""
+    from llamagent.modules.fs_store.parser import parse_frontmatter
+
+    meta, body = parse_frontmatter("Just plain text")
+    assert meta == {}
+    assert "Just plain text" in body
+
+
+def test_fs_parser_sections():
+    """parse_sections: split by ## heading, ignore content before first heading."""
+    from llamagent.modules.fs_store.parser import parse_sections
+
+    content = "# Title\n\nIntro paragraph\n\n## Section A\n\nContent A\n\n## Section B\n\nContent B"
+    sections = parse_sections(content)
+    assert len(sections) == 2
+    assert sections[0]["title"] == "Section A"
+    assert "Content A" in sections[0]["content"]
+    assert sections[1]["title"] == "Section B"
+
+
+def test_fs_store_write_read_delete(tmp_path):
+    """FSStore: write, read, list, delete, clear operations."""
+    from llamagent.modules.fs_store.store import FSStore
+
+    store = FSStore(str(tmp_path / "test_store"))
+    store.write_file("doc.md", "hello world")
+    assert store.read_file("doc.md") == "hello world"
+    assert "doc.md" in store.list_files()
+
+    store.delete_file("doc.md")
+    assert store.read_file("doc.md") is None
+    assert "doc.md" not in store.list_files()
+
+
+# ============================================================
+# v2.2: Memory FS backend
+# ============================================================
+
+def test_fs_memory_save_and_list(tmp_path):
+    """FSMemoryStore: save facts, list metadata, read source."""
+    from llamagent.modules.memory.fs_store import FSMemoryStore
+    from llamagent.modules.memory.fact import MemoryFact
+
+    store = FSMemoryStore(str(tmp_path))
+
+    fact = MemoryFact(
+        fact_id="abc123",
+        kind="preference",
+        subject="user",
+        attribute="style",
+        value="concise",
+        source_text="User said: be concise",
+    )
+    store.save_fact(fact)
+
+    # list_all_metadata should show the fact
+    metadata = store.list_all_metadata()
+    assert "abc123" in metadata
+    assert "preference" in metadata
+    assert "concise" in metadata
+
+    # read_fact_source should return details
+    source = store.read_fact_source("abc123")
+    assert "concise" in source
+    assert "User said" in source
+
+    # Nonexistent fact
+    source_missing = store.read_fact_source("nonexistent")
+    assert "not found" in source_missing.lower()
+
+
+def test_fs_memory_source_text_with_dashes(tmp_path):
+    """FSMemoryStore: source_text containing --- must not corrupt the file."""
+    from llamagent.modules.memory.fs_store import FSMemoryStore
+    from llamagent.modules.memory.fact import MemoryFact
+
+    store = FSMemoryStore(str(tmp_path))
+
+    # First fact: source_text contains ---
+    fact1 = MemoryFact(
+        fact_id="f1",
+        kind="instruction",
+        subject="user",
+        attribute="separator",
+        value="use --- in docs",
+        source_text="The user said:\n---\nUse this as separator\n---",
+    )
+    store.save_fact(fact1)
+
+    # Second fact: normal
+    fact2 = MemoryFact(
+        fact_id="f2",
+        kind="preference",
+        subject="user",
+        attribute="lang",
+        value="python",
+        source_text="User prefers Python",
+    )
+    store.save_fact(fact2)
+
+    # Both facts should be retrievable
+    source1 = store.read_fact_source("f1")
+    assert "---" in source1
+    assert "separator" in source1
+
+    source2 = store.read_fact_source("f2")
+    assert "Python" in source2
+
+    # Metadata listing should show both
+    metadata = store.list_all_metadata()
+    assert "f1" in metadata
+    assert "f2" in metadata
+
+
+def test_fs_memory_update_and_filter(tmp_path):
+    """FSMemoryStore: update status, filter by status, get_facts_by_key."""
+    from llamagent.modules.memory.fs_store import FSMemoryStore
+    from llamagent.modules.memory.fact import MemoryFact
+
+    store = FSMemoryStore(str(tmp_path))
+
+    fact = MemoryFact(
+        fact_id="upd1",
+        kind="project_fact",
+        subject="llamagent",
+        attribute="version",
+        value="2.2",
+        source_text="Version discussion",
+    )
+    store.save_fact(fact)
+
+    # Status update
+    store.update_fact_status("upd1", "superseded")
+    metadata = store.list_all_metadata()  # only active
+    assert "upd1" not in metadata
+
+    # get_facts_by_key
+    matches = store.get_facts_by_key("project_fact", "llamagent", "version")
+    assert len(matches) == 1
+    assert matches[0]["status"] == "superseded"
+
+
+def test_fs_memory_empty_file(tmp_path):
+    """FSMemoryStore: operations on empty/nonexistent file don't crash."""
+    from llamagent.modules.memory.fs_store import FSMemoryStore
+
+    store = FSMemoryStore(str(tmp_path))
+
+    # All operations should work on empty state
+    assert store.list_all_metadata() == ""
+    assert store.read_fact_source("nonexistent") is not None  # returns "not found" message
+    assert store.get_facts_by_key("any", "any", "any") == []
+    assert store.get_stats()["count"] == 0
+
+    # clear on empty should not crash
+    store.clear()
+
+
+# ============================================================
 # v2.1: Per-module model
 # ============================================================
 
@@ -654,3 +840,170 @@ def test_no_compression_module_overflow_clears(bare_agent, mock_llm_client):
     # Should have cleared everything
     assert len(bare_agent.history) == 0
     assert bare_agent.summary is None
+
+
+# ============================================================
+# v2.2 Integration: Retrieval & Memory backend switching
+# ============================================================
+
+
+def test_retrieval_rag_backend(bare_agent, mock_llm_client):
+    """RetrievalModule with RAG backend registers search_knowledge and injects RAG_GUIDE."""
+    from unittest.mock import patch, MagicMock
+    from llamagent.modules.retrieval.module import RetrievalModule, RAG_GUIDE
+
+    bare_agent.config.retrieval_backend = "rag"
+
+    mod = RetrievalModule()
+
+    # Mock the RAG pipeline (chromadb may not be installed)
+    with patch.object(mod, "_build_pipeline", return_value=MagicMock()):
+        bare_agent.register_module(mod)
+
+    # Should register search_knowledge tool
+    assert "search_knowledge" in bare_agent._tools
+    # Should NOT register FS tools
+    assert "list_knowledge" not in bare_agent._tools
+    assert "list_entries" not in bare_agent._tools
+    assert "read_entry" not in bare_agent._tools
+
+    # on_context should inject RAG guide
+    ctx = mod.on_context("some query", "existing context")
+    assert RAG_GUIDE in ctx
+
+
+def test_retrieval_fs_backend(bare_agent, mock_llm_client, tmp_path):
+    """RetrievalModule with FS backend registers 3 FS tools and injects FS_RETRIEVE_GUIDE."""
+    from llamagent.modules.retrieval.module import RetrievalModule, FS_RETRIEVE_GUIDE
+
+    bare_agent.config.retrieval_backend = "fs"
+    bare_agent.config.knowledge_dir = str(tmp_path)
+
+    mod = RetrievalModule()
+    bare_agent.register_module(mod)
+
+    # Should register 3 FS tools
+    assert "list_knowledge" in bare_agent._tools
+    assert "list_entries" in bare_agent._tools
+    assert "read_entry" in bare_agent._tools
+    # Should NOT register RAG tool
+    assert "search_knowledge" not in bare_agent._tools
+
+    # on_context should inject FS guide
+    ctx = mod.on_context("some query", "existing context")
+    assert FS_RETRIEVE_GUIDE in ctx
+
+    # Tool should work — empty knowledge dir returns "No documents found"
+    result = mod._tool_list_knowledge()
+    assert "No documents" in result
+
+    # Add a markdown document and verify list_knowledge finds it
+    doc = tmp_path / "guide.md"
+    doc.write_text("---\ntitle: Test Guide\ndescription: A test doc\n---\n\n## Intro\nHello")
+    result = mod._tool_list_knowledge()
+    assert "Test Guide" in result
+    assert "guide.md" in result
+
+    # list_entries should find the section
+    result = mod._tool_list_entries("guide.md")
+    assert "Intro" in result
+
+    # read_entry should return content
+    result = mod._tool_read_entry("guide.md", "Intro")
+    assert "Hello" in result
+
+
+def test_fs_memory_auto_inject(bare_agent, mock_llm_client, tmp_path):
+    """MemoryModule FS backend + auto read mode injects metadata in on_context."""
+    from llamagent.modules.memory.module import MemoryModule, MEMORY_GUIDE_FS_AUTO
+    from llamagent.modules.memory.fact import MemoryFact
+
+    bare_agent.config.memory_backend = "fs"
+    bare_agent.config.memory_mode = "autonomous"
+    bare_agent.config.memory_recall_mode = "auto"
+    bare_agent.config.memory_fs_dir = str(tmp_path / "memory")
+
+    mod = MemoryModule()
+    bare_agent.register_module(mod)
+
+    assert mod._backend == "fs"
+    assert mod._available is True
+
+    # Save a fact directly via store
+    fact = MemoryFact(
+        fact_id="test001",
+        kind="preference",
+        subject="user",
+        attribute="color",
+        value="blue",
+        source_text="User said they like blue",
+        created_at="2026-01-01T00:00:00",
+        updated_at="2026-01-01T00:00:00",
+    )
+    mod.store.save_fact(fact)
+
+    # on_context should inject guide + metadata
+    ctx = mod.on_context("what color do I like?", "")
+    assert MEMORY_GUIDE_FS_AUTO in ctx
+    assert "[Memory] Active memories:" in ctx
+    assert "test001" in ctx
+    assert "blue" in ctx
+
+
+def test_backend_switch(bare_agent, mock_llm_client, tmp_path):
+    """Different backend config produces different tool sets on the same module type."""
+    from unittest.mock import patch, MagicMock
+    from llamagent.modules.retrieval.module import RetrievalModule
+
+    # --- FS backend ---
+    bare_agent.config.retrieval_backend = "fs"
+    bare_agent.config.knowledge_dir = str(tmp_path)
+
+    mod_fs = RetrievalModule()
+    bare_agent.register_module(mod_fs)
+
+    fs_tools = set(bare_agent._tools.keys())
+    assert "list_knowledge" in fs_tools
+    assert "search_knowledge" not in fs_tools
+
+    # --- Switch to RAG backend on a fresh agent ---
+    from llamagent.core.agent import LlamAgent
+    agent2 = LlamAgent.__new__(LlamAgent)
+    # Copy config with RAG backend
+    agent2.config = bare_agent.config
+    agent2.config.retrieval_backend = "rag"
+    agent2.persona = None
+    agent2.llm = bare_agent.llm
+    agent2._llm_cache = bare_agent._llm_cache
+    agent2.modules = {}
+    agent2.history = []
+    agent2.summary = None
+    agent2.conversation = agent2.history
+    agent2._execution_strategy = bare_agent._execution_strategy
+    agent2.tool_executor = None
+    agent2._tools = {}
+    agent2._active_packs = set()
+    agent2._tools_version = 0
+    agent2._hooks = {}
+    agent2._session_started = False
+    agent2._in_hook = False
+    agent2.mode = "interactive"
+    agent2._controller = None
+    agent2._current_task_id = None
+    agent2._abort = False
+    agent2._open_questions_buffer = []
+    agent2.confirm_handler = None
+    agent2.interaction_handler = None
+    agent2._confirm_wait_time = 0.0
+    agent2.project_dir = bare_agent.project_dir
+    agent2.playground_dir = bare_agent.playground_dir
+    agent2._authorization_engine = bare_agent._authorization_engine
+    agent2._interactive_config = bare_agent._interactive_config
+
+    mod_rag = RetrievalModule()
+    with patch.object(mod_rag, "_build_pipeline", return_value=MagicMock()):
+        agent2.register_module(mod_rag)
+
+    rag_tools = set(agent2._tools.keys())
+    assert "search_knowledge" in rag_tools
+    assert "list_knowledge" not in rag_tools
