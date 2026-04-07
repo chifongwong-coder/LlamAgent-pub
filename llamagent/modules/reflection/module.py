@@ -55,7 +55,7 @@ class ReflectionModule(Module):
 
         # Lesson store: use shared retrieval pipeline via factory
         try:
-            from llamagent.modules.retrieval.factory import create_pipeline
+            from llamagent.modules.rag.factory import create_pipeline
             pipeline = create_pipeline(
                 config=agent.config,
                 collection_name="lessons",

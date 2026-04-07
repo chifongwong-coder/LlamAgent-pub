@@ -95,6 +95,11 @@ _YAML_MAP = [
     (("web", "search_num_results"), "web_search_num_results", int),
     (("authorization", "mode"), "authorization_mode", str),
     (("module_models",), "module_models", dict),
+    (("retrieval_backend",), "retrieval_backend", str),
+    (("memory_backend",), "memory_backend", str),
+    (("fs_data_dir",), "fs_data_dir", str),
+    (("memory_fs_dir",), "memory_fs_dir", str),
+    (("knowledge_dir",), "knowledge_dir", str),
 ]
 
 # Build a set of valid YAML key paths for unknown-key detection
@@ -212,6 +217,13 @@ class Config:
 
         # Per-module model overrides (module_name -> model_name)
         self.module_models: dict[str, str] = {}
+
+        # Backend selection (FS vs RAG)
+        self.retrieval_backend: str = "rag"
+        self.memory_backend: str = "rag"
+        self.fs_data_dir: str = str(BASE_DIR / "data" / "fs")
+        self.memory_fs_dir: str | None = None
+        self.knowledge_dir: str | None = None
 
         # Web
         self.web_search_provider: str = ""  # "" = auto-detect
