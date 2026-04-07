@@ -1,4 +1,4 @@
-"""Lexical (keyword) search backends for the shared retrieval layer."""
+"""Lexical (keyword) search backends for the RAG backend layer."""
 
 import json
 import sqlite3

@@ -1,12 +1,12 @@
 """
 Factory for creating retrieval components from configuration.
 
-Modules (Memory, RAG, Reflection) should use this factory instead of
+Modules (Memory, Retrieval, Reflection) should use this factory instead of
 directly importing concrete implementation classes. This keeps modules
 decoupled from specific backend implementations.
 
 Usage:
-    from llamagent.modules.retrieval.factory import create_pipeline
+    from llamagent.modules.rag.factory import create_pipeline
 
     pipeline = create_pipeline(
         config=agent.config,
@@ -24,11 +24,11 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from llamagent.core.llm import LLMClient
-    from llamagent.modules.retrieval.embedding import EmbeddingProvider
-    from llamagent.modules.retrieval.vector import VectorBackend
-    from llamagent.modules.retrieval.lexical import LexicalBackend
-    from llamagent.modules.retrieval.pipeline import RetrievalPipeline
-    from llamagent.modules.retrieval.reranker import Reranker
+    from llamagent.modules.rag.embedding import EmbeddingProvider
+    from llamagent.modules.rag.vector import VectorBackend
+    from llamagent.modules.rag.lexical import LexicalBackend
+    from llamagent.modules.rag.pipeline import RetrievalPipeline
+    from llamagent.modules.rag.reranker import Reranker
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ def create_embedding(config) -> "EmbeddingProvider":
     provider = getattr(config, "embedding_provider", "chromadb")
 
     if provider == "chromadb":
-        from llamagent.modules.retrieval.embedding import ChromaDefaultEmbedding
+        from llamagent.modules.rag.embedding import ChromaDefaultEmbedding
         return ChromaDefaultEmbedding()
     else:
         raise ValueError(
@@ -71,7 +71,7 @@ def create_vector_backend(config, collection_name: str) -> "VectorBackend":
     persist_dir = getattr(config, "retrieval_persist_dir",
                           getattr(config, "chroma_dir", "data/chroma"))
 
-    from llamagent.modules.retrieval.vector import ChromaVectorBackend
+    from llamagent.modules.rag.vector import ChromaVectorBackend
     return ChromaVectorBackend(persist_dir=persist_dir, collection_name=collection_name)
 
 
@@ -91,7 +91,7 @@ def create_lexical_backend(config, name: str) -> "LexicalBackend":
     os.makedirs(persist_dir, exist_ok=True)
     db_path = os.path.join(persist_dir, f"{name}.db")
 
-    from llamagent.modules.retrieval.lexical import SQLiteFTSBackend
+    from llamagent.modules.rag.lexical import SQLiteFTSBackend
     return SQLiteFTSBackend(db_path=db_path)
 
 
@@ -109,7 +109,7 @@ def create_reranker(config, llm: "LLMClient | None" = None) -> "Reranker | None"
     if not enabled or llm is None:
         return None
 
-    from llamagent.modules.retrieval.reranker import LLMReranker
+    from llamagent.modules.rag.reranker import LLMReranker
     return LLMReranker(llm)
 
 
@@ -141,7 +141,7 @@ def create_pipeline(
     Raises:
         ImportError: If required backends are not installed.
     """
-    from llamagent.modules.retrieval.pipeline import RetrievalPipeline
+    from llamagent.modules.rag.pipeline import RetrievalPipeline
 
     embedding = create_embedding(config)
     vector = create_vector_backend(config, collection_name)

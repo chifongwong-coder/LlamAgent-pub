@@ -10,7 +10,7 @@ Usage:
     python -m llamagent                                    # Default CLI interactive chat
     python -m llamagent --mode web                         # Launch Web UI
     python -m llamagent --mode api                         # Launch HTTP API server
-    python -m llamagent --modules tools,rag,memory         # Specify modules to load
+    python -m llamagent --modules tools,retrieval,memory    # Specify modules to load
     python -m llamagent --no-modules                       # Load no modules (pure chat mode)
     python -m llamagent --persona CodeLlama                # Specify persona
     python -m llamagent --port 9000                        # Specify port (Web/API)
@@ -38,7 +38,7 @@ AVAILABLE_MODULES = {
     "sandbox": "llamagent.modules.sandbox.SandboxModule",       # Before job (provides tool_executor)
     "tools": "llamagent.modules.tools.ToolsModule",             # Before skill (pack reset)
     "job": "llamagent.modules.job.JobModule",                   # After sandbox (hard dependency)
-    "rag": "llamagent.modules.rag.RAGModule",
+    "retrieval": "llamagent.modules.retrieval.RetrievalModule",
     "memory": "llamagent.modules.memory.MemoryModule",
     "skill": "llamagent.modules.skill.SkillModule",             # After tools (pack activation)
     "reflection": "llamagent.modules.reflection.ReflectionModule",
@@ -57,7 +57,7 @@ def load_module(name: str):
     so missing optional dependencies won't cause errors.
 
     Args:
-        name: Module name (e.g., "tools", "rag")
+        name: Module name (e.g., "tools", "retrieval")
 
     Returns:
         Module instance, or None if loading fails
@@ -167,7 +167,7 @@ Examples:
   python -m llamagent                                  CLI interactive chat
   python -m llamagent --mode web                       Launch Web UI
   python -m llamagent --mode api                       Launch HTTP API
-  python -m llamagent --modules tools,rag              Load only tools and RAG
+  python -m llamagent --modules tools,retrieval         Load only tools and retrieval
   python -m llamagent --no-modules                     Pure chat mode
   python -m llamagent --persona CodeLlama              Use a specific persona
   python -m llamagent --mode web --port 9000           Specify port
@@ -184,7 +184,7 @@ Examples:
     # Module selection
     parser.add_argument(
         "--modules", type=str, default=None,
-        help="Comma-separated list of modules, e.g.: tools,rag,memory",
+        help="Comma-separated list of modules, e.g.: tools,retrieval,memory",
     )
     parser.add_argument(
         "--no-modules", action="store_true",

@@ -53,7 +53,7 @@ agent.register_module(PlanningModule())   # DAG-based task decomposition
 |--------|-------------|
 | **Tools** | Read, write, search files. Workspace isolation with project sync and changeset tracking. |
 | **Memory** | Structured fact memory — extract, deduplicate, resolve conflicts, auto-recall. Read/write decoupling. |
-| **RAG** | Load documents (code, markdown, text), hybrid search (vector + BM25), LLM reranking. |
+| **Retrieval** | Load documents (code, markdown, text), hybrid search (vector + BM25), LLM reranking. |
 | **Job** | Run shell commands (sync/async) via sandbox. Inspect, wait, cancel running jobs. |
 | **Skill** | Task-level playbook injection. Tag matching, LLM fallback, dynamic tool pack activation. |
 | **Reasoning** | SimpleReAct for quick tasks. PlanReAct with DAG decomposition for complex multi-step work. |
@@ -98,7 +98,7 @@ cp llamagent.yaml.example llamagent.yaml
 
 ```bash
 python -m llamagent                          # Interactive CLI
-python -m llamagent --modules tools,rag      # Specific modules only
+python -m llamagent --modules tools,retrieval # Specific modules only
 python -m llamagent --mode web               # Gradio Web UI
 python -m llamagent --mode api               # FastAPI server
 python -m llamagent --config prod.yaml       # Custom config file
@@ -203,10 +203,10 @@ See [`examples/`](examples/) for runnable tutorials:
 llamagent/
 ├── core/              Agent, Config, LLM, Persona, Hooks, Authorization
 ├── modules/
-│   ├── retrieval/     Shared search infrastructure (embedding, vector, lexical)
+│   ├── rag/           RAG backend (embedding, vector, lexical, chunker, retriever)
 │   ├── tools/         Workspace tools + project sync + pack system
 │   ├── memory/        Structured fact memory
-│   ├── rag/           Document loading + hybrid retrieval
+│   ├── retrieval/     Knowledge retrieval module (uses RAG backend)
 │   ├── job/           Command execution lifecycle
 │   ├── skill/         Playbook injection + pack triggering
 │   ├── reasoning/     ReAct + PlanReAct strategies

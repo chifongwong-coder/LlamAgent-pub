@@ -1,4 +1,4 @@
-"""Embedding providers for the shared retrieval layer."""
+"""Embedding providers for the RAG backend layer."""
 
 from abc import ABC, abstractmethod
 

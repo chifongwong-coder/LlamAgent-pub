@@ -1,4 +1,4 @@
-"""Vector storage backends for the shared retrieval layer."""
+"""Vector storage backends for the RAG backend layer."""
 
 from abc import ABC, abstractmethod
 

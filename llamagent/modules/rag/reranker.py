@@ -1,4 +1,4 @@
-"""Reranking strategies for the shared retrieval layer."""
+"""Reranking strategies for the RAG backend layer."""
 
 import logging
 from abc import ABC, abstractmethod
