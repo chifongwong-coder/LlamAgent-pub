@@ -81,8 +81,11 @@ _YAML_MAP = [
     (("persona", "file"), "persona_file", str),
     (("tools", "agent_tools_dir"), "agent_tools_dir", str),
     (("planning", "max_plan_adjustments"), "max_plan_adjustments", int),
-    (("reflection", "enabled"), "reflection_enabled", bool),
+    (("reflection", "write_mode"), "reflection_write_mode", str),
+    (("reflection", "read_mode"), "reflection_read_mode", str),
     (("reflection", "score_threshold"), "reflection_score_threshold", float),
+    (("reflection_backend",), "reflection_backend", str),
+    (("reflection_fs_dir",), "reflection_fs_dir", str),
     (("safety", "permission_level"), "permission_level", int),
     (("skill", "dirs"), "skill_dirs", list),
     (("skill", "max_active"), "skill_max_active", int),
@@ -189,7 +192,10 @@ class Config:
         self.max_plan_adjustments: int = 7
 
         # Reflection
-        self.reflection_enabled: bool = False
+        self.reflection_write_mode: str = "off"
+        self.reflection_read_mode: str = "off"
+        self.reflection_backend: str = "rag"
+        self.reflection_fs_dir: str | None = None
         self.reflection_score_threshold: float = 7.0
 
         # Safety
@@ -485,6 +491,41 @@ class Config:
                 self.memory_recall_mode,
             )
             self.memory_recall_mode = "tool"
+
+        if self.retrieval_backend not in ("rag", "fs"):
+            logger.warning(
+                "retrieval_backend='%s' is invalid, falling back to 'rag'",
+                self.retrieval_backend,
+            )
+            self.retrieval_backend = "rag"
+
+        if self.memory_backend not in ("rag", "fs"):
+            logger.warning(
+                "memory_backend='%s' is invalid, falling back to 'rag'",
+                self.memory_backend,
+            )
+            self.memory_backend = "rag"
+
+        if self.reflection_write_mode not in ("off", "auto"):
+            logger.warning(
+                "reflection_write_mode='%s' is invalid, falling back to 'off'",
+                self.reflection_write_mode,
+            )
+            self.reflection_write_mode = "off"
+
+        if self.reflection_read_mode not in ("off", "tool", "auto"):
+            logger.warning(
+                "reflection_read_mode='%s' is invalid, falling back to 'off'",
+                self.reflection_read_mode,
+            )
+            self.reflection_read_mode = "off"
+
+        if self.reflection_backend not in ("rag", "fs"):
+            logger.warning(
+                "reflection_backend='%s' is invalid, falling back to 'rag'",
+                self.reflection_backend,
+            )
+            self.reflection_backend = "rag"
 
         # Backward compatibility alias
         self.chroma_dir = self.retrieval_persist_dir

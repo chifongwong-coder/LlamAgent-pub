@@ -188,12 +188,16 @@ class FSMemoryStore:
 
     def save_fact(self, fact: MemoryFact) -> None:
         """Append a new fact section to memories.md."""
+        # Sanitize newlines in text fields to prevent metadata line corruption
+        def _clean(text: str) -> str:
+            return text.replace("\n", " ") if text else text
+
         meta = {
             "fact_id": fact.fact_id,
             "kind": fact.kind,
-            "subject": fact.subject,
-            "attribute": fact.attribute,
-            "value": fact.value,
+            "subject": _clean(fact.subject),
+            "attribute": _clean(fact.attribute),
+            "value": _clean(fact.value),
             "confidence": str(fact.confidence),
             "status": fact.status,
             "strength": str(fact.strength),
