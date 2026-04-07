@@ -53,10 +53,11 @@ llamagent/                    # Git root
 - Compression module (v2.1): extracted from core; `on_input` side-effect checks token threshold; calls `agent.compress_conversation()`
 - Backend architecture (v2.2): `modules/rag/` = shared RAG backend infra; `modules/retrieval/` = RetrievalModule (pluggable); `modules/fs_store/` = shared FS backend
 - Retrieval/Memory backend switching (v2.2): `config.retrieval_backend` / `config.memory_backend` = `"rag"` or `"fs"`; FS backend uses markdown files with zero external dependencies
+- Reflection read/write mode decoupling (v2.3): `reflection_write_mode` (off/auto) + `reflection_read_mode` (off/tool/auto) + `reflection_backend` (rag/fs); 6 guide variants; 3 tools (list_lessons/read_lesson/delete_lesson)
 
 ## Testing
 
-- **Public tests** (`tests/`): curated flow tests (public, tracked by git, used by CI) — 87 tests
+- **Public tests** (`tests/`): curated flow tests (public, tracked by git, used by CI) — 92 tests
   - `test_react.py` (2) — ReAct loop flow + weak model degradation
   - `test_pipeline.py` (2) — chat pipeline flow + safety/blocked
   - `test_integration.py` (2) — module integration flow + create_agent
@@ -71,20 +72,20 @@ llamagent/                    # Git root
   - `test_authorization.py` (5) — zone/confirm + scope governance/audit + continuous + config-driven init + apply_update
   - `test_task_mode.py` (8) — controller state machine + data flow + dry-run + happy path + cancel/mode switch + scope matching + session scopes + re-prepare/loop protection
   - `test_cross_module.py` (4) — pack-skill + pack-job + workspace-project + hook/context stacking
-  - `test_v2_features.py` (35) — v2.0 (mode config, abort, runner, triggers, streaming) + v2.1 (per-module model, compression) + v2.2 (FS parser, FSStore, FSMemoryStore, retrieval/memory backend switching)
+  - `test_v2_features.py` (40) — v2.0 (mode config, abort, runner, triggers, streaming) + v2.1 (per-module model, compression) + v2.2 (FS parser, FSStore, FSMemoryStore, retrieval/memory backend switching) + v2.3 (reflection mode/FS/tools)
   - Run: `llamagent_env/bin/python -m pytest tests/ -v`
-- **Internal tests** (`tests_internal/`): detailed tests (private, gitignored) — 512 mock + 14 real
+- **Internal tests** (`tests_internal/`): detailed tests (private, gitignored) — 521 mock + 14 real
   - v1.1: `test_config.py`, `test_llm_mock.py`, `test_agent_*.py`, `test_persona.py`, `test_step.py`, `test_react_mock.py`, `test_chat_pipeline_mock.py`, `test_integration_mock.py`, `test_plan_react_mock.py`
   - v1.2: `test_sandbox_mock.py`, `test_child_agent_mock.py`
   - v1.8: `test_hooks_mock.py`
   - v1.8.1: `test_web_search_mock.py`
   - v1.8.2: `test_interaction_mock.py`
   - v1.9.0: `test_zone_mock.py`, `test_authorization_mock.py`
-  - v2.0-v2.2: `test_v2_features_mock.py`
+  - v2.0-v2.3: `test_v2_features_mock.py`
   - Real: `test_*_real.py` (require local Ollama qwen3:1.7b)
   - Run all mock: `llamagent_env/bin/python -m pytest tests_internal/test_*_mock.py tests_internal/test_config.py tests_internal/test_agent_*.py tests_internal/test_persona.py tests_internal/test_step.py -v`
 - conftest.py provides: `mock_llm_client`, `bare_agent`, `make_llm_response`, `make_tool_call`, `make_stream_chunks`, `make_stream_tool_call_chunks`
-- **Total: 613 tests** (87 public + 512 internal mock + 14 real)
+- **Total: 627 tests** (92 public + 521 internal mock + 14 real)
 
 ## Version Update Workflow
 

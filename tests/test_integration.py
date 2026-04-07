@@ -25,7 +25,8 @@ def _create_test_agent(mock_llm_client):
     config.max_observation_tokens = 2000
     config.max_context_tokens = 8192
     config.memory_mode = "off"
-    config.reflection_enabled = False
+    config.reflection_write_mode = "off"
+    config.reflection_read_mode = "off"
     config.reflection_score_threshold = 7.0
     config.max_plan_adjustments = 7
     config.permission_level = 1
