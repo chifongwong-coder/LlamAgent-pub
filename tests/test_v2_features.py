@@ -1007,3 +1007,187 @@ def test_backend_switch(bare_agent, mock_llm_client, tmp_path):
     rag_tools = set(agent2._tools.keys())
     assert "search_knowledge" in rag_tools
     assert "list_knowledge" not in rag_tools
+
+
+# ============================================================
+# v2.3: Reflection — FSLessonStore
+# ============================================================
+
+
+def test_fs_lesson_save_and_search(tmp_path):
+    """FSLessonStore: save a lesson, search by keyword, verify correct fields."""
+    from llamagent.modules.reflection.fs_store import FSLessonStore
+
+    store = FSLessonStore(str(tmp_path))
+
+    store.save_lesson(
+        task="API timeout handling",
+        error_description="timeout without retry",
+        root_cause="no retry mechanism",
+        improvement="add exponential backoff",
+        tags=["incomplete"],
+    )
+
+    results = store.search_lessons("timeout")
+    assert len(results) >= 1
+
+    lesson = results[0]
+    assert "lesson_id" in lesson
+    assert lesson["task"] == "API timeout handling"
+    assert lesson["error_description"] == "timeout without retry"
+    assert lesson["root_cause"] == "no retry mechanism"
+    assert lesson["improvement"] == "add exponential backoff"
+    assert "incomplete" in lesson["tags"]
+    assert "relevance_score" in lesson
+
+
+def test_fs_lesson_delete(tmp_path):
+    """FSLessonStore: save a lesson, delete it, verify search returns nothing."""
+    from llamagent.modules.reflection.fs_store import FSLessonStore
+
+    store = FSLessonStore(str(tmp_path))
+
+    store.save_lesson(
+        task="debug segfault",
+        error_description="crash on startup",
+        root_cause="null pointer dereference",
+        improvement="add null check",
+        tags=["bug"],
+    )
+
+    # Find the lesson to get its id
+    results = store.search_lessons("segfault")
+    assert len(results) == 1
+    lesson_id = results[0]["lesson_id"]
+
+    # Delete should succeed
+    assert store.delete_lesson(lesson_id) is True
+
+    # Search should now return empty
+    results = store.search_lessons("segfault")
+    assert len(results) == 0
+
+    # Deleting non-existent lesson should return False
+    assert store.delete_lesson("nonexistent_id") is False
+
+
+def test_fs_lesson_formatted(tmp_path):
+    """FSLessonStore: search_lessons_formatted output includes lesson_id and tags."""
+    from llamagent.modules.reflection.fs_store import FSLessonStore
+
+    store = FSLessonStore(str(tmp_path))
+
+    # Lesson with improvement
+    store.save_lesson(
+        task="API timeout handling",
+        error_description="timeout without retry",
+        root_cause="no retry mechanism",
+        improvement="add exponential backoff",
+        tags=["incomplete"],
+    )
+
+    # Lesson without improvement
+    store.save_lesson(
+        task="API connection error",
+        error_description="connection refused",
+        root_cause="wrong port number",
+        improvement="",
+        tags=["resolved"],
+    )
+
+    formatted = store.search_lessons_formatted("API")
+    assert formatted  # non-empty string
+
+    # Should contain lesson_id markers
+    assert "[" in formatted  # lesson_id in brackets
+
+    # Lesson with improvement should show the improvement text
+    assert "exponential backoff" in formatted
+
+    # Lesson without improvement should show root_cause + no improvement message
+    assert "wrong port number" in formatted
+    assert "no improvement" in formatted.lower()
+
+
+# ============================================================
+# v2.3: Reflection — Tool Registration
+# ============================================================
+
+
+def test_reflection_tool_registration(bare_agent, tmp_path):
+    """ReflectionModule: different mode combinations produce different tool sets."""
+    from llamagent.modules.reflection import ReflectionModule
+
+    # Test 1: write=off, read=off -> no tools
+    bare_agent.config.reflection_write_mode = "off"
+    bare_agent.config.reflection_read_mode = "off"
+    bare_agent.config.reflection_backend = "fs"
+    bare_agent.config.reflection_fs_dir = str(tmp_path / "t1")
+
+    mod1 = ReflectionModule()
+    bare_agent.register_module(mod1)
+
+    assert "list_lessons" not in bare_agent._tools
+    assert "read_lesson" not in bare_agent._tools
+    assert "delete_lesson" not in bare_agent._tools
+
+    # Clean up for next test
+    bare_agent.modules.pop("reflection", None)
+
+    # Test 2: write=off, read=tool -> list_lessons + read_lesson, NO delete_lesson
+    bare_agent.config.reflection_write_mode = "off"
+    bare_agent.config.reflection_read_mode = "tool"
+    bare_agent.config.reflection_fs_dir = str(tmp_path / "t2")
+
+    mod2 = ReflectionModule()
+    bare_agent.register_module(mod2)
+
+    assert "list_lessons" in bare_agent._tools
+    assert "read_lesson" in bare_agent._tools
+    assert "delete_lesson" not in bare_agent._tools
+
+    # Clean up for next test
+    bare_agent.modules.pop("reflection", None)
+    bare_agent._tools.pop("list_lessons", None)
+    bare_agent._tools.pop("read_lesson", None)
+
+    # Test 3: write=auto, read=tool -> list_lessons + read_lesson + delete_lesson
+    bare_agent.config.reflection_write_mode = "auto"
+    bare_agent.config.reflection_read_mode = "tool"
+    bare_agent.config.reflection_fs_dir = str(tmp_path / "t3")
+
+    mod3 = ReflectionModule()
+    bare_agent.register_module(mod3)
+
+    assert "list_lessons" in bare_agent._tools
+    assert "read_lesson" in bare_agent._tools
+    assert "delete_lesson" in bare_agent._tools
+
+
+# ============================================================
+# v2.3: Reflection — Backend Switch
+# ============================================================
+
+
+def test_reflection_backend_switch(bare_agent, tmp_path):
+    """ReflectionModule: FS backend initializes FSLessonStore and registers tools."""
+    from llamagent.modules.reflection import ReflectionModule
+    from llamagent.modules.reflection.fs_store import FSLessonStore
+
+    bare_agent.config.reflection_backend = "fs"
+    bare_agent.config.reflection_fs_dir = str(tmp_path / "lessons")
+    bare_agent.config.reflection_write_mode = "auto"
+    bare_agent.config.reflection_read_mode = "tool"
+
+    mod = ReflectionModule()
+    bare_agent.register_module(mod)
+
+    # lesson_store should be FSLessonStore (has read_lesson method)
+    assert mod.lesson_store is not None
+    assert isinstance(mod.lesson_store, FSLessonStore)
+    assert hasattr(mod.lesson_store, "read_lesson")
+
+    # Tools should be registered
+    assert "list_lessons" in bare_agent._tools
+    assert "read_lesson" in bare_agent._tools
+    assert "delete_lesson" in bare_agent._tools

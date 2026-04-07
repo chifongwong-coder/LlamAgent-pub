@@ -33,7 +33,7 @@ def _make_config(**overrides):
         max_plan_adjustments=7,
         max_react_steps=10,
         react_timeout=210.0,
-        reflection_enabled=False,
+        reflection_write_mode="off",
         reflection_score_threshold=7.0,
     )
     defaults.update(overrides)
@@ -221,7 +221,7 @@ class TestQualityEvaluation:
             "strengths": ["thorough"],
             "weaknesses": [],
         }
-        config = _make_config(reflection_enabled=True, reflection_score_threshold=7.0)
+        config = _make_config(reflection_write_mode="auto", reflection_score_threshold=7.0)
         strategy = _make_plan_react(mock_llm_client, config,
                                      reflection_engine=mock_reflection)
         mock_llm_client.set_responses([
@@ -245,7 +245,7 @@ class TestQualityEvaluation:
             "score": 3.0, "weaknesses": ["not detailed enough"],
         }
         config2 = _make_config(
-            reflection_enabled=True,
+            reflection_write_mode="auto",
             reflection_score_threshold=7.0,
             max_plan_adjustments=3,
         )

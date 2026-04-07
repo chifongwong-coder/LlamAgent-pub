@@ -283,7 +283,8 @@ class ChildAgentModule(Module):
         config.max_duplicate_actions = 2
         config.max_observation_tokens = 1500
         config.memory_mode = "off"
-        config.reflection_enabled = False
+        config.reflection_write_mode = "off"
+        config.reflection_read_mode = "off"
         config.max_plan_adjustments = 3
         config.permission_level = 1
 

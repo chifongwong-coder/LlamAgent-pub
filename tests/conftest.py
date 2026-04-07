@@ -202,7 +202,10 @@ def bare_agent(mock_llm_client):
     config.rag_rerank_enabled = False
     config.chroma_dir = "/tmp/llamagent_test_retrieval"
     config.api_retry_count = 0
-    config.reflection_enabled = False
+    config.reflection_write_mode = "off"
+    config.reflection_read_mode = "off"
+    config.reflection_backend = "rag"
+    config.reflection_fs_dir = None
     config.reflection_score_threshold = 7.0
     config.max_plan_adjustments = 7
     config.permission_level = 1
