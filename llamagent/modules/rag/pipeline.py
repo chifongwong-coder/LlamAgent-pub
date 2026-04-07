@@ -5,10 +5,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from llamagent.modules.retrieval.embedding import EmbeddingProvider
-    from llamagent.modules.retrieval.lexical import LexicalBackend
-    from llamagent.modules.retrieval.reranker import Reranker
-    from llamagent.modules.retrieval.vector import VectorBackend
+    from llamagent.modules.rag.embedding import EmbeddingProvider
+    from llamagent.modules.rag.lexical import LexicalBackend
+    from llamagent.modules.rag.reranker import Reranker
+    from llamagent.modules.rag.vector import VectorBackend
 
 
 class RetrievalPipeline:

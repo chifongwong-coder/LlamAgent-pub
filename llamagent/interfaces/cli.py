@@ -14,7 +14,7 @@ Usage:
     python -m llamagent                                     # Interactive setup + chat
     python -m llamagent.interfaces.cli                      # Same as above
     python -m llamagent.interfaces.cli ask "How's the weather today"  # Single question
-    python -m llamagent.interfaces.cli --modules tools,rag  # Skip setup, specify modules
+    python -m llamagent.interfaces.cli --modules tools,retrieval  # Skip setup, specify modules
     python -m llamagent.interfaces.cli --no-modules         # Skip setup, pure chat mode
 """
 
@@ -128,7 +128,7 @@ MODULE_GROUPS = {
         ("reflection", "Quality evaluation + lesson learning"),
     ],
     "Knowledge": [
-        ("rag", "RAG semantic search over documents"),
+        ("retrieval", "Knowledge retrieval over documents"),
         ("memory", "Persistent memory with semantic recall"),
     ],
     "Collaboration": [
@@ -715,7 +715,7 @@ def _create_parser() -> argparse.ArgumentParser:
 Examples:
   python -m llamagent.interfaces.cli                      Interactive setup + chat
   python -m llamagent.interfaces.cli ask "How's the weather"  Single question
-  python -m llamagent.interfaces.cli --modules tools,rag   Skip setup, load specific modules
+  python -m llamagent.interfaces.cli --modules tools,retrieval   Skip setup, load specific modules
   python -m llamagent.interfaces.cli --no-modules          Skip setup, pure chat mode
         """,
     )

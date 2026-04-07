@@ -1,35 +1,16 @@
 """
-Shared retrieval infrastructure for Memory, RAG, and Reflection modules.
+Retrieval Module: knowledge retrieval over documents from the knowledge base.
 
-This is a service package, NOT a pluggable Module. It provides:
-- EmbeddingProvider: abstract embedding computation
-- VectorBackend: abstract vector storage and retrieval
-- LexicalBackend: abstract keyword search (BM25 via SQLite FTS5)
-- RetrievalPipeline: hybrid search orchestration (vector + lexical + rerank)
-- Reranker: abstract result reranking
-- Factory functions: create_pipeline, create_embedding, etc.
-
-Modules should use the factory functions (not concrete classes) to create
-retrieval components. This keeps modules decoupled from specific backends.
+Supports two backends selected via config.retrieval_backend:
+- RAG (default): vector/lexical/hybrid search via llamagent.modules.rag
+- FS: file-system based document browsing via llamagent.modules.fs_store
 
 Usage:
-    from llamagent.modules.retrieval.factory import create_pipeline
+    from llamagent.modules.retrieval import RetrievalModule
 
-    pipeline = create_pipeline(config=agent.config, collection_name="my_collection")
+    agent.register_module(RetrievalModule())
 """
 
-# Abstract interfaces (for type hints and isinstance checks)
-from llamagent.modules.retrieval.embedding import EmbeddingProvider
-from llamagent.modules.retrieval.vector import VectorBackend
-from llamagent.modules.retrieval.lexical import LexicalBackend
-from llamagent.modules.retrieval.pipeline import RetrievalPipeline
-from llamagent.modules.retrieval.reranker import Reranker
+from llamagent.modules.retrieval.module import RetrievalModule
 
-# Factory functions (primary entry point for modules)
-from llamagent.modules.retrieval.factory import (
-    create_pipeline,
-    create_embedding,
-    create_vector_backend,
-    create_lexical_backend,
-    create_reranker,
-)
+__all__ = ["RetrievalModule"]

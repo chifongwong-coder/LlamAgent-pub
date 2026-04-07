@@ -9,7 +9,7 @@ Endpoints:
     POST /chat       — Chat
     GET  /status     — Health check
     GET  /modules    — Module list
-    POST /upload     — Upload files to RAG
+    POST /upload     — Upload files to knowledge base
     WS   /ws/chat    — WebSocket streaming chat
 
 Usage:
@@ -274,7 +274,7 @@ def create_api_server(
             "- POST /chat — Chat\n"
             "- GET /status — Agent status\n"
             "- GET /modules — Module list\n"
-            "- POST /upload — Upload files to RAG\n"
+            "- POST /upload — Upload files to knowledge base\n"
             "- POST /mode — Switch agent mode\n"
             "- GET /mode — Get current mode\n"
             "- POST /abort — Abort current task\n"
@@ -575,7 +575,7 @@ def create_api_server(
         "/upload",
         response_model=UploadResponse,
         tags=["Knowledge Base"],
-        summary="Upload files to RAG knowledge base",
+        summary="Upload files to knowledge base",
         description="Upload .txt / .md / .pdf files to add to the knowledge base for retrieval during conversations.",
     )
     async def upload_file(
@@ -585,12 +585,12 @@ def create_api_server(
         """Handle file uploads."""
         agent = _get_agent()
 
-        if not agent.has_module("rag"):
+        if not agent.has_module("retrieval"):
             raise HTTPException(
                 status_code=400,
                 detail={
-                    "error": "rag_not_loaded",
-                    "message": "RAG module is not loaded, cannot process file uploads",
+                    "error": "retrieval_not_loaded",
+                    "message": "Retrieval module is not loaded, cannot process file uploads",
                 }
             )
 
@@ -608,9 +608,8 @@ def create_api_server(
                     tmp.write(content)
                     tmp_path = tmp.name
 
-                rag_module = agent.get_module("rag")
-                if hasattr(rag_module, 'load_documents'):
-                    await asyncio.to_thread(rag_module.load_documents, tmp_path)
+                retrieval_module = agent.get_module("retrieval")
+                await asyncio.to_thread(retrieval_module.load_documents, tmp_path)
 
                 processed += 1
 

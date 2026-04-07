@@ -30,7 +30,7 @@ MODULE_OPTIONS = [
     ("sandbox", "Sandbox — Isolated execution for high-risk tools"),
     ("planning", "Planning — PlanReAct task decomposition"),
     ("reflection", "Reflection — Quality evaluation + lessons"),
-    ("rag", "RAG — Semantic search over documents"),
+    ("retrieval", "Retrieval — Knowledge retrieval over documents"),
     ("memory", "Memory — Persistent memory with recall"),
     ("multi_agent", "Multi-Agent — Role-based delegation"),
     ("child_agent", "Child Agent — Constrained sub-agents"),
@@ -255,26 +255,23 @@ def create_web_ui() -> "gr.Blocks":
         return [], ""
 
     def upload_handler(files):
-        """Handle document uploads for RAG."""
+        """Handle document uploads for knowledge base."""
         agent = current_agent.get("agent")
         if not agent:
             return "Please build an agent first."
         if not files:
             return "No files selected."
-        if not agent.has_module("rag"):
-            return "RAG module is not loaded."
+        if not agent.has_module("retrieval"):
+            return "Retrieval module is not loaded."
 
         results = []
         for file in files:
             try:
                 file_path = file.name if hasattr(file, 'name') else str(file)
                 filename = os.path.basename(file_path)
-                rag_module = agent.get_module("rag")
-                if hasattr(rag_module, 'load_documents'):
-                    count = rag_module.load_documents(file_path)
-                    results.append(f"OK: {filename} ({count} chunks)")
-                else:
-                    results.append(f"OK: {filename}")
+                retrieval_module = agent.get_module("retrieval")
+                count = retrieval_module.load_documents(file_path)
+                results.append(f"OK: {filename} ({count} chunks)")
             except Exception as e:
                 results.append(f"Failed: {os.path.basename(str(file))} ({e})")
 
@@ -475,7 +472,7 @@ def create_web_ui() -> "gr.Blocks":
             runner_status = gr.Textbox(label="Runner Status", interactive=False, lines=1)
 
         # Document upload
-        with gr.Accordion("Document Upload (RAG)", open=False):
+        with gr.Accordion("Document Upload (Retrieval)", open=False):
             with gr.Row():
                 file_upload = gr.File(
                     label="Select Files",
