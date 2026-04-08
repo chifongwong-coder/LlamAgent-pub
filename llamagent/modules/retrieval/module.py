@@ -266,6 +266,8 @@ class RetrievalModule(Module):
             tags = metadata.get("tags", [])
             if isinstance(tags, list):
                 tags_str = ", ".join(str(t) for t in tags)
+            elif tags is None:
+                tags_str = ""
             else:
                 tags_str = str(tags)
 
