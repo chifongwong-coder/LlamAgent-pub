@@ -3,7 +3,7 @@ LlamAgent — A modular AI Agent framework.
 
 Core design:
 - core/ provides a standalone base Agent (conversation, LLM calls)
-- modules/ provides 13 pluggable enhanced capabilities (tools, retrieval, memory, reasoning, reflection, multi-agent, MCP, safety, skill, sandbox, child agent, job, compression)
+- modules/ provides 14 pluggable enhanced capabilities (tools, retrieval, memory, reasoning, reflection, multi-agent, MCP, safety, skill, sandbox, child agent, job, compression, persistence)
 - interfaces/ provides multiple interaction methods (CLI, Web UI, API)
 
 Even without loading any modules, LlamAgent is a fully functional conversational Agent.
