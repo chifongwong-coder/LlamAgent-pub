@@ -1191,3 +1191,160 @@ def test_reflection_backend_switch(bare_agent, tmp_path):
     assert "list_lessons" in bare_agent._tools
     assert "read_lesson" in bare_agent._tools
     assert "delete_lesson" in bare_agent._tools
+
+
+# ============================================================
+# v2.3.1: Persistence module
+# ============================================================
+
+
+def test_persistence_save_and_restore(bare_agent, mock_llm_client, tmp_path):
+    """Save history+summary via on_output, then restore on a new agent via auto_restore."""
+    from llamagent.modules.persistence import PersistenceModule
+
+    # --- First agent: save ---
+    bare_agent.config.persistence_enabled = True
+    bare_agent.config.persistence_auto_restore = True
+    bare_agent.config.persistence_dir = str(tmp_path / "sessions")
+
+    mod1 = PersistenceModule()
+    bare_agent.register_module(mod1)
+
+    # Simulate a conversation
+    bare_agent.history.append({"role": "user", "content": "hello"})
+    bare_agent.history.append({"role": "assistant", "content": "Hi! How can I help?"})
+    bare_agent.summary = "Previous conversation about greetings"
+
+    # Trigger save via on_output
+    mod1.on_output("Hi! How can I help?")
+
+    # --- Second agent: restore ---
+    agent2 = LlamAgent.__new__(LlamAgent)
+    agent2.config = bare_agent.config  # same config (same persistence_dir)
+    agent2.persona = None
+    agent2.llm = mock_llm_client
+    agent2._llm_cache = {bare_agent.config.model: mock_llm_client}
+    agent2.modules = {}
+    agent2.history = []
+    agent2.summary = None
+    agent2.conversation = agent2.history
+    agent2._execution_strategy = bare_agent._execution_strategy
+    agent2.tool_executor = None
+    agent2._tools = {}
+    agent2._active_packs = set()
+    agent2._tools_version = 0
+    agent2._hooks = {}
+    agent2._session_started = False
+    agent2._in_hook = False
+    agent2.mode = "interactive"
+    agent2._controller = None
+    agent2._current_task_id = None
+    agent2._abort = False
+    agent2._open_questions_buffer = []
+    agent2.confirm_handler = None
+    agent2.interaction_handler = None
+    agent2._confirm_wait_time = 0.0
+    agent2.project_dir = bare_agent.project_dir
+    agent2.playground_dir = bare_agent.playground_dir
+    agent2._authorization_engine = bare_agent._authorization_engine
+    agent2._interactive_config = bare_agent._interactive_config
+
+    mod2 = PersistenceModule()
+    agent2.register_module(mod2)  # auto_restore=True should load
+
+    # Verify restored state
+    assert len(agent2.history) == 2
+    assert agent2.history[0] == {"role": "user", "content": "hello"}
+    assert agent2.history[1] == {"role": "assistant", "content": "Hi! How can I help?"}
+    assert agent2.summary == "Previous conversation about greetings"
+
+
+def test_persistence_disabled(bare_agent, tmp_path):
+    """With persistence_enabled=False, on_output does nothing and no file is created."""
+    from llamagent.modules.persistence import PersistenceModule
+
+    bare_agent.config.persistence_enabled = False
+    bare_agent.config.persistence_dir = str(tmp_path / "sessions")
+
+    mod = PersistenceModule()
+    bare_agent.register_module(mod)
+
+    # Add messages to history
+    bare_agent.history.append({"role": "user", "content": "hello"})
+    bare_agent.history.append({"role": "assistant", "content": "hi"})
+
+    # Trigger on_output — should do nothing
+    mod.on_output("hi")
+
+    # Verify no session file exists
+    session_dir = tmp_path / "sessions"
+    if session_dir.exists():
+        assert list(session_dir.iterdir()) == []
+    # else: directory was never created, which is also correct
+
+
+def test_persistence_no_auto_restore(bare_agent, mock_llm_client, tmp_path):
+    """With auto_restore=False, data is saved but not restored on attach."""
+    from llamagent.modules.persistence import PersistenceModule
+
+    # --- First agent: save ---
+    bare_agent.config.persistence_enabled = True
+    bare_agent.config.persistence_auto_restore = False
+    bare_agent.config.persistence_dir = str(tmp_path / "sessions")
+
+    mod1 = PersistenceModule()
+    bare_agent.register_module(mod1)
+
+    bare_agent.history.append({"role": "user", "content": "hello"})
+    bare_agent.history.append({"role": "assistant", "content": "hi"})
+
+    # Save via on_output
+    mod1.on_output("hi")
+
+    # Verify file exists on disk
+    session_dir = tmp_path / "sessions"
+    assert session_dir.exists()
+    json_files = list(session_dir.glob("*.json"))
+    assert len(json_files) == 1
+
+    # --- Second agent: auto_restore=False, should NOT restore ---
+    agent2 = LlamAgent.__new__(LlamAgent)
+    agent2.config = bare_agent.config  # same config (auto_restore=False)
+    agent2.persona = None
+    agent2.llm = mock_llm_client
+    agent2._llm_cache = {bare_agent.config.model: mock_llm_client}
+    agent2.modules = {}
+    agent2.history = []
+    agent2.summary = None
+    agent2.conversation = agent2.history
+    agent2._execution_strategy = bare_agent._execution_strategy
+    agent2.tool_executor = None
+    agent2._tools = {}
+    agent2._active_packs = set()
+    agent2._tools_version = 0
+    agent2._hooks = {}
+    agent2._session_started = False
+    agent2._in_hook = False
+    agent2.mode = "interactive"
+    agent2._controller = None
+    agent2._current_task_id = None
+    agent2._abort = False
+    agent2._open_questions_buffer = []
+    agent2.confirm_handler = None
+    agent2.interaction_handler = None
+    agent2._confirm_wait_time = 0.0
+    agent2.project_dir = bare_agent.project_dir
+    agent2.playground_dir = bare_agent.playground_dir
+    agent2._authorization_engine = bare_agent._authorization_engine
+    agent2._interactive_config = bare_agent._interactive_config
+
+    mod2 = PersistenceModule()
+    agent2.register_module(mod2)
+
+    # Should NOT have restored
+    assert len(agent2.history) == 0
+    assert agent2.summary is None
+
+    # But the file should still exist (saved by first agent)
+    json_files = list(session_dir.glob("*.json"))
+    assert len(json_files) == 1
