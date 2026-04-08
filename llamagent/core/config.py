@@ -103,6 +103,9 @@ _YAML_MAP = [
     (("fs_data_dir",), "fs_data_dir", str),
     (("memory_fs_dir",), "memory_fs_dir", str),
     (("knowledge_dir",), "knowledge_dir", str),
+    (("persistence", "enabled"), "persistence_enabled", bool),
+    (("persistence", "auto_restore"), "persistence_auto_restore", bool),
+    (("persistence_dir",), "persistence_dir", str),
 ]
 
 # Build a set of valid YAML key paths for unknown-key detection
@@ -230,6 +233,11 @@ class Config:
         self.fs_data_dir: str = str(BASE_DIR / "data" / "fs")
         self.memory_fs_dir: str | None = None
         self.knowledge_dir: str | None = None
+
+        # Persistence
+        self.persistence_enabled: bool = False
+        self.persistence_auto_restore: bool = True
+        self.persistence_dir: str | None = None
 
         # Web
         self.web_search_provider: str = ""  # "" = auto-detect

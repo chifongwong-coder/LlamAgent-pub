@@ -221,6 +221,9 @@ def bare_agent(mock_llm_client):
     config.workspace_id = None
     config.hooks_config = None
     config.module_models = {}
+    config.persistence_enabled = False
+    config.persistence_auto_restore = True
+    config.persistence_dir = None
 
     agent = LlamAgent.__new__(LlamAgent)
     agent.config = config
