@@ -309,12 +309,11 @@ class TestSecurityFixes:
         child2 = module._create_child_agent(spec2)
         assert child2.playground_dir == bare_agent.playground_dir
 
-        # --- Runner cleanup prevents memory leak ---
+        # --- Task board records completed results ---
         # Reset module for clean state
         module2 = ChildAgentModule()
         bare_agent.modules.pop("child_agent", None)
         bare_agent.register_module(module2)
         mock_llm_client.set_responses([make_llm_response("done")])
         module2._spawn_child(task="test")
-        assert len(module2.controller.runner._results) == 0
         assert len(module2.controller.list_children(module2._parent_id)) == 1

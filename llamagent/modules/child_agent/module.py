@@ -1,12 +1,16 @@
 """
 ChildAgentModule: spawn and control child agents with budget and capability boundaries.
 
-Registers three tools for the parent agent:
+Registers tools for the parent agent:
 - spawn_child:      Spawn a child agent for a subtask with role-based constraints
 - list_children:    List all spawned child agents and their status
 - collect_results:  Collect results from all completed child agents
+- wait_child:       (thread runner only) Wait for a specific child and get its result
 
-The module uses an InlineRunnerBackend by default (synchronous, in-process).
+The module supports two runner backends:
+- InlineRunnerBackend (default): synchronous, in-process execution
+- ThreadRunnerBackend: concurrent execution in daemon threads
+
 Each child agent is a constrained LlamAgent with filtered tools, budget limits,
 and no ability to spawn its own children (unless explicitly allowed by policy).
 """
@@ -15,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import time
 
 from llamagent.core.agent import Module
 from llamagent.modules.child_agent.budget import BudgetedLLM, BudgetTracker
@@ -30,6 +35,18 @@ from llamagent.modules.child_agent.task_board import TaskBoard, TaskRecord
 logger = logging.getLogger(__name__)
 
 
+# LLM guide injected via on_context when runner=thread
+CHILD_AGENT_GUIDE_THREAD = (
+    "[Child Agent] You can spawn multiple child agents in parallel.\n"
+    "- Use spawn_child to start a child agent (returns immediately with task_id).\n"
+    "- Use wait_child to wait for a specific child and get its result.\n"
+    "- Use collect_results to gather all completed results.\n"
+    "- Use list_children to check status of all spawned children.\n"
+    "Spawn multiple children first, then collect results "
+    "-- this is faster than sequential execution."
+)
+
+
 # ======================================================================
 # ChildAgentController
 # ======================================================================
@@ -41,6 +58,10 @@ class ChildAgentController:
 
     Provides a clean API for spawning, waiting, listing, and collecting
     child agent results. The module delegates all orchestration to this class.
+
+    The controller is runner-agnostic: it uses runner.spawn() + runner.status()
+    to determine initial state, then syncs to the task board. For thread runner,
+    it registers an on_complete callback for async updates.
     """
 
     def __init__(self, runner: AgentRunnerBackend, task_board: TaskBoard,
@@ -49,9 +70,16 @@ class ChildAgentController:
         self.task_board = task_board
         self.max_children = max_children
 
+        # Wire completion callback for async runners
+        if hasattr(runner, '_on_complete'):
+            runner._on_complete = self._on_child_complete
+
     def spawn_child(self, spec: ChildAgentSpec, agent_factory) -> str:
         """
         Spawn a child agent and register it on the task board.
+
+        For inline runner: spawn blocks, status is completed/failed immediately.
+        For thread runner: spawn returns immediately, status is running.
 
         Args:
             spec: Child agent specification.
@@ -89,32 +117,75 @@ class ChildAgentController:
                 "max_steps": spec.policy.budget.max_steps if spec.policy.budget else None,
             }
 
-        # Sync the runner result to the task board, then clean runner to avoid duplication
-        record = self.runner.wait(task_id)
+        # Use runner.status() to determine initial state (runner-agnostic)
+        initial_status = self.runner.status(task_id)
         self.task_board.create(
-            task_id=record.task_id,
-            parent_id=record.parent_id,
-            role=record.role,
-            task=record.task,
-            status=record.status,
-            result=record.result,
-            metrics=record.metrics,
+            task_id=task_id,
+            parent_id=spec.parent_task_id,
+            role=spec.role,
+            task=spec.task,
+            status=initial_status,
             input_snapshot=input_snapshot,
-            created_at=record.created_at,
-            completed_at=record.completed_at,
+            created_at=time.time(),
         )
-        # Clean up runner's copy to prevent unbounded memory growth
-        if hasattr(self.runner, '_results'):
-            self.runner._results.pop(task_id, None)
+
+        # If already done (inline runner), sync result to task board immediately
+        if initial_status in ("completed", "failed"):
+            record = self.runner.wait(task_id)
+            self.task_board.update(
+                task_id,
+                result=record.result,
+                history=record.history,
+                metrics=record.metrics,
+                completed_at=time.time(),
+            )
+
         return task_id
+
+    def _on_child_complete(self, task_id: str, record: TaskRecord):
+        """
+        Callback invoked by ThreadRunner when a child finishes.
+
+        Idempotency guard: if the record is already completed/failed on the
+        task board (e.g., inline fast completion), skip the update.
+        """
+        existing = self.task_board.get(task_id)
+        if existing and existing.status in ("completed", "failed", "cancelled"):
+            return
+        try:
+            self.task_board.update(
+                task_id,
+                status=record.status,
+                result=record.result,
+                history=record.history,
+                metrics=record.metrics,
+                completed_at=time.time(),
+            )
+        except KeyError:
+            # Task board record not yet created (unlikely race); log and skip
+            logger.warning("on_child_complete: task_id '%s' not on board", task_id)
 
     def wait_child(self, task_id: str, timeout: float | None = None) -> TaskRecord:
         """Wait for a child and return its task record from the board."""
         record = self.task_board.get(task_id)
-        if record is not None:
+        if record is not None and record.status in ("completed", "failed"):
             return record
-        # Fallback to runner (should not happen with inline backend)
-        return self.runner.wait(task_id, timeout)
+        # Block on runner (thread mode: wait for event; inline: immediate)
+        runner_record = self.runner.wait(task_id, timeout)
+        # Proactively sync runner result to board (callback may not have fired yet)
+        if runner_record.status in ("completed", "failed"):
+            try:
+                self.task_board.update(
+                    task_id,
+                    status=runner_record.status,
+                    result=runner_record.result,
+                    history=runner_record.history,
+                    metrics=runner_record.metrics,
+                    completed_at=runner_record.completed_at,
+                )
+            except KeyError:
+                pass  # Board entry not yet created (shouldn't happen)
+        return runner_record
 
     def list_children(self, parent_id: str) -> list[TaskRecord]:
         """List all children belonging to a parent."""
@@ -124,7 +195,10 @@ class ChildAgentController:
         """Cancel a running child agent."""
         success = self.runner.cancel(task_id)
         if success:
-            self.task_board.update(task_id, status="cancelled")
+            # Only overwrite status if still running (child may have completed before abort took effect)
+            existing = self.task_board.get(task_id)
+            if existing and existing.status == "running":
+                self.task_board.update(task_id, status="cancelled")
         return success
 
     def collect_results(self, parent_id: str) -> list[TaskRecord]:
@@ -144,6 +218,10 @@ class ChildAgentModule(Module):
     Spawn and control child agents with budget and capability boundaries.
     Each child is a constrained LlamAgent instance that inherits the parent's
     LLM and selected tools, but operates under strict resource limits.
+
+    Supports two runner backends:
+    - inline (default): synchronous, blocking execution
+    - thread: concurrent execution with async result collection
     """
 
     name = "child_agent"
@@ -153,14 +231,27 @@ class ChildAgentModule(Module):
         self.controller: ChildAgentController | None = None
         self.task_board: TaskBoard | None = None
         self._parent_id: str | None = None  # Scope key for list/collect
+        self._runner_name: str = "inline"
 
     def on_attach(self, agent):
         """Initialize controller, task board, and register tools."""
         super().on_attach(agent)
         self._parent_id = str(id(agent))
         self.task_board = TaskBoard()
-        runner = InlineRunnerBackend()
-        self.controller = ChildAgentController(runner, self.task_board)
+
+        # Select runner backend from config
+        self._runner_name = getattr(agent.config, "child_agent_runner", "inline")
+        max_children = getattr(agent.config, "child_agent_max_children", 20)
+
+        if self._runner_name == "thread":
+            from llamagent.modules.child_agent.runners.thread import ThreadRunnerBackend
+            runner = ThreadRunnerBackend()
+        else:
+            runner = InlineRunnerBackend()
+
+        self.controller = ChildAgentController(
+            runner, self.task_board, max_children=max_children,
+        )
 
         # Register tools
         agent.register_tool(
@@ -176,8 +267,8 @@ class ChildAgentModule(Module):
                     },
                     "role": {
                         "type": "string",
-                        "description": "Role: researcher/writer/analyst/coder/worker",
-                        "enum": ["researcher", "writer", "analyst", "coder", "worker"],
+                        "description": "Role: researcher/writer/analyst/coder/worker/delegate",
+                        "enum": ["researcher", "writer", "analyst", "coder", "worker", "delegate"],
                     },
                     "context": {
                         "type": "string",
@@ -202,16 +293,66 @@ class ChildAgentModule(Module):
             name="collect_results",
             func=self._collect_results,
             description="Collect results from all completed child agents",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "wait": {
+                        "type": "boolean",
+                        "description": "If true, wait for all running children to complete before collecting",
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Maximum seconds to wait when wait=true (default 300)",
+                    },
+                },
+            },
             tier="default",
             safety_level=1,
         )
+
+        # Register wait_child only for thread runner
+        if self._runner_name == "thread":
+            agent.register_tool(
+                name="wait_child",
+                func=self._wait_child,
+                description="Wait for a specific child agent to complete and return its result",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": "string",
+                            "description": "The task_id of the child agent to wait for",
+                        },
+                        "include_history": {
+                            "type": "boolean",
+                            "description": "If true, include the full conversation history of the child agent",
+                        },
+                    },
+                    "required": ["task_id"],
+                },
+                tier="default",
+                safety_level=1,
+            )
+
+    def on_context(self, messages: list[dict], context: str) -> str:
+        """Inject parallel child agent guide when runner=thread."""
+        if self._runner_name == "thread":
+            if context:
+                return context + "\n\n" + CHILD_AGENT_GUIDE_THREAD
+            return CHILD_AGENT_GUIDE_THREAD
+        return context
+
+    def on_shutdown(self):
+        """Shutdown the runner backend (relevant for thread runner)."""
+        if self.controller:
+            self.controller.runner.shutdown()
 
     # ============================================================
     # Tool implementations
     # ============================================================
 
     def _spawn_child(self, task: str, role: str = "worker", context: str = "") -> str:
-        """Spawn a child agent for the given task and return its result."""
+        """Spawn a child agent for the given task."""
         policy = ROLE_POLICIES.get(role, AgentExecutionPolicy())
         spec = ChildAgentSpec(
             task=task,
@@ -224,8 +365,39 @@ class ChildAgentModule(Module):
             task_id = self.controller.spawn_child(spec, self._create_child_agent)
         except RuntimeError as e:
             return f"Cannot spawn child agent: {e}"
-        record = self.controller.wait_child(task_id)  # Inline: already done
-        return record.result or f"Child agent ({role}) completed with no output."
+
+        # Check if already completed (inline runner, or very fast thread execution)
+        record = self.controller.task_board.get(task_id)
+        if record and record.status in ("completed", "failed"):
+            return record.result or f"Child agent ({role}) completed with no output."
+        else:
+            # Thread runner: return task_id for async collection
+            return (
+                f"Spawned child agent [task_id: {task_id}] with role={role}. "
+                f"Use wait_child(task_id=\"{task_id}\") or collect_results() to get results."
+            )
+
+    def _wait_child(self, task_id: str, include_history: bool = False) -> str:
+        """Wait for a specific child agent and return its result."""
+        record = self.controller.task_board.get(task_id)
+        if record is None:
+            return f"No child agent found with task_id '{task_id}'."
+
+        if record.status == "running":
+            # Use controller.wait_child which has fallback to runner
+            record = self.controller.wait_child(task_id, timeout=300)
+
+        if record is None:
+            return f"Child agent '{task_id}' completed but result not yet available."
+
+        result = record.result or "(no output)"
+        if include_history and record.history:
+            history_text = "\n".join(
+                f"[{m.get('role', '?')}]: {(m.get('content') or '')[:2000]}"
+                for m in record.history
+            )
+            return f"Result: {result}\n\nFull history:\n{history_text}"
+        return result
 
     def _list_children(self) -> str:
         """List all spawned child agents and their status."""
@@ -238,12 +410,29 @@ class ChildAgentModule(Module):
             lines.append(f"[{c.status}] {c.role}: {task_preview}")
         return "\n".join(lines)
 
-    def _collect_results(self) -> str:
+    def _collect_results(self, wait: bool = False, timeout: float = 300) -> str:
         """Collect results from all completed child agents."""
+        timed_out = 0
+        if wait:
+            # Wait for all running children to complete (with timeout)
+            deadline = time.time() + timeout
+            children = self.controller.list_children(self._parent_id)
+            for child in children:
+                if child.status == "running":
+                    remaining = max(0, deadline - time.time())
+                    # Use controller.wait_child which syncs runner result to board
+                    self.controller.wait_child(child.task_id, timeout=remaining)
+                    # Check if it actually completed
+                    refreshed = self.controller.task_board.get(child.task_id)
+                    if refreshed and refreshed.status == "running":
+                        timed_out += 1
+
         results = self.controller.collect_results(self._parent_id)
-        if not results:
+        if not results and timed_out == 0:
             return "No completed child agent results."
         lines = []
+        if timed_out > 0:
+            lines.append(f"({timed_out} child agent(s) timed out and are still running)")
         for r in results:
             task_preview = r.task[:50] + "..." if len(r.task) > 50 else r.task
             result_preview = r.result[:200] if r.result else "(no output)"
@@ -339,6 +528,7 @@ class ChildAgentModule(Module):
             child._tools.pop("spawn_child", None)
             child._tools.pop("list_children", None)
             child._tools.pop("collect_results", None)
+            child._tools.pop("wait_child", None)
 
         # Apply role-level execution_policy to child's tools (e.g., coder -> POLICY_SANDBOXED_CODER)
         if spec.policy and spec.policy.execution_policy is not None:

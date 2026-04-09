@@ -32,7 +32,6 @@ MODULE_OPTIONS = [
     ("reflection", "Reflection — Quality evaluation + lessons"),
     ("retrieval", "Retrieval — Knowledge retrieval over documents"),
     ("memory", "Memory — Persistent memory with recall"),
-    ("multi_agent", "Multi-Agent — Role-based delegation"),
     ("child_agent", "Child Agent — Constrained sub-agents"),
     ("mcp", "MCP — Model Context Protocol bridge"),
 ]

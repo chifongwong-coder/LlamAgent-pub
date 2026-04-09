@@ -224,6 +224,8 @@ def bare_agent(mock_llm_client):
     config.persistence_enabled = False
     config.persistence_auto_restore = True
     config.persistence_dir = None
+    config.child_agent_runner = "inline"
+    config.child_agent_max_children = 20
 
     agent = LlamAgent.__new__(LlamAgent)
     agent.config = config
