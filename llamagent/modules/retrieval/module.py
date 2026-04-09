@@ -245,7 +245,11 @@ class RetrievalModule(Module):
     # ============================================================
 
     def _tool_list_knowledge(self) -> str:
-        """List all documents in the knowledge directory with their frontmatter."""
+        """List all documents in the knowledge directory.
+
+        Uses filename as title. If frontmatter has a description, show it;
+        otherwise show a preview of the document body (first 200 chars).
+        """
         from llamagent.modules.fs_store.parser import parse_frontmatter
 
         if self._fs_store is None:
@@ -260,22 +264,15 @@ class RetrievalModule(Module):
             content = self._fs_store.read_file(filename)
             if content is None:
                 continue
-            metadata, _ = parse_frontmatter(content)
-            title = metadata.get("title", filename)
+            metadata, body = parse_frontmatter(content)
             description = metadata.get("description", "")
-            tags = metadata.get("tags", [])
-            if isinstance(tags, list):
-                tags_str = ", ".join(str(t) for t in tags)
-            elif tags is None:
-                tags_str = ""
-            else:
-                tags_str = str(tags)
 
-            entry = f"- **{title}** ({filename})"
+            entry = f"- **{filename}**"
             if description:
                 entry += f"\n  {description}"
-            if tags_str:
-                entry += f"\n  Tags: {tags_str}"
+            elif body.strip():
+                preview = body.strip()[:200].replace("\n", " ")
+                entry += f"\n  {preview}..."
             lines.append(entry)
 
         return "\n".join(lines)
