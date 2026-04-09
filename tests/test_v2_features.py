@@ -1503,3 +1503,52 @@ def test_child_history_preserved(bare_agent, mock_llm_client):
     record = children[0]
     assert record.history is not None
     assert len(record.history) > 0, "Child history should be preserved in TaskRecord"
+
+
+# ============================================================
+# v2.4.2: CommandRunner extraction
+# ============================================================
+
+
+def test_command_runner_basic():
+    """CommandRunner.run: basic echo command returns stdout, exit_code=0, success=True."""
+    from llamagent.modules.command_runner import CommandRunner
+
+    result = CommandRunner.run(cmd=["echo", "hello"])
+
+    assert "hello" in result.stdout
+    assert result.exit_code == 0
+    assert result.success is True
+
+
+def test_command_runner_timeout():
+    """CommandRunner.run: timeout kills subprocess and sets timed_out=True."""
+    from llamagent.modules.command_runner import CommandRunner
+
+    result = CommandRunner.run(cmd=["sleep", "10"], timeout=1)
+
+    assert result.timed_out is True
+    assert result.success is False
+
+
+def test_command_runner_safe_env():
+    """CommandRunner.build_safe_env: returns minimal env with PATH/HOME/LANG/TERM,
+    does not inherit arbitrary env vars."""
+    from llamagent.modules.command_runner import CommandRunner
+
+    env = CommandRunner.build_safe_env()
+
+    # Minimal safe keys must be present
+    assert "PATH" in env
+    assert "HOME" in env
+    assert "LANG" in env
+    assert "TERM" in env
+
+    # Set a fake env var and verify it is NOT inherited
+    import os
+    os.environ["LLAMAGENT_SECRET_TEST"] = "secret"
+    try:
+        env2 = CommandRunner.build_safe_env()
+        assert "LLAMAGENT_SECRET_TEST" not in env2
+    finally:
+        del os.environ["LLAMAGENT_SECRET_TEST"]
