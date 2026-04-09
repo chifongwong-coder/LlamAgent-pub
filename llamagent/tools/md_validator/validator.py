@@ -67,14 +67,14 @@ def check_file(filepath: str) -> list[dict]:
     sections = parse_sections(body)
     if not sections:
         has_h1 = bool(re.search(r"^#(?!#)\s+.+$", body, re.MULTILINE))
-        has_h3 = bool(re.search(r"^###\s+.+$", body, re.MULTILINE))
+        has_h3_plus = bool(re.search(r"^#{3,}\s+.+$", body, re.MULTILINE))
 
-        if has_h1 or has_h3:
+        if has_h1 or has_h3_plus:
             levels = []
             if has_h1:
                 levels.append("#")
-            if has_h3:
-                levels.append("###")
+            if has_h3_plus:
+                levels.append("###+")
             issues.append({
                 "level": "warning",
                 "message": f"No ## sections found, but has {'/'.join(levels)} headings. "
@@ -134,6 +134,8 @@ def fix_file(filepath: str) -> list[str]:
     new_content = content
 
     # Fix 1: Unclosed frontmatter — add closing ---
+    # Preserve leading newlines to avoid unintended content changes
+    leading_newlines = len(new_content) - len(new_content.lstrip("\n"))
     stripped = new_content.lstrip("\n")
     lines = stripped.splitlines()
     if lines and lines[0].strip() == "---":
@@ -151,7 +153,7 @@ def fix_file(filepath: str) -> list[str]:
                     break
                 insert_idx = i + 1
             lines.insert(insert_idx, "---")
-            new_content = "\n".join(lines)
+            new_content = "\n" * leading_newlines + "\n".join(lines)
             fixes.append("Added missing frontmatter closing ---")
 
     # Fix 2: Normalize heading levels to ##
@@ -159,7 +161,8 @@ def fix_file(filepath: str) -> list[str]:
     sections = parse_sections(body)
     if not sections:
         def normalize_headings(text):
-            text = re.sub(r"^###\s+", "## ", text, flags=re.MULTILINE)
+            # #### or deeper -> ##, ### -> ##, # -> ##
+            text = re.sub(r"^#{3,}\s+", "## ", text, flags=re.MULTILINE)
             text = re.sub(r"^#(?!#)\s+", "## ", text, flags=re.MULTILINE)
             return text
 

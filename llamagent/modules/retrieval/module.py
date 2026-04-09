@@ -271,8 +271,12 @@ class RetrievalModule(Module):
             if description:
                 entry += f"\n  {description}"
             elif body.strip():
-                preview = body.strip()[:200].replace("\n", " ")
-                entry += f"\n  {preview}..."
+                stripped_body = body.strip()
+                preview = stripped_body[:200].replace("\n", " ")
+                if len(stripped_body) > 200:
+                    entry += f"\n  {preview}..."
+                else:
+                    entry += f"\n  {preview}"
             lines.append(entry)
 
         return "\n".join(lines)
