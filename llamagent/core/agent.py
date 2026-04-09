@@ -251,7 +251,7 @@ class LlamAgent:
     - memory:       Long-term memory
     - planning:     Task planning (PlanReAct strategy)
     - reflection:   Self-reflection and error correction
-    - multi_agent:  Multi-Agent collaboration
+    - child_agent:  Constrained child agent spawning
     - mcp:          MCP external system integration
     - safety:       Safety guardrails
     """

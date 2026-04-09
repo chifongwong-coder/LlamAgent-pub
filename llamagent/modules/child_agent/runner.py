@@ -71,3 +71,11 @@ class AgentRunnerBackend:
             Status string: "pending", "running", "completed", "failed", or "unknown".
         """
         raise NotImplementedError("Subclasses must implement status()")
+
+    def shutdown(self, timeout: float = 30) -> None:
+        """
+        Graceful shutdown: stop all running children and clean up.
+
+        Default is a no-op. ThreadRunnerBackend overrides to abort and join threads.
+        """
+        pass
