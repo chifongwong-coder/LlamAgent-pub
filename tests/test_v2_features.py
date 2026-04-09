@@ -897,12 +897,19 @@ def test_retrieval_fs_backend(bare_agent, mock_llm_client, tmp_path):
     result = mod._tool_list_knowledge()
     assert "No documents" in result
 
-    # Add a markdown document and verify list_knowledge finds it
+    # Add a document with frontmatter description
     doc = tmp_path / "guide.md"
     doc.write_text("---\ntitle: Test Guide\ndescription: A test doc\n---\n\n## Intro\nHello")
     result = mod._tool_list_knowledge()
     assert "guide.md" in result
     assert "A test doc" in result
+
+    # Add a document WITHOUT description — should show body preview
+    doc2 = tmp_path / "notes.md"
+    doc2.write_text("## First Section\nSome content about testing")
+    result = mod._tool_list_knowledge()
+    assert "notes.md" in result
+    assert "Some content about testing" in result
 
     # list_entries should find the section
     result = mod._tool_list_entries("guide.md")
