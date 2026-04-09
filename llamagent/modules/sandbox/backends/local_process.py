@@ -13,10 +13,9 @@ Limitations:
 
 from __future__ import annotations
 
-import subprocess
 import tempfile
-import time
 
+from llamagent.modules.command_runner import CommandRunner
 from llamagent.modules.sandbox.backend import (
     ExecutionBackend,
     ExecutionResult,
@@ -57,58 +56,21 @@ class LocalProcessSession(ExecutionSession):
                 exit_code=1,
             )
 
-        # Determine timeout.
-        timeout = policy.timeout_seconds
-
-        # Prepare environment: minimal base + explicit env_vars only.
-        # Never inherit full host environment (API keys, credentials, etc.)
-        import os
-        env = {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin"),
-            "HOME": os.environ.get("HOME", "/tmp"),
-            "LANG": os.environ.get("LANG", "en_US.UTF-8"),
-            "TERM": os.environ.get("TERM", "xterm"),
-        }
-        if spec.env_vars:
-            env.update(spec.env_vars)
-
-        # Execute.
-        start_time = time.monotonic()
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=self._workspace,
-                env=env,
-            )
-            duration_ms = (time.monotonic() - start_time) * 1000
-
-            return ExecutionResult(
-                stdout=proc.stdout,
-                stderr=proc.stderr,
-                exit_code=proc.returncode,
-                duration_ms=duration_ms,
-            )
-
-        except subprocess.TimeoutExpired as exc:
-            duration_ms = (time.monotonic() - start_time) * 1000
-            return ExecutionResult(
-                stdout=exc.stdout or "" if isinstance(exc.stdout, str) else "",
-                stderr=exc.stderr or "" if isinstance(exc.stderr, str) else "",
-                exit_code=-1,
-                duration_ms=duration_ms,
-                timed_out=True,
-            )
-
-        except Exception as exc:
-            duration_ms = (time.monotonic() - start_time) * 1000
-            return ExecutionResult(
-                stderr=f"Subprocess execution failed: {exc}",
-                exit_code=-1,
-                duration_ms=duration_ms,
-            )
+        # Delegate execution to CommandRunner.
+        env = CommandRunner.build_safe_env(spec.env_vars)
+        result = CommandRunner.run(
+            cmd=cmd,
+            cwd=self._workspace,
+            timeout=policy.timeout_seconds,
+            env=env,
+        )
+        return ExecutionResult(
+            stdout=result.stdout,
+            stderr=result.stderr,
+            exit_code=result.exit_code,
+            duration_ms=result.duration_ms,
+            timed_out=result.timed_out,
+        )
 
     def close(self) -> None:
         """No-op; workspace cleanup is handled by ToolExecutor."""
