@@ -901,8 +901,8 @@ def test_retrieval_fs_backend(bare_agent, mock_llm_client, tmp_path):
     doc = tmp_path / "guide.md"
     doc.write_text("---\ntitle: Test Guide\ndescription: A test doc\n---\n\n## Intro\nHello")
     result = mod._tool_list_knowledge()
-    assert "Test Guide" in result
     assert "guide.md" in result
+    assert "A test doc" in result
 
     # list_entries should find the section
     result = mod._tool_list_entries("guide.md")
