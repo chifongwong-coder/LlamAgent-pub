@@ -43,7 +43,7 @@ class InlineRunnerBackend(AgentRunnerBackend):
         Returns:
             Unique task_id for the completed execution.
         """
-        task_id = str(uuid.uuid4())[:12]
+        task_id = uuid.uuid4().hex[:12]
         start_time = time.time()
         child = None
 
@@ -65,6 +65,7 @@ class InlineRunnerBackend(AgentRunnerBackend):
                 task=spec.task,
                 status="completed",
                 result=result_text,
+                history=list(child.history),
                 metrics={"elapsed_seconds": round(elapsed, 2)},
                 created_at=start_time,
                 completed_at=time.time(),
@@ -83,6 +84,7 @@ class InlineRunnerBackend(AgentRunnerBackend):
                 task=spec.task,
                 status="failed",
                 result=f"Budget exceeded: {e}",
+                history=list(child.history) if child else [],
                 metrics={"elapsed_seconds": round(elapsed, 2)},
                 created_at=start_time,
                 completed_at=time.time(),
@@ -101,6 +103,7 @@ class InlineRunnerBackend(AgentRunnerBackend):
                 task=spec.task,
                 status="failed",
                 result=f"Execution error: {e}",
+                history=list(child.history) if child else [],
                 metrics={"elapsed_seconds": round(elapsed, 2)},
                 created_at=start_time,
                 completed_at=time.time(),

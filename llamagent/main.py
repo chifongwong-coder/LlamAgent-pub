@@ -45,7 +45,6 @@ AVAILABLE_MODULES = {
     "reflection": "llamagent.modules.reflection.ReflectionModule",
     "planning": "llamagent.modules.reasoning.PlanningModule",
     "mcp": "llamagent.modules.mcp.MCPModule",
-    "multi_agent": "llamagent.modules.multi_agent.MultiAgentModule",
     "child_agent": "llamagent.modules.child_agent.ChildAgentModule",
 }
 

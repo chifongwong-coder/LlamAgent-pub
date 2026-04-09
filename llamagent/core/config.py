@@ -106,6 +106,8 @@ _YAML_MAP = [
     (("persistence", "enabled"), "persistence_enabled", bool),
     (("persistence", "auto_restore"), "persistence_auto_restore", bool),
     (("persistence_dir",), "persistence_dir", str),
+    (("child_agent", "runner"), "child_agent_runner", str),
+    (("child_agent", "max_children"), "child_agent_max_children", int),
 ]
 
 # Build a set of valid YAML key paths for unknown-key detection
@@ -238,6 +240,10 @@ class Config:
         self.persistence_enabled: bool = False
         self.persistence_auto_restore: bool = True
         self.persistence_dir: str | None = None
+
+        # Child agent
+        self.child_agent_runner: str = "inline"
+        self.child_agent_max_children: int = 20
 
         # Web
         self.web_search_provider: str = ""  # "" = auto-detect
@@ -534,6 +540,13 @@ class Config:
                 self.reflection_backend,
             )
             self.reflection_backend = "rag"
+
+        if self.child_agent_runner not in ("inline", "thread"):
+            logger.warning(
+                "child_agent_runner='%s' is invalid, falling back to 'inline'",
+                self.child_agent_runner,
+            )
+            self.child_agent_runner = "inline"
 
         # Backward compatibility alias
         self.chroma_dir = self.retrieval_persist_dir
