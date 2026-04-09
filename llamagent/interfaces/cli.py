@@ -132,7 +132,6 @@ MODULE_GROUPS = {
         ("memory", "Persistent memory with semantic recall"),
     ],
     "Collaboration": [
-        ("multi_agent", "Role-based task delegation"),
         ("child_agent", "Spawn constrained sub-agents"),
         ("mcp", "Model Context Protocol bridge"),
     ],

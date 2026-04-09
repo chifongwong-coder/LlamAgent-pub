@@ -1355,3 +1355,151 @@ def test_persistence_no_auto_restore(bare_agent, mock_llm_client, tmp_path):
     # But the file should still exist (saved by first agent)
     json_files = list(session_dir.glob("*.json"))
     assert len(json_files) == 1
+
+
+# ============================================================
+# v2.4.1: ThreadRunner parallel child agents + delegate role
+# ============================================================
+
+import re
+
+from llamagent.modules.child_agent.module import ChildAgentModule
+from llamagent.modules.child_agent.policy import ROLE_POLICIES
+
+
+def test_thread_runner_parallel_spawn(bare_agent, mock_llm_client):
+    """Thread runner: spawn 2 children in parallel, collect_results(wait=True) returns both."""
+    bare_agent.config.child_agent_runner = "thread"
+
+    mock_llm_client.set_responses([
+        make_llm_response("result from child alpha"),
+        make_llm_response("result from child beta"),
+    ])
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    # Spawn two children -- thread runner returns task_id messages, not results
+    # Use "researcher" role (has explicit tool_allowlist) for clean tool filtering
+    result1 = module._spawn_child(task="task alpha", role="researcher")
+    result2 = module._spawn_child(task="task beta", role="researcher")
+
+    assert "task_id:" in result1
+    assert "task_id:" in result2
+    # Should NOT contain the child's actual result text (that comes from collect)
+    assert "result from child" not in result1
+    assert "result from child" not in result2
+
+    # Collect all results (wait=True blocks until both are done)
+    collected = module._collect_results(wait=True, timeout=30)
+
+    assert "result from child alpha" in collected
+    assert "result from child beta" in collected
+
+
+def test_thread_runner_wait_child(bare_agent, mock_llm_client):
+    """Thread runner: spawn one child, extract task_id, wait_child returns result."""
+    bare_agent.config.child_agent_runner = "thread"
+
+    mock_llm_client.set_responses([
+        make_llm_response("the research output"),
+    ])
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    # Use "researcher" role (explicit tool_allowlist, avoids deepcopy of all parent tools)
+    spawn_msg = module._spawn_child(task="do research", role="researcher")
+    assert "task_id:" in spawn_msg
+
+    # Extract task_id from the formatted message
+    match = re.search(r"task_id:\s*(\w+)", spawn_msg)
+    assert match is not None, f"Could not extract task_id from: {spawn_msg}"
+    task_id = match.group(1)
+
+    # wait_child should block until done and return the result
+    result = module._wait_child(task_id=task_id)
+    assert "the research output" in result
+
+
+def test_delegate_role(bare_agent, mock_llm_client):
+    """Delegate role: single LLM call, no tools, inline execution returns result directly."""
+    # Use inline runner (default) -- delegate is about role policy, not runner type
+    mock_llm_client.set_responses([
+        make_llm_response("a beautiful poem about autumn"),
+    ])
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    result = module._spawn_child(task="write a poem", role="delegate")
+
+    # Inline runner returns result text directly
+    assert "a beautiful poem" in result
+
+    # Verify delegate policy: empty tool_allowlist means NO tools
+    delegate_policy = ROLE_POLICIES["delegate"]
+    assert delegate_policy.tool_allowlist == []
+    assert delegate_policy.budget.max_llm_calls == 1
+
+    # Verify a delegate child agent actually has no tools
+    from llamagent.modules.child_agent.policy import ChildAgentSpec
+    spec = ChildAgentSpec(task="test", role="delegate", policy=delegate_policy)
+    child = module._create_child_agent(spec)
+    assert len(child._tools) == 0
+
+
+def test_inline_runner_unchanged(bare_agent, mock_llm_client):
+    """Inline runner (default): spawn returns result directly, wait_child NOT registered."""
+    # Explicitly set inline (also the default)
+    bare_agent.config.child_agent_runner = "inline"
+
+    mock_llm_client.set_responses([
+        make_llm_response("inline result text"),
+    ])
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    # Inline spawn returns the result text synchronously
+    result = module._spawn_child(task="quick task", role="worker")
+    assert "inline result text" in result
+    # Should NOT contain task_id message (that is thread runner behavior)
+    assert "task_id:" not in result
+
+    # wait_child tool should NOT be registered for inline runner
+    assert "wait_child" not in bare_agent._tools
+
+
+def test_child_history_preserved(bare_agent, mock_llm_client):
+    """Child agent history is preserved in TaskRecord after execution."""
+    # Inline runner for simplicity
+    bare_agent.config.child_agent_runner = "inline"
+
+    # Child makes a tool call that "fails", then returns final text
+    bare_agent.register_tool(
+        "read_files", lambda paths: "file contents here", "Read files"
+    )
+
+    mock_llm_client.set_responses([
+        # First response: child makes a tool call
+        make_llm_response(
+            tool_calls=[make_tool_call("read_files", {"paths": ["test.txt"]}, call_id="call_c1")]
+        ),
+        # Second response: child returns final answer
+        make_llm_response("Summary: found important data in test.txt"),
+    ])
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    result = module._spawn_child(task="analyze files", role="researcher")
+    assert "Summary" in result
+
+    # Check TaskBoard record has non-empty history
+    children = module.controller.list_children(module._parent_id)
+    assert len(children) >= 1
+
+    record = children[0]
+    assert record.history is not None
+    assert len(record.history) > 0, "Child history should be preserved in TaskRecord"

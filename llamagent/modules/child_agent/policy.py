@@ -85,4 +85,9 @@ ROLE_POLICIES: dict[str, AgentExecutionPolicy] = {
         budget=Budget(max_llm_calls=30, max_time_seconds=600),
         can_spawn_children=False,
     ),
+    "delegate": AgentExecutionPolicy(
+        tool_allowlist=[],
+        budget=Budget(max_llm_calls=1, max_time_seconds=30),
+        can_spawn_children=False,
+    ),
 }
