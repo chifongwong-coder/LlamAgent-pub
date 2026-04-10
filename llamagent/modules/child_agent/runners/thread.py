@@ -21,6 +21,20 @@ from llamagent.modules.child_agent.task_board import TaskRecord
 logger = logging.getLogger(__name__)
 
 
+class _ThreadLogCapture(logging.Handler):
+    """Captures log records emitted by a specific thread."""
+
+    def __init__(self, thread_id):
+        super().__init__()
+        self._thread_id = thread_id
+        self.records: list[str] = []
+        self.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+
+    def emit(self, record):
+        if record.thread == self._thread_id:
+            self.records.append(self.format(record))
+
+
 class ThreadRunnerBackend(AgentRunnerBackend):
     """
     Concurrent thread-based execution backend.
@@ -85,6 +99,14 @@ class ThreadRunnerBackend(AgentRunnerBackend):
 
     def _run_child(self, task_id: str, spec: ChildAgentSpec, agent_factory):
         """Thread target: create agent, run chat(), store result, fire callback."""
+        # Set thread name for log disambiguation
+        threading.current_thread().name = f"child-{task_id[:8]}"
+
+        # Attach log capture handler filtered to this thread
+        capture = _ThreadLogCapture(threading.current_thread().ident)
+        capture.setLevel(logging.DEBUG)
+        logging.getLogger().addHandler(capture)
+
         start_time = time.time()
         child = None
         record = None
@@ -157,6 +179,12 @@ class ThreadRunnerBackend(AgentRunnerBackend):
             )
 
         finally:
+            # Remove log capture handler and store captured logs
+            logging.getLogger().removeHandler(capture)
+            captured_logs = "\n".join(capture.records[-100:])  # Last 100 entries
+            if record is not None:
+                record.logs = captured_logs
+
             if child is not None:
                 try:
                     child.shutdown()

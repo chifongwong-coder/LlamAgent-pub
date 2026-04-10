@@ -147,6 +147,7 @@ class ChildAgentController:
                 result=record.result,
                 history=record.history,
                 metrics=record.metrics,
+                logs=record.logs,
                 completed_at=time.time(),
             )
 
@@ -169,6 +170,7 @@ class ChildAgentController:
                 result=record.result,
                 history=record.history,
                 metrics=record.metrics,
+                logs=record.logs,
                 completed_at=time.time(),
             )
         except KeyError:
@@ -191,6 +193,7 @@ class ChildAgentController:
                     result=runner_record.result,
                     history=runner_record.history,
                     metrics=runner_record.metrics,
+                    logs=runner_record.logs,
                     completed_at=runner_record.completed_at,
                 )
             except KeyError:
@@ -341,6 +344,10 @@ class ChildAgentModule(Module):
                             "type": "boolean",
                             "description": "If true, include the full conversation history of the child agent",
                         },
+                        "include_logs": {
+                            "type": "boolean",
+                            "description": "If true, include the child agent's execution logs (stderr for process, captured logs for thread)",
+                        },
                     },
                     "required": ["task_id"],
                 },
@@ -391,7 +398,8 @@ class ChildAgentModule(Module):
                 f"Use wait_child(task_id=\"{task_id}\") or collect_results() to get results."
             )
 
-    def _wait_child(self, task_id: str, include_history: bool = False) -> str:
+    def _wait_child(self, task_id: str, include_history: bool = False,
+                    include_logs: bool = False) -> str:
         """Wait for a specific child agent and return its result."""
         record = self.controller.task_board.get(task_id)
         if record is None:
@@ -410,7 +418,9 @@ class ChildAgentModule(Module):
                 f"[{m.get('role', '?')}]: {(m.get('content') or '')[:2000]}"
                 for m in record.history
             )
-            return f"Result: {result}\n\nFull history:\n{history_text}"
+            result = f"Result: {result}\n\nFull history:\n{history_text}"
+        if include_logs and record.logs:
+            result += f"\n\nChild logs:\n{record.logs[:2000]}"
         return result
 
     def _list_children(self) -> str:
