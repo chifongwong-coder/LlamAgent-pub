@@ -40,6 +40,9 @@ from llamagent.core.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 
+# Maximum characters to include as a preview when persisting large tool results
+_PERSIST_PREVIEW_CHARS = 500
+
 
 # ======================================================================
 # ReactResult (structured return from ReAct loop)
@@ -55,6 +58,60 @@ class ReactResult:
     steps_used: int = 0
     reason: str | None = None
     terminal: bool = False  # v2.0: non-recoverable result, caller should stop (not retry/replan)
+
+
+# ======================================================================
+# Tool argument validation
+# ======================================================================
+
+
+def _validate_tool_args(args: dict, schema: dict) -> str | None:
+    """
+    Basic JSON Schema validation for tool arguments.
+
+    Returns None if valid, or a human-readable error string.
+    Only validates: required fields, type checking, no nested validation.
+    """
+    if not schema or schema.get("type") != "object":
+        return None
+
+    properties = schema.get("properties", {})
+    required = schema.get("required", [])
+
+    # Check required fields
+    missing = [f for f in required if f not in args]
+    if missing:
+        return f"Missing required arguments: {missing}"
+
+    # Check types
+    type_map = {
+        "string": str,
+        "integer": int,
+        "number": (int, float),
+        "boolean": bool,
+        "array": list,
+        "object": dict,
+    }
+
+    errors = []
+    for key, value in args.items():
+        if key not in properties:
+            continue  # Allow extra fields (LLM may hallucinate extra params)
+        expected_type_str = properties[key].get("type")
+        if expected_type_str is None:
+            continue
+        expected_type = type_map.get(expected_type_str)
+        if expected_type is None:
+            continue
+        if not isinstance(value, expected_type):
+            errors.append(
+                f"Argument '{key}' should be {expected_type_str}, "
+                f"got {type(value).__name__}: {repr(value)[:100]}"
+            )
+
+    if errors:
+        return "Invalid arguments:\n" + "\n".join(errors)
+    return None
 
 
 # ======================================================================
@@ -541,6 +598,7 @@ class LlamAgent:
         path_extractor: Callable[[dict], list[str]] | None = None,
         pack: str | None = None,
         action: str | None = None,
+        timeout: float | None = None,
     ) -> None:
         """
         Register a tool in the registry.
@@ -555,6 +613,7 @@ class LlamAgent:
             execution_policy: ExecutionPolicy object from sandbox module, or None (default = host execution)
             creator_id: Creator persona_id (for agent-tier tools, used for visibility filtering)
             path_extractor: Optional function to extract file paths from tool arguments for zone checking
+            timeout: Per-tool timeout in seconds; None means no per-tool timeout (global react_timeout applies)
         """
         # Infer parameter definition from function signature when empty
         if parameters is None:
@@ -572,6 +631,7 @@ class LlamAgent:
             "path_extractor": path_extractor,
             "pack": pack,
             "action": action,
+            "timeout": timeout,
         }
         self._tools_version += 1
         logger.debug("Tool registered: %s (tier=%s, safety_level=%d)", name, tier, safety_level)
@@ -620,6 +680,13 @@ class LlamAgent:
             return hook_data.get("skip_reason", f"Tool '{name}' blocked by hook.")
         args = hook_data.get("args", args)  # Hook may have modified args
 
+        # 2.5. Validate args against schema
+        schema = tool.get("parameters", {})
+        validation_error = _validate_tool_args(args, schema)
+        if validation_error:
+            logger.debug("Tool '%s' validation failed: %s", name, validation_error)
+            return f"Tool '{name}' argument error: {validation_error}"
+
         # 3. Authorization (path extraction + zone evaluation + policy decision)
         auth = self._authorization_engine.evaluate(tool, args)
         for event_name, event_data in auth.events:
@@ -630,7 +697,11 @@ class LlamAgent:
         # 4. Execute tool (unified path for both direct and executor/sandbox)
         start_time = time.time()
         try:
-            if self.tool_executor is not None:
+            timeout_val = tool.get("timeout")
+
+            if timeout_val is not None:
+                result_str = self._execute_with_timeout(tool, args, timeout_val)
+            elif self.tool_executor is not None:
                 result_str = self.tool_executor.execute(tool, args)
             else:
                 result = tool["func"](**args)
@@ -722,6 +793,9 @@ class LlamAgent:
 
         for param_name, param in sig.parameters.items():
             if param_name in ("self", "cls"):
+                continue
+            # Skip *args and **kwargs — they are not named parameters in JSON Schema
+            if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
                 continue
 
             # Type inference
@@ -1408,7 +1482,7 @@ class LlamAgent:
                     result = f"Tool execution error: {e}"
 
                 # --- Observation: truncate overly long results ---
-                result = self._truncate_observation(result)
+                result = self._truncate_observation(result, tool_name=tool_name)
 
                 # Append tool message
                 messages.append({
@@ -1558,7 +1632,7 @@ class LlamAgent:
                 except Exception as e:
                     logger.error("Tool '%s' dispatch error: %s", tool_name, e)
                     result = f"Tool execution error: {e}"
-                result = self._truncate_observation(result)
+                result = self._truncate_observation(result, tool_name=tool_name)
                 yield f"[{tool_name} done]\n"
 
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
@@ -1594,23 +1668,89 @@ class LlamAgent:
                 if hasattr(delta.function, "arguments") and delta.function.arguments:
                     tc["function"]["arguments"] += delta.function.arguments
 
-    def _truncate_observation(self, text: str) -> str:
+    def _truncate_observation(self, text: str, tool_name: str = "") -> str:
         """
         Truncate overly long tool return results.
 
         Counts by tokens (max_observation_tokens); truncates and appends a notice when exceeded.
+        When the result exceeds the persist threshold and read_files is available,
+        persists the full result to a file and returns a preview with path hint.
         """
         max_tokens = self.config.max_observation_tokens
         token_count = self.llm.count_tokens(text)
         if token_count <= max_tokens:
             return text
 
-        # Rough proportional truncation (tokens and character count are roughly proportional)
+        # Determine persist threshold
+        threshold = self.config.tool_result_persist_threshold
+        if threshold <= 0:
+            threshold = max_tokens
+
+        if token_count > threshold:
+            # Only persist if read_files tool is available (otherwise LLM can't access the file)
+            has_read_files = "read_files" in self._tools
+            if has_read_files:
+                result_path = self._persist_tool_result(text, tool_name)
+                if result_path:
+                    preview = text[:_PERSIST_PREVIEW_CHARS]
+                    return (
+                        f"{preview}\n\n"
+                        f"...(result too large: {token_count} tokens, truncated)\n"
+                        f"Full result saved to: {result_path}\n"
+                        f"Use read_files tool with ranges parameter to read specific sections."
+                    )
+
+        # Fallback: original truncation behavior
         ratio = max_tokens / max(token_count, 1)
         cut_pos = max(int(len(text) * ratio), 100)
         truncated = text[:cut_pos]
         logger.debug("Observation truncated: %d tokens -> %d tokens", token_count, max_tokens)
         return truncated + "\n...(content truncated)"
+
+    def _persist_tool_result(self, text: str, tool_name: str) -> str | None:
+        """Write full tool result to playground_dir/tool_results/ and return the path."""
+        import time as _time
+
+        results_dir = os.path.join(self.playground_dir, "tool_results")
+        try:
+            os.makedirs(results_dir, exist_ok=True)
+            ts = int(_time.time() * 1000)
+            safe_name = tool_name.replace("/", "_").replace("\\", "_") or "unknown"
+            filename = f"{safe_name}_{ts}.txt"
+            filepath = os.path.join(results_dir, filename)
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(text)
+            logger.debug("Tool result persisted: %s (%d chars)", filepath, len(text))
+            return filepath
+        except OSError as e:
+            logger.warning("Failed to persist tool result: %s", e)
+            return None
+
+    def _execute_with_timeout(self, tool: dict, args: dict, timeout: float) -> str:
+        """Execute a tool function with a timeout using ThreadPoolExecutor."""
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+
+        def _run():
+            if self.tool_executor is not None:
+                return self.tool_executor.execute(tool, args)
+            else:
+                result = tool["func"](**args)
+                return str(result) if result is not None else ""
+
+        pool = ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(_run)
+        try:
+            result = future.result(timeout=timeout)
+            pool.shutdown(wait=False)
+            return result
+        except FutureTimeout:
+            future.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
+            logger.warning(
+                "Tool '%s' timed out after %.1fs (thread may still be running)",
+                tool["name"], timeout,
+            )
+            return f"Tool '{tool['name']}' timed out after {timeout}s. Consider simplifying the request."
 
     # ============================================================
     # Message building

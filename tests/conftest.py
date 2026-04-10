@@ -186,6 +186,7 @@ def bare_agent(mock_llm_client):
     config.max_duplicate_actions = 2
     config.react_timeout = 210.0
     config.max_observation_tokens = 2000
+    config.tool_result_persist_threshold = 0
     config.max_context_tokens = 8192
     config.memory_mode = "off"
     config.memory_recall_mode = "tool"
