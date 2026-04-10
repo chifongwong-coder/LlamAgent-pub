@@ -460,7 +460,15 @@ class ChildAgentModule(Module):
         for r in results:
             task_preview = r.task[:50] + "..." if len(r.task) > 50 else r.task
             result_preview = r.result[:200] if r.result else "(no output)"
-            lines.append(f"[{r.role}] {task_preview}\nResult: {result_preview}")
+            cost_parts = []
+            if r.metrics.get("llm_calls"):
+                cost_parts.append(f"{r.metrics['llm_calls']} LLM calls")
+            if r.metrics.get("tokens_used"):
+                cost_parts.append(f"{r.metrics['tokens_used']} tokens")
+            if r.metrics.get("elapsed_seconds"):
+                cost_parts.append(f"{r.metrics['elapsed_seconds']}s")
+            cost_line = f"\nCost: {', '.join(cost_parts)}" if cost_parts else ""
+            lines.append(f"[{r.role}] {task_preview}\nResult: {result_preview}{cost_line}")
         return "\n\n".join(lines)
 
     # ============================================================
