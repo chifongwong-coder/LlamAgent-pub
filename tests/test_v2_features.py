@@ -1552,3 +1552,111 @@ def test_command_runner_safe_env():
         assert "LLAMAGENT_SECRET_TEST" not in env2
     finally:
         del os.environ["LLAMAGENT_SECRET_TEST"]
+
+
+# ============================================================
+# v2.4.3: ProcessRunner — subprocess child agents
+# ============================================================
+
+
+def test_command_runner_start():
+    """CommandRunner.start: returns Popen handle, subprocess runs and produces output."""
+    from llamagent.modules.command_runner import CommandRunner
+
+    proc = CommandRunner.start(cmd=["echo", "hello"])
+    stdout, stderr = proc.communicate(timeout=5)
+
+    assert proc.returncode == 0
+    assert "hello" in stdout
+
+
+def test_agent_runner_entry_point(tmp_path):
+    """agent_runner entry point: subprocess exits and produces JSON with 'status' field."""
+    import json
+    import subprocess
+    import sys
+
+    spec_data = {
+        "task": "say hello",
+        "role": "delegate",
+        "context": "",
+        "config": {
+            "model": "mock",
+            "system_prompt": "You are helpful",
+            "max_react_steps": 1,
+            "react_timeout": 10,
+            "project_dir": str(tmp_path),
+            "playground_dir": str(tmp_path / "playground"),
+        },
+        "tool_allowlist": [],
+        "budget": {
+            "max_llm_calls": 1,
+            "max_time_seconds": 10,
+        },
+    }
+
+    spec_path = tmp_path / "test_spec.json"
+    spec_path.write_text(json.dumps(spec_data))
+
+    result = subprocess.run(
+        [sys.executable, "-m", "llamagent.agent_runner", "--spec", str(spec_path)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    # The process should exit (may fail due to no real LLM, but should produce JSON)
+    output = json.loads(result.stdout)
+    assert "status" in output
+    assert output["status"] in ("completed", "failed", "cancelled")
+
+
+def test_process_runner_spawn_wait(tmp_path):
+    """ProcessRunnerBackend: spec serialization round-trip via _write_spec_file."""
+    import json
+    from types import SimpleNamespace
+
+    from llamagent.modules.child_agent.runners.process import ProcessRunnerBackend
+    from llamagent.modules.child_agent.policy import ChildAgentSpec, AgentExecutionPolicy
+    from llamagent.modules.child_agent.budget import Budget
+
+    mock_config = SimpleNamespace(
+        model="test-model",
+        project_dir=str(tmp_path),
+        playground_dir=str(tmp_path / "play"),
+    )
+
+    runner = ProcessRunnerBackend(parent_config=mock_config)
+
+    budget = Budget(max_llm_calls=10, max_time_seconds=120)
+    policy = AgentExecutionPolicy(
+        tool_allowlist=["web_search", "read_files"],
+        budget=budget,
+    )
+    spec = ChildAgentSpec(
+        task="research AI papers",
+        role="researcher",
+        system_prompt="You are a researcher.",
+        context="Focus on agent frameworks",
+        policy=policy,
+    )
+
+    spec_path = runner._write_spec_file("test123", spec)
+    try:
+        with open(spec_path, "r") as f:
+            data = json.load(f)
+
+        assert data["task"] == "research AI papers"
+        assert data["role"] == "researcher"
+        assert data["config"]["model"] == "test-model"
+        assert data["config"]["system_prompt"] == "You are a researcher."
+        assert data["tool_allowlist"] == ["web_search", "read_files"]
+        assert data["budget"]["max_llm_calls"] == 10
+        assert data["budget"]["max_time_seconds"] == 120
+    finally:
+        import os, shutil
+        try:
+            os.unlink(spec_path)
+            os.rmdir(os.path.dirname(spec_path))
+        except OSError:
+            shutil.rmtree(os.path.dirname(spec_path), ignore_errors=True)

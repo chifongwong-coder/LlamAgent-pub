@@ -110,6 +110,46 @@ class CommandRunner:
             )
 
     @staticmethod
+    def start(
+        cmd: list[str],
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        inherit_env: bool = False,
+    ) -> subprocess.Popen:
+        """Start a command without waiting. Returns a Popen handle.
+
+        The caller is responsible for communicating with and reaping the process.
+        Environment handling is identical to run(): *inherit_env* controls whether
+        the current process environment is inherited.
+
+        Args:
+            cmd: Command and arguments as a list of strings.
+            cwd: Working directory for the subprocess.
+            env: Environment variables for the subprocess.
+            inherit_env: If True, start from the current process environment
+                and overlay *env* on top. If False, use *env* directly (or
+                build_safe_env() when *env* is None).
+
+        Returns:
+            A subprocess.Popen instance with stdout=PIPE, stderr=PIPE, text=True.
+        """
+        if inherit_env:
+            effective_env = dict(os.environ)
+            if env:
+                effective_env.update(env)
+        else:
+            effective_env = env if env is not None else CommandRunner.build_safe_env()
+
+        return subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+            env=effective_env,
+        )
+
+    @staticmethod
     def build_safe_env(extra: dict[str, str] | None = None) -> dict[str, str]:
         """Build a minimal safe environment for subprocess isolation.
 
