@@ -1737,3 +1737,143 @@ def test_child_metrics_include_budget(bare_agent, mock_llm_client):
     assert "llm_calls" in metrics
     assert metrics["llm_calls"] >= 1  # At least one LLM call was made
     assert "tokens_used" in metrics
+
+
+# ============================================================
+# v2.5: Tool System Enhancements
+# ============================================================
+
+# --- Feature 1: Large Result Persistence ---
+
+def test_large_result_persisted(bare_agent, tmp_path):
+    """When tool result exceeds max_observation_tokens and read_files is available,
+    persist the full result to a file and return preview + path hint."""
+    bare_agent.config.max_observation_tokens = 100
+    bare_agent.playground_dir = str(tmp_path)
+
+    # Register read_files so persistence path is activated
+    bare_agent.register_tool(
+        "read_files", lambda path="": "file content", "read files tool",
+        parameters={"type": "object", "properties": {"path": {"type": "string"}}},
+    )
+
+    # Build a large result string (~10000 chars, well above 100 token threshold)
+    large_content = "A" * 10_000
+
+    result = bare_agent._truncate_observation(large_content, tool_name="web_search")
+
+    # Should contain the persistence hint, not just a plain truncation
+    assert "Full result saved to:" in result
+    assert "read_files" in result
+
+    # Verify the file was actually written to disk with full content
+    tool_results_dir = tmp_path / "tool_results"
+    assert tool_results_dir.is_dir()
+    saved_files = list(tool_results_dir.iterdir())
+    assert len(saved_files) == 1
+    assert saved_files[0].name.startswith("web_search_")
+    assert saved_files[0].read_text() == large_content
+
+
+def test_large_result_fallback_no_read_files(bare_agent, tmp_path):
+    """Without read_files tool registered, large results fall back to plain truncation."""
+    bare_agent.config.max_observation_tokens = 100
+    bare_agent.playground_dir = str(tmp_path)
+
+    # Do NOT register read_files
+    large_content = "B" * 10_000
+
+    result = bare_agent._truncate_observation(large_content, tool_name="web_search")
+
+    # Should be truncated, not persisted
+    assert "content truncated" in result
+    assert "Full result saved to:" not in result
+
+    # No file should have been created
+    tool_results_dir = tmp_path / "tool_results"
+    assert not tool_results_dir.exists()
+
+
+# --- Feature 2: Tool Input JSON Schema Validation ---
+
+def test_validation_missing_required(bare_agent):
+    """Calling a tool with missing required arguments returns a validation error."""
+    bare_agent.register_tool(
+        "search", lambda query: query, "search tool",
+        parameters={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+    )
+
+    result = bare_agent.call_tool("search", {})
+
+    assert "argument error" in result
+    assert "query" in result
+
+
+def test_validation_wrong_type(bare_agent):
+    """Calling a tool with wrong argument type returns a type mismatch error."""
+    bare_agent.register_tool(
+        "count_items", lambda count: count, "count tool",
+        parameters={
+            "type": "object",
+            "properties": {"count": {"type": "integer"}},
+            "required": ["count"],
+        },
+    )
+
+    result = bare_agent.call_tool("count_items", {"count": "not_a_number"})
+
+    assert "argument error" in result
+    assert "integer" in result
+
+
+def test_validation_passes(bare_agent):
+    """Valid arguments pass validation and the tool executes normally."""
+    bare_agent.register_tool(
+        "search", lambda query: f"results for {query}", "search tool",
+        parameters={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+    )
+
+    result = bare_agent.call_tool("search", {"query": "hello"})
+
+    assert result == "results for hello"
+
+
+# --- Feature 3: Per-Tool Timeout ---
+
+def test_per_tool_timeout(bare_agent):
+    """A tool with a short timeout that sleeps too long returns a timeout error."""
+    def slow_tool():
+        time.sleep(10)
+        return "should not reach here"
+
+    bare_agent.register_tool(
+        "slow", slow_tool, "slow tool",
+        timeout=0.5,
+    )
+
+    start = time.time()
+    result = bare_agent.call_tool("slow", {})
+    elapsed = time.time() - start
+
+    assert "timed out" in result
+    # Should return quickly (~0.5s), not wait 10s
+    assert elapsed < 3.0
+
+
+def test_per_tool_no_timeout(bare_agent):
+    """A tool without per-tool timeout executes normally."""
+    bare_agent.register_tool(
+        "fast", lambda: "fast result", "fast tool",
+    )
+
+    result = bare_agent.call_tool("fast", {})
+
+    assert result == "fast result"
