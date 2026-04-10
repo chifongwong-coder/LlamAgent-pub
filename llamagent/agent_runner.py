@@ -112,11 +112,18 @@ def main():
         result_text = agent.chat(prompt)
         elapsed = time.time() - start_time
 
+        metrics = {"elapsed_seconds": round(elapsed, 2)}
+        if hasattr(agent.llm, 'tracker'):
+            t = agent.llm.tracker
+            metrics["tokens_used"] = t.tokens_used
+            metrics["llm_calls"] = t.llm_calls
+            metrics["steps_used"] = t.steps_used
+
         output = {
             "status": "completed",
             "result": result_text,
             "history": list(agent.history),
-            "metrics": {"elapsed_seconds": round(elapsed, 2)},
+            "metrics": metrics,
         }
 
     except SystemExit:
