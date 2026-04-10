@@ -72,15 +72,13 @@ class ThreadRunnerBackend(AgentRunnerBackend):
         """
         task_id = task_id or uuid.uuid4().hex[:12]
         event = threading.Event()
-        with self._lock:
-            self._events[task_id] = event
-
         thread = threading.Thread(
             target=self._run_child,
             args=(task_id, spec, agent_factory),
             daemon=True,
         )
         with self._lock:
+            self._events[task_id] = event
             self._threads[task_id] = thread
         thread.start()
         return task_id
@@ -256,11 +254,10 @@ class ThreadRunnerBackend(AgentRunnerBackend):
         """
         with self._lock:
             running = list(self._agents.items())
+            threads_snapshot = list(self._threads.items())
         for task_id, child in running:
             child._abort = True
         deadline = time.time() + timeout
-        with self._lock:
-            threads_snapshot = list(self._threads.items())
         for task_id, thread in threads_snapshot:
             remaining = max(0, deadline - time.time())
             thread.join(timeout=remaining)

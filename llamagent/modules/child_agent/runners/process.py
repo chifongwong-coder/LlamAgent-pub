@@ -312,7 +312,9 @@ class ProcessRunnerBackend(AgentRunnerBackend):
 
         # Join all monitor threads
         deadline = time.time() + timeout
-        for task_id, thread in list(self._monitor_threads.items()):
+        with self._lock:
+            monitors_snapshot = list(self._monitor_threads.items())
+        for task_id, thread in monitors_snapshot:
             remaining = max(0, deadline - time.time())
             thread.join(timeout=remaining)
 
