@@ -91,29 +91,38 @@ class TaskBoard:
             record = self._tasks.get(task_id)
             if record is None:
                 raise KeyError(f"Task '{task_id}' not found on the task board")
-            for key, value in kwargs.items():
-                if hasattr(record, key):
-                    setattr(record, key, value)
+            # Atomic replace: create a new record with updated fields to prevent
+            # readers from observing partially-updated state via mutable references.
+            from dataclasses import replace
+            self._tasks[task_id] = replace(record, **{
+                k: v for k, v in kwargs.items() if hasattr(record, k)
+            })
 
     def get(self, task_id: str) -> TaskRecord | None:
-        """Look up a task record by ID. Returns None if not found."""
+        """Look up a task record by ID. Returns a snapshot (safe for concurrent reads)."""
         with self._lock:
-            return self._tasks.get(task_id)
+            record = self._tasks.get(task_id)
+            if record is None:
+                return None
+            from dataclasses import replace
+            return replace(record)
 
     def children_of(self, parent_id: str) -> list[TaskRecord]:
-        """Return all task records belonging to a given parent."""
+        """Return snapshot copies of all task records belonging to a given parent."""
+        from dataclasses import replace
         with self._lock:
-            return [r for r in self._tasks.values() if r.parent_id == parent_id]
+            return [replace(r) for r in self._tasks.values() if r.parent_id == parent_id]
 
     def collect_results(self, parent_id: str) -> list[TaskRecord]:
         """
-        Collect results from all completed or failed children of a parent.
+        Collect snapshot copies of completed/failed children of a parent.
 
         Returns:
             List of TaskRecords with status in ("completed", "failed").
         """
+        from dataclasses import replace
         with self._lock:
             return [
-                r for r in self._tasks.values()
+                replace(r) for r in self._tasks.values()
                 if r.parent_id == parent_id and r.status in ("completed", "failed")
             ]
