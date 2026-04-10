@@ -21,6 +21,17 @@ from llamagent.modules.child_agent.task_board import TaskRecord
 logger = logging.getLogger(__name__)
 
 
+def _build_metrics(elapsed: float, child=None) -> dict:
+    """Build metrics dict with elapsed time and budget tracker stats if available."""
+    metrics = {"elapsed_seconds": round(elapsed, 2)}
+    if child is not None and hasattr(child, 'llm') and hasattr(child.llm, 'tracker'):
+        t = child.llm.tracker
+        metrics["tokens_used"] = t.tokens_used
+        metrics["llm_calls"] = t.llm_calls
+        metrics["steps_used"] = t.steps_used
+    return metrics
+
+
 class _ThreadLogCapture(logging.Handler):
     """Captures log records emitted by a specific thread."""
 
@@ -131,7 +142,7 @@ class ThreadRunnerBackend(AgentRunnerBackend):
                 status="completed",
                 result=result_text,
                 history=list(child.history),
-                metrics={"elapsed_seconds": round(elapsed, 2)},
+                metrics=_build_metrics(elapsed, child),
                 created_at=start_time,
                 completed_at=time.time(),
             )
@@ -150,7 +161,7 @@ class ThreadRunnerBackend(AgentRunnerBackend):
                 status="failed",
                 result=f"Budget exceeded: {e}",
                 history=list(child.history) if child else [],
-                metrics={"elapsed_seconds": round(elapsed, 2)},
+                metrics=_build_metrics(elapsed, child),
                 created_at=start_time,
                 completed_at=time.time(),
             )
@@ -169,7 +180,7 @@ class ThreadRunnerBackend(AgentRunnerBackend):
                 status="failed",
                 result=f"Execution error: {e}",
                 history=list(child.history) if child else [],
-                metrics={"elapsed_seconds": round(elapsed, 2)},
+                metrics=_build_metrics(elapsed, child),
                 created_at=start_time,
                 completed_at=time.time(),
             )

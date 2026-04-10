@@ -1713,3 +1713,27 @@ def test_process_runner_stderr_saved():
     # Explicit logs value
     record_with_logs = TaskRecord(task_id="test2", logs="some log output from stderr")
     assert record_with_logs.logs == "some log output from stderr"
+
+
+def test_child_metrics_include_budget(bare_agent, mock_llm_client):
+    """Child agent TaskRecord.metrics includes budget tracker stats (tokens, LLM calls)."""
+    from llamagent.modules.child_agent import ChildAgentModule
+
+    bare_agent.config.child_agent_runner = "inline"
+    mock_llm_client.set_responses([make_llm_response("research done")])
+
+    mod = ChildAgentModule()
+    bare_agent.register_module(mod)
+
+    # Spawn with researcher role (has budget: max_llm_calls=20)
+    mod._spawn_child(task="test research", role="researcher")
+
+    children = mod.controller.list_children(mod._parent_id)
+    assert len(children) == 1
+    metrics = children[0].metrics
+
+    assert "elapsed_seconds" in metrics
+    # Budget tracker stats should be present (researcher has a budget)
+    assert "llm_calls" in metrics
+    assert metrics["llm_calls"] >= 1  # At least one LLM call was made
+    assert "tokens_used" in metrics
