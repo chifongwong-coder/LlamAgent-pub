@@ -101,7 +101,11 @@ class ChildAgentController:
                     f"Cannot spawn more child agents."
                 )
 
-        task_id = self.runner.spawn(spec, agent_factory)
+        # Pre-generate task_id so we can create the board entry BEFORE spawning.
+        # This prevents a race where the callback fires before the board entry exists
+        # (happens when the child completes instantly, e.g., mock LLM in tests).
+        import uuid
+        task_id = uuid.uuid4().hex[:12]
 
         # Build input snapshot for debugging/auditing
         input_snapshot = {
@@ -118,23 +122,28 @@ class ChildAgentController:
                 "max_steps": spec.policy.budget.max_steps if spec.policy.budget else None,
             }
 
-        # Use runner.status() to determine initial state (runner-agnostic)
-        initial_status = self.runner.status(task_id)
+        # Create board entry FIRST (status=running), then spawn.
+        # The callback or status check will update it when the child completes.
         self.task_board.create(
             task_id=task_id,
             parent_id=spec.parent_task_id,
             role=spec.role,
             task=spec.task,
-            status=initial_status,
+            status="running",
             input_snapshot=input_snapshot,
             created_at=time.time(),
         )
 
-        # If already done (inline runner), sync result to task board immediately
-        if initial_status in ("completed", "failed"):
+        # Spawn with the pre-generated task_id
+        self.runner.spawn(spec, agent_factory, task_id=task_id)
+
+        # For sync runners (inline), the child is already done. Sync result immediately.
+        runner_status = self.runner.status(task_id)
+        if runner_status in ("completed", "failed"):
             record = self.runner.wait(task_id)
             self.task_board.update(
                 task_id,
+                status=record.status,
                 result=record.result,
                 history=record.history,
                 metrics=record.metrics,

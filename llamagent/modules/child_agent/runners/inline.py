@@ -32,18 +32,19 @@ class InlineRunnerBackend(AgentRunnerBackend):
     def __init__(self):
         self._results: dict[str, TaskRecord] = {}
 
-    def spawn(self, spec: ChildAgentSpec, agent_factory) -> str:
+    def spawn(self, spec: ChildAgentSpec, agent_factory, task_id: str | None = None) -> str:
         """
         Spawn and immediately execute a child agent inline.
 
         Args:
             spec: Child agent specification.
             agent_factory: Callable(spec) -> LlamAgent.
+            task_id: Optional pre-generated task_id.
 
         Returns:
             Unique task_id for the completed execution.
         """
-        task_id = uuid.uuid4().hex[:12]
+        task_id = task_id or uuid.uuid4().hex[:12]
         start_time = time.time()
         child = None
 

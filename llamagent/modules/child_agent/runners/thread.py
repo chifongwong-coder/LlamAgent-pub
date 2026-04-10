@@ -55,7 +55,7 @@ class ThreadRunnerBackend(AgentRunnerBackend):
         self._threads = {}
         self._events = {}
 
-    def spawn(self, spec: ChildAgentSpec, agent_factory) -> str:
+    def spawn(self, spec: ChildAgentSpec, agent_factory, task_id: str | None = None) -> str:
         """
         Spawn a child agent in a new thread, returning immediately.
 
@@ -65,11 +65,12 @@ class ThreadRunnerBackend(AgentRunnerBackend):
         Args:
             spec: Child agent specification.
             agent_factory: Callable(spec) -> LlamAgent.
+            task_id: Optional pre-generated task_id.
 
         Returns:
             Unique task_id for the spawned child.
         """
-        task_id = uuid.uuid4().hex[:12]
+        task_id = task_id or uuid.uuid4().hex[:12]
         event = threading.Event()
         with self._lock:
             self._events[task_id] = event
