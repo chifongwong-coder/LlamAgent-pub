@@ -26,6 +26,7 @@ class TaskRecord:
     metrics: dict = field(default_factory=dict)
     history: list[dict] = field(default_factory=list)
     input_snapshot: dict = field(default_factory=dict)
+    logs: str = ""
     created_at: float = 0
     completed_at: float = 0
 
