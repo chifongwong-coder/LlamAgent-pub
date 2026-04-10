@@ -22,16 +22,17 @@ class AgentRunnerBackend:
 
     name: str = "base"
 
-    def spawn(self, spec: ChildAgentSpec, agent_factory) -> str:
+    def spawn(self, spec: ChildAgentSpec, agent_factory, task_id: str | None = None) -> str:
         """
         Spawn a child agent to execute the given spec.
 
         Args:
             spec: The child agent specification (task, role, policy, etc.).
             agent_factory: Callable that takes a ChildAgentSpec and returns a LlamAgent.
+            task_id: Optional pre-generated task_id. If None, the backend generates one.
 
         Returns:
-            A unique task_id for the spawned child.
+            The task_id for the spawned child.
         """
         raise NotImplementedError("Subclasses must implement spawn()")
 

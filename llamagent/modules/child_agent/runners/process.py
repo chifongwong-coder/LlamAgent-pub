@@ -69,7 +69,7 @@ class ProcessRunnerBackend(AgentRunnerBackend):
         self._events = {}
         self._processes = {}
 
-    def spawn(self, spec: ChildAgentSpec, agent_factory) -> str:
+    def spawn(self, spec: ChildAgentSpec, agent_factory, task_id: str | None = None) -> str:
         """
         Spawn a child agent in a new subprocess.
 
@@ -79,11 +79,12 @@ class ProcessRunnerBackend(AgentRunnerBackend):
         Args:
             spec: Child agent specification.
             agent_factory: Unused (interface compatibility with AgentRunnerBackend).
+            task_id: Optional pre-generated task_id.
 
         Returns:
             Unique task_id for the spawned child.
         """
-        task_id = uuid.uuid4().hex[:12]
+        task_id = task_id or uuid.uuid4().hex[:12]
 
         # 1. Serialize spec to a temporary JSON file
         spec_path = self._write_spec_file(task_id, spec)
