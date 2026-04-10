@@ -171,6 +171,7 @@ class ProcessRunnerBackend(AgentRunnerBackend):
                 result=output.get("result", ""),
                 history=output.get("history", []),
                 metrics=output.get("metrics", {}),
+                logs=stderr[:5000] if stderr else "",
             )
         except subprocess.TimeoutExpired:
             proc.kill()
