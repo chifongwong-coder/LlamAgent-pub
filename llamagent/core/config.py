@@ -541,7 +541,7 @@ class Config:
             )
             self.reflection_backend = "rag"
 
-        if self.child_agent_runner not in ("inline", "thread"):
+        if self.child_agent_runner not in ("inline", "thread", "process"):
             logger.warning(
                 "child_agent_runner='%s' is invalid, falling back to 'inline'",
                 self.child_agent_runner,

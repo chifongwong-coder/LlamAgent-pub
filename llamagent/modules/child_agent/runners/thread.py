@@ -258,6 +258,8 @@ class ThreadRunnerBackend(AgentRunnerBackend):
         for task_id, child in running:
             child._abort = True
         deadline = time.time() + timeout
-        for task_id, thread in list(self._threads.items()):
+        with self._lock:
+            threads_snapshot = list(self._threads.items())
+        for task_id, thread in threads_snapshot:
             remaining = max(0, deadline - time.time())
             thread.join(timeout=remaining)

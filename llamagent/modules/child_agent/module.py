@@ -5,11 +5,12 @@ Registers tools for the parent agent:
 - spawn_child:      Spawn a child agent for a subtask with role-based constraints
 - list_children:    List all spawned child agents and their status
 - collect_results:  Collect results from all completed child agents
-- wait_child:       (thread runner only) Wait for a specific child and get its result
+- wait_child:       (thread/process runner) Wait for a specific child and get its result
 
-The module supports two runner backends:
+The module supports three runner backends:
 - InlineRunnerBackend (default): synchronous, in-process execution
 - ThreadRunnerBackend: concurrent execution in daemon threads
+- ProcessRunnerBackend: isolated execution in child subprocesses
 
 Each child agent is a constrained LlamAgent with filtered tools, budget limits,
 and no ability to spawn its own children (unless explicitly allowed by policy).
@@ -35,8 +36,8 @@ from llamagent.modules.child_agent.task_board import TaskBoard, TaskRecord
 logger = logging.getLogger(__name__)
 
 
-# LLM guide injected via on_context when runner=thread
-CHILD_AGENT_GUIDE_THREAD = (
+# LLM guide injected via on_context when runner is async (thread or process)
+CHILD_AGENT_GUIDE_ASYNC = (
     "[Child Agent] You can spawn multiple child agents in parallel.\n"
     "- Use spawn_child to start a child agent (returns immediately with task_id).\n"
     "- Use wait_child to wait for a specific child and get its result.\n"
@@ -219,9 +220,10 @@ class ChildAgentModule(Module):
     Each child is a constrained LlamAgent instance that inherits the parent's
     LLM and selected tools, but operates under strict resource limits.
 
-    Supports two runner backends:
+    Supports three runner backends:
     - inline (default): synchronous, blocking execution
     - thread: concurrent execution with async result collection
+    - process: isolated execution in child subprocesses
     """
 
     name = "child_agent"
@@ -246,6 +248,9 @@ class ChildAgentModule(Module):
         if self._runner_name == "thread":
             from llamagent.modules.child_agent.runners.thread import ThreadRunnerBackend
             runner = ThreadRunnerBackend()
+        elif self._runner_name == "process":
+            from llamagent.modules.child_agent.runners.process import ProcessRunnerBackend
+            runner = ProcessRunnerBackend(parent_config=agent.config)
         else:
             runner = InlineRunnerBackend()
 
@@ -310,8 +315,8 @@ class ChildAgentModule(Module):
             safety_level=1,
         )
 
-        # Register wait_child only for thread runner
-        if self._runner_name == "thread":
+        # Register wait_child for async runners (thread and process)
+        if self._runner_name in ("thread", "process"):
             agent.register_tool(
                 name="wait_child",
                 func=self._wait_child,
@@ -335,11 +340,11 @@ class ChildAgentModule(Module):
             )
 
     def on_context(self, messages: list[dict], context: str) -> str:
-        """Inject parallel child agent guide when runner=thread."""
-        if self._runner_name == "thread":
+        """Inject parallel child agent guide when runner is async (thread/process)."""
+        if self._runner_name in ("thread", "process"):
             if context:
-                return context + "\n\n" + CHILD_AGENT_GUIDE_THREAD
-            return CHILD_AGENT_GUIDE_THREAD
+                return context + "\n\n" + CHILD_AGENT_GUIDE_ASYNC
+            return CHILD_AGENT_GUIDE_ASYNC
         return context
 
     def on_shutdown(self):
