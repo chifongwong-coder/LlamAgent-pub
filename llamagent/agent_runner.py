@@ -61,20 +61,42 @@ def main():
         # Create agent
         agent = LlamAgent(config)
 
-        # Set project_dir and playground_dir from spec config
-        if spec_config.get("project_dir"):
-            agent.project_dir = spec_config["project_dir"]
-        if spec_config.get("playground_dir"):
-            agent.playground_dir = spec_config["playground_dir"]
+        # Set project_dir and playground_dir from spec config (workspace isolation)
+        import os
+        workspace_mode = spec_config.get("workspace_mode", "sandbox")
+        if workspace_mode == "project":
+            if spec_config.get("project_dir"):
+                agent.project_dir = spec_config["project_dir"]
+            if spec_config.get("playground_dir"):
+                agent.playground_dir = spec_config["playground_dir"]
+        else:
+            # Sandbox: create isolated workspace under parent's playground
+            parent_playground = spec_config.get("parent_playground_dir") or spec_config.get("playground_dir")
+            if parent_playground:
+                task_id = os.path.splitext(os.path.basename(args.spec))[0]
+                workspace_dir = os.path.join(parent_playground, "children", task_id)
+                os.makedirs(workspace_dir, exist_ok=True)
+                agent.project_dir = workspace_dir
+                agent.playground_dir = os.path.join(workspace_dir, "llama_playground")
+                os.makedirs(agent.playground_dir, exist_ok=True)
 
-        # Load tools + retrieval modules
+        # 1. Sandbox module (if parent has sandbox) — must register FIRST
+        #    so on_attach creates tool_executor before tools are loaded
+        if spec.get("sandbox_enabled"):
+            try:
+                from llamagent.modules.sandbox import SandboxModule
+                agent.register_module(SandboxModule())
+            except ImportError:
+                pass  # Sandbox module not installed
+
+        # 2. Load tools + retrieval modules
         from llamagent.modules.tools import ToolsModule
         from llamagent.modules.retrieval import RetrievalModule
 
         agent.register_module(ToolsModule())
         agent.register_module(RetrievalModule())
 
-        # Filter tools by allowlist
+        # 3. Filter tools by allowlist
         # Note: tool_denylist is not applied in process mode (known limitation).
         # Custom tool functions from the parent process are also not available.
         # Use ThreadRunner for scenarios requiring denylist or custom tools.
@@ -83,6 +105,18 @@ def main():
             for name in list(agent._tools):
                 if name not in tool_allowlist:
                     del agent._tools[name]
+
+        # 4. Apply execution_policy from spec to tools without a policy
+        ep_dict = spec.get("execution_policy")
+        if ep_dict:
+            try:
+                from llamagent.modules.sandbox.policy import ExecutionPolicy
+                policy = ExecutionPolicy(**ep_dict)
+                for tool in agent._tools.values():
+                    if tool.get("execution_policy") is None:
+                        tool["execution_policy"] = policy
+            except ImportError:
+                pass  # Sandbox policy module not available
 
         # Apply BudgetedLLM if budget specified
         budget_spec = spec.get("budget")

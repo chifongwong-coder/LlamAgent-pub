@@ -42,8 +42,9 @@ class ProcessRunnerBackend(AgentRunnerBackend):
 
     name = "process"
 
-    def __init__(self, parent_config=None, on_complete=None):
+    def __init__(self, parent_config=None, on_complete=None, parent_has_sandbox=False):
         self._parent_config = parent_config
+        self._parent_has_sandbox = parent_has_sandbox
         self._processes: dict[str, subprocess.Popen] = {}
         self._results: dict[str, TaskRecord] = {}
         self._events: dict[str, threading.Event] = {}
@@ -119,8 +120,15 @@ class ProcessRunnerBackend(AgentRunnerBackend):
         spec_dir = tempfile.mkdtemp(prefix="llamagent_proc_")
         spec_path = os.path.join(spec_dir, f"{task_id}.json")
 
+        # Determine model: policy model override > parent config model > fallback
+        model = (
+            spec.policy.model
+            if spec.policy and spec.policy.model
+            else (self._parent_config.model if self._parent_config else "auto")
+        )
+
         config_data = {
-            "model": self._parent_config.model if self._parent_config else "auto",
+            "model": model,
             "max_react_steps": (
                 spec.policy.budget.max_steps
                 if spec.policy and spec.policy.budget and spec.policy.budget.max_steps
@@ -134,6 +142,11 @@ class ProcessRunnerBackend(AgentRunnerBackend):
             "system_prompt": spec.system_prompt or f"You are a {spec.role}.",
             "project_dir": getattr(self._parent_config, "project_dir", None) if self._parent_config else None,
             "playground_dir": getattr(self._parent_config, "playground_dir", None) if self._parent_config else None,
+            "workspace_mode": spec.policy.workspace_mode if spec.policy else "sandbox",
+            "parent_playground_dir": (
+                getattr(self._parent_config, "playground_dir", None)
+                if self._parent_config else None
+            ),
         }
 
         data = {
@@ -146,7 +159,13 @@ class ProcessRunnerBackend(AgentRunnerBackend):
                 "max_llm_calls": spec.policy.budget.max_llm_calls,
                 "max_time_seconds": spec.policy.budget.max_time_seconds,
             } if spec.policy and spec.policy.budget else None,
+            "sandbox_enabled": self._parent_has_sandbox,
         }
+
+        # Serialize execution_policy for subprocess sandbox setup
+        if spec.policy and spec.policy.execution_policy is not None:
+            from dataclasses import asdict
+            data["execution_policy"] = asdict(spec.policy.execution_policy)
 
         with open(spec_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
