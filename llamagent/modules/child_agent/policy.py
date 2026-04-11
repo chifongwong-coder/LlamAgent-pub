@@ -39,6 +39,8 @@ class AgentExecutionPolicy:
     max_delegation_depth: int = 1
     history_mode: str = "none"
     result_mode: str = "text"
+    workspace_mode: str = "sandbox"  # "sandbox" | "project"
+    model: str | None = None  # None = inherit parent's model
 
 
 @dataclass
@@ -57,6 +59,7 @@ class ChildAgentSpec:
     policy: AgentExecutionPolicy | None = None
     parent_task_id: str | None = None
     artifact_refs: list[dict] = field(default_factory=list)
+    task_id: str | None = None  # Set by controller before factory call
 
 
 # ---------------------------------------------------------------------------
@@ -68,26 +71,36 @@ ROLE_POLICIES: dict[str, AgentExecutionPolicy] = {
         tool_allowlist=["web_search", "web_fetch", "search_knowledge", "search_text", "read_files"],
         budget=Budget(max_llm_calls=20, max_time_seconds=300),
         can_spawn_children=False,
+        workspace_mode="sandbox",
     ),
     "writer": AgentExecutionPolicy(
         tool_allowlist=["read_files", "write_files", "apply_patch"],
         budget=Budget(max_llm_calls=15, max_time_seconds=300),
         can_spawn_children=False,
+        workspace_mode="sandbox",
     ),
     "analyst": AgentExecutionPolicy(
         tool_allowlist=["read_files", "search_text", "web_search", "search_knowledge"],
         budget=Budget(max_llm_calls=15, max_time_seconds=300),
         can_spawn_children=False,
+        workspace_mode="sandbox",
     ),
     "coder": AgentExecutionPolicy(
         tool_allowlist=["read_files", "write_files", "apply_patch", "start_job", "glob_files", "search_text"],
         execution_policy=POLICY_SANDBOXED_CODER if _SANDBOX_AVAILABLE else None,
         budget=Budget(max_llm_calls=30, max_time_seconds=600),
         can_spawn_children=False,
+        workspace_mode="project",
     ),
     "delegate": AgentExecutionPolicy(
         tool_allowlist=[],
         budget=Budget(max_llm_calls=1, max_time_seconds=30),
+        can_spawn_children=False,
+        workspace_mode="sandbox",
+    ),
+    "worker": AgentExecutionPolicy(
+        workspace_mode="project",
+        budget=Budget(max_llm_calls=30, max_time_seconds=600),
         can_spawn_children=False,
     ),
 }

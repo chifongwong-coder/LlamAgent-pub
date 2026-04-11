@@ -66,10 +66,11 @@ class ChildAgentController:
     """
 
     def __init__(self, runner: AgentRunnerBackend, task_board: TaskBoard,
-                 max_children: int = 20):
+                 max_children: int = 20, module_on_complete=None):
         self.runner = runner
         self.task_board = task_board
         self.max_children = max_children
+        self._module_on_complete = module_on_complete
 
         # Wire completion callback for async runners
         if hasattr(runner, '_on_complete'):
@@ -107,6 +108,9 @@ class ChildAgentController:
         import uuid
         task_id = uuid.uuid4().hex[:12]
 
+        # Set task_id on spec so the agent factory can use it (e.g., for workspace dir)
+        spec.task_id = task_id
+
         # Build input snapshot for debugging/auditing
         input_snapshot = {
             "task": spec.task,
@@ -121,6 +125,13 @@ class ChildAgentController:
                 "max_time_seconds": spec.policy.budget.max_time_seconds if spec.policy.budget else None,
                 "max_steps": spec.policy.budget.max_steps if spec.policy.budget else None,
             }
+            # Record workspace path for sandbox mode children
+            if spec.policy.workspace_mode != "project":
+                import os
+                # workspace_dir is derived from parent playground_dir (set by module)
+                input_snapshot["workspace_dir"] = os.path.join(
+                    "children", task_id
+                )
 
         # Create board entry FIRST (status=running), then spawn.
         # The callback or status check will update it when the child completes.
@@ -150,6 +161,11 @@ class ChildAgentController:
                 logs=record.logs,
                 completed_at=time.time(),
             )
+            # Trigger module callback for inline completion (memorize entry point)
+            if self._module_on_complete:
+                board_record = self.task_board.get(task_id)
+                if board_record:
+                    self._module_on_complete(task_id, board_record)
 
         return task_id
 
@@ -176,6 +192,12 @@ class ChildAgentController:
         except KeyError:
             # Task board record not yet created (unlikely race); log and skip
             logger.warning("on_child_complete: task_id '%s' not on board", task_id)
+
+        # Trigger module callback (memorize entry point for async runners)
+        if self._module_on_complete:
+            board_record = self.task_board.get(task_id)
+            if board_record:
+                self._module_on_complete(task_id, board_record)
 
     def wait_child(self, task_id: str, timeout: float | None = None) -> TaskRecord:
         """Wait for a child and return its task record from the board."""
@@ -246,12 +268,18 @@ class ChildAgentModule(Module):
         self.task_board: TaskBoard | None = None
         self._parent_id: str | None = None  # Scope key for list/collect
         self._runner_name: str = "inline"
+        self._role_model_overrides: dict[str, str] = {}
+        self._auto_memorize: bool = True
 
     def on_attach(self, agent):
         """Initialize controller, task board, and register tools."""
         super().on_attach(agent)
         self._parent_id = str(id(agent))
         self.task_board = TaskBoard()
+
+        # Read config-level role model overrides
+        self._role_model_overrides = getattr(agent.config, "child_agent_role_models", {}) or {}
+        self._auto_memorize = getattr(agent.config, "child_agent_auto_memorize", True)
 
         # Select runner backend from config
         self._runner_name = getattr(agent.config, "child_agent_runner", "inline")
@@ -262,12 +290,16 @@ class ChildAgentModule(Module):
             runner = ThreadRunnerBackend()
         elif self._runner_name == "process":
             from llamagent.modules.child_agent.runners.process import ProcessRunnerBackend
-            runner = ProcessRunnerBackend(parent_config=agent.config)
+            runner = ProcessRunnerBackend(
+                parent_config=agent.config,
+                parent_has_sandbox=agent.tool_executor is not None,
+            )
         else:
             runner = InlineRunnerBackend()
 
         self.controller = ChildAgentController(
             runner, self.task_board, max_children=max_children,
+            module_on_complete=self._on_module_child_complete,
         )
 
         # Register tools
@@ -364,9 +396,21 @@ class ChildAgentModule(Module):
         return context
 
     def on_shutdown(self):
-        """Shutdown the runner backend (relevant for thread runner)."""
+        """Shutdown the runner backend and cleanup sandbox workspace directories."""
         if self.controller:
             self.controller.runner.shutdown()
+        self._cleanup_workspaces()
+
+    def _cleanup_workspaces(self):
+        """Remove sandbox workspace directories for completed children."""
+        import os
+        children_dir = os.path.join(self.agent.playground_dir, "children")
+        if os.path.isdir(children_dir):
+            import shutil
+            try:
+                shutil.rmtree(children_dir)
+            except OSError as e:
+                logger.warning("Failed to cleanup children workspaces: %s", e)
 
     # ============================================================
     # Tool implementations
@@ -374,7 +418,13 @@ class ChildAgentModule(Module):
 
     def _spawn_child(self, task: str, role: str = "worker", context: str = "") -> str:
         """Spawn a child agent for the given task."""
-        policy = ROLE_POLICIES.get(role, AgentExecutionPolicy())
+        policy = copy.copy(ROLE_POLICIES.get(role, AgentExecutionPolicy()))
+
+        # Apply config-level model override for this role
+        model_override = self._role_model_overrides.get(role)
+        if model_override:
+            policy.model = model_override
+
         spec = ChildAgentSpec(
             task=task,
             role=role,
@@ -421,6 +471,13 @@ class ChildAgentModule(Module):
             result = f"Result: {result}\n\nFull history:\n{history_text}"
         if include_logs and record.logs:
             result += f"\n\nChild logs:\n{record.logs[:2000]}"
+        # Include workspace path for sandbox mode children
+        if record.input_snapshot and record.input_snapshot.get("workspace_dir"):
+            import os
+            workspace_dir = os.path.join(
+                self.agent.playground_dir, record.input_snapshot["workspace_dir"]
+            )
+            result += f"\n\nWorkspace: {workspace_dir}"
         return result
 
     def _list_children(self) -> str:
@@ -517,12 +574,18 @@ class ChildAgentModule(Module):
             config.max_react_steps = 5
             config.react_timeout = 60
 
-        # Build child LLM (budget-wrapped or shared)
+        # Determine base LLM for child (model override or inherited)
+        if spec.policy and spec.policy.model:
+            base_llm = parent._get_llm(spec.policy.model)
+        else:
+            base_llm = self.llm  # module LLM (inherits parent or module_models)
+
+        # Wrap with budget tracking if needed
         if spec.policy and spec.policy.budget:
             tracker = BudgetTracker(spec.policy.budget)
-            child_llm = BudgetedLLM(self.llm, tracker)
+            child_llm = BudgetedLLM(base_llm, tracker)
         else:
-            child_llm = self.llm
+            child_llm = base_llm
 
         # Create child agent via normal constructor, then replace internals
         child = LlamAgent(config)
@@ -533,9 +596,26 @@ class ChildAgentModule(Module):
         child.summary = None
         child.conversation = child.history
         child._execution_strategy = SimpleReAct()
-        # Inherit zone system settings from parent (snapshotted paths, not os.getcwd())
-        child.project_dir = parent.project_dir
-        child.playground_dir = parent.playground_dir
+        # Workspace isolation: sandbox mode gets an isolated workspace,
+        # project mode inherits parent's full project access.
+        # When policy is None (backward compat), default to project mode.
+        import os
+        import uuid as _uuid
+        workspace_mode = spec.policy.workspace_mode if spec.policy else "project"
+        if workspace_mode == "project":
+            # Trusted role or no policy: full project access
+            child.project_dir = parent.project_dir
+            child.playground_dir = parent.playground_dir
+        else:
+            # Sandbox mode: isolated workspace under parent's playground
+            child_task_id = spec.task_id or _uuid.uuid4().hex[:12]
+            workspace_dir = os.path.join(
+                parent.playground_dir, "children", child_task_id
+            )
+            os.makedirs(workspace_dir, exist_ok=True)
+            child.project_dir = workspace_dir
+            child.playground_dir = os.path.join(workspace_dir, "llama_playground")
+            os.makedirs(child.playground_dir, exist_ok=True)
         child.confirm_handler = parent.confirm_handler
         child.interaction_handler = getattr(parent, "interaction_handler", None)
         child.mode = getattr(parent, "mode", "interactive")
@@ -569,3 +649,25 @@ class ChildAgentModule(Module):
                     tool["execution_policy"] = spec.policy.execution_policy
 
         return child
+
+    # ============================================================
+    # Memory callbacks
+    # ============================================================
+
+    def _on_module_child_complete(self, task_id: str, record: TaskRecord):
+        """Module-level callback: auto-memorize child results."""
+        if self._auto_memorize and record.status == "completed" and record.result:
+            self._save_child_result_to_memory(record.task, record.role, record.result)
+
+    def _save_child_result_to_memory(self, task: str, role: str, result: str):
+        """If parent has memory module, save child result as a memory fact."""
+        if not self.agent.has_module("memory"):
+            return
+        memory_mod = self.agent.get_module("memory")
+        if not hasattr(memory_mod, 'remember'):
+            return
+        content = f"Child agent ({role}) completed task: {task[:100]}. Result: {result[:200]}"
+        try:
+            memory_mod.remember(content, category="child_agent_result")
+        except Exception:
+            pass  # Memory save failure should not affect main flow
