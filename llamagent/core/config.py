@@ -109,6 +109,8 @@ _YAML_MAP = [
     (("persistence_dir",), "persistence_dir", str),
     (("child_agent", "runner"), "child_agent_runner", str),
     (("child_agent", "max_children"), "child_agent_max_children", int),
+    (("child_agent", "role_models"), "child_agent_role_models", dict),
+    (("child_agent", "auto_memorize"), "child_agent_auto_memorize", bool),
 ]
 
 # Build a set of valid YAML key paths for unknown-key detection
@@ -246,6 +248,8 @@ class Config:
         # Child agent
         self.child_agent_runner: str = "inline"
         self.child_agent_max_children: int = 20
+        self.child_agent_role_models: dict = {}
+        self.child_agent_auto_memorize: bool = True
 
         # Web
         self.web_search_provider: str = ""  # "" = auto-detect
