@@ -80,6 +80,11 @@ def main():
                 agent.playground_dir = os.path.join(workspace_dir, "llama_playground")
                 os.makedirs(agent.playground_dir, exist_ok=True)
 
+        # v2.7: import parent scopes for project mode scope inheritance
+        parent_scopes = spec.get("parent_scopes")
+        if parent_scopes:
+            agent._authorization_engine.import_scopes(parent_scopes)
+
         # 1. Sandbox module (if parent has sandbox) — must register FIRST
         #    so on_attach creates tool_executor before tools are loaded
         if spec.get("sandbox_enabled"):

@@ -229,6 +229,9 @@ def bare_agent(mock_llm_client):
     config.child_agent_max_children = 20
     config.child_agent_role_models = {}
     config.child_agent_auto_memorize = True
+    config.approval_mode = "persistent"
+    config.auto_approve = False
+    config.authorization_scopes = []
 
     agent = LlamAgent.__new__(LlamAgent)
     agent.config = config
