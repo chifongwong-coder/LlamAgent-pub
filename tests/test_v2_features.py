@@ -2574,3 +2574,177 @@ def test_empty_scope_backward_compat(bare_agent, tmp_path):
     result5 = bare_agent.call_tool("writer", {"path": target})
     assert result5 == "ok"
     assert len(handler_calls) == 2, "Third call triggers handler (temporary scope exhausted)"
+
+
+# ============================================================
+# v2.8: Messaging Infrastructure
+# ============================================================
+
+from llamagent.core.message_channel import MessageChannel, AgentRegistry, Message, MessageTrigger
+from llamagent.modules.child_agent.module import ChildAgentModule
+
+
+def test_message_channel_send_receive():
+    """MessageChannel: register 2 agents, send from A to B, B receives correct message."""
+    channel = MessageChannel()
+    channel.register("agent_a")
+    channel.register("agent_b")
+
+    msg_id = channel.send("agent_a", "agent_b", "hello from A", msg_type="info")
+    assert msg_id  # non-empty message id
+
+    msgs = channel.receive("agent_b")
+    assert len(msgs) == 1
+    m = msgs[0]
+    assert m.from_id == "agent_a"
+    assert m.to_id == "agent_b"
+    assert m.content == "hello from A"
+    assert m.msg_type == "info"
+    assert m.message_id == msg_id
+
+    # A's inbox should be empty (message was sent to B only)
+    assert channel.receive("agent_a") == []
+    # B's inbox should be empty after receive drained it
+    assert channel.receive("agent_b") == []
+
+
+def test_message_channel_broadcast():
+    """MessageChannel: broadcast from A reaches both B and C, but not A itself."""
+    channel = MessageChannel()
+    channel.register("agent_a")
+    channel.register("agent_b")
+    channel.register("agent_c")
+
+    channel.broadcast("agent_a", "alert to all", msg_type="alert")
+
+    msgs_b = channel.receive("agent_b")
+    msgs_c = channel.receive("agent_c")
+    assert len(msgs_b) == 1
+    assert len(msgs_c) == 1
+    assert msgs_b[0].content == "alert to all"
+    assert msgs_b[0].from_id == "agent_a"
+    assert msgs_b[0].msg_type == "alert"
+    assert msgs_c[0].content == "alert to all"
+
+    # Sender does not receive their own broadcast
+    assert channel.receive("agent_a") == []
+
+
+def test_message_channel_unknown_recipient():
+    """MessageChannel: send to unregistered agent_id raises KeyError."""
+    channel = MessageChannel()
+    channel.register("agent_a")
+
+    with pytest.raises(KeyError):
+        channel.send("agent_a", "nonexistent", "hello")
+
+
+def test_agent_registry_lifecycle():
+    """AgentRegistry: register/list/unregister + inbox cleanup."""
+    channel = MessageChannel()
+    registry = AgentRegistry(channel)
+
+    # Register an agent
+    registry.register("bot1", role="worker", mode="continuous")
+    agents = registry.list_agents()
+    assert len(agents) == 1
+    assert agents[0]["agent_id"] == "bot1"
+    assert agents[0]["role"] == "worker"
+    assert agents[0]["mode"] == "continuous"
+
+    # Unregister
+    registry.unregister("bot1")
+    assert registry.list_agents() == []
+
+    # Inbox should also be cleaned up -- send to unregistered fails
+    with pytest.raises(KeyError):
+        channel.send("anyone", "bot1", "should fail")
+
+
+def test_send_message_tool(bare_agent, mock_llm_client):
+    """_tool_send_message delivers a message to the second agent's inbox."""
+    # Set mode to continuous BEFORE registering module
+    bare_agent.mode = "continuous"
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    # Module should have initialized messaging in continuous mode
+    assert module._channel is not None
+    assert module._registry is not None
+
+    # Register a second agent in the registry
+    module._registry.register("helper_bot", role="helper", mode="continuous")
+
+    # Call the tool
+    result = module._tool_send_message(to_id="helper_bot", content="please help")
+    assert "sent" in result.lower() or "Message sent" in result
+
+    # Verify message arrived in the helper's inbox
+    msgs = module._channel.receive("helper_bot")
+    assert len(msgs) == 1
+    assert msgs[0].content == "please help"
+    assert msgs[0].from_id == bare_agent.agent_id
+
+
+def test_check_messages_tool(bare_agent, mock_llm_client):
+    """_tool_check_messages returns pending messages for the parent agent."""
+    bare_agent.mode = "continuous"
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    # Register a second agent and have it send a message to the parent
+    module._registry.register("sender_bot", role="sender", mode="continuous")
+    module._channel.send("sender_bot", bare_agent.agent_id, "status update: all good")
+
+    # Call the tool
+    result = module._tool_check_messages()
+    assert "sender_bot" in result
+    assert "status update: all good" in result
+
+    # Calling again should show no messages (inbox drained)
+    result2 = module._tool_check_messages()
+    assert "No pending messages" in result2 or "no" in result2.lower()
+
+
+def test_list_agents_tool(bare_agent, mock_llm_client):
+    """_tool_list_agents lists all registered agents."""
+    bare_agent.mode = "continuous"
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    # Parent is already registered by _init_messaging
+    # Register a second agent
+    module._registry.register("worker_1", role="researcher", mode="continuous")
+
+    result = module._tool_list_agents()
+    # Both agents should be listed
+    assert bare_agent.agent_id in result
+    assert "worker_1" in result
+    assert "researcher" in result
+
+
+def test_message_trigger():
+    """MessageTrigger: poll returns None when no messages, returns content when messages exist."""
+    channel = MessageChannel()
+    channel.register("listener")
+    channel.register("notifier")
+
+    trigger = MessageTrigger(channel=channel, agent_id="listener")
+
+    # No messages -> poll returns None
+    assert trigger.poll() is None
+
+    # Send a message to listener
+    channel.send("notifier", "listener", "wake up!")
+
+    # Poll should return formatted content
+    result = trigger.poll()
+    assert result is not None
+    assert "notifier" in result
+    assert "wake up!" in result
+
+    # After poll consumed the message, next poll returns None
+    assert trigger.poll() is None

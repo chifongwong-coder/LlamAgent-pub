@@ -233,8 +233,10 @@ def bare_agent(mock_llm_client):
     config.auto_approve = False
     config.authorization_scopes = []
 
+    import uuid
     agent = LlamAgent.__new__(LlamAgent)
     agent.config = config
+    agent.agent_id = uuid.uuid4().hex[:12]
     agent.persona = None
     agent.llm = mock_llm_client
     agent._llm_cache = {config.model: mock_llm_client}
