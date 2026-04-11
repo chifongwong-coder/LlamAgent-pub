@@ -1875,3 +1875,318 @@ def test_per_tool_no_timeout(bare_agent):
     result = bare_agent.call_tool("fast", {})
 
     assert result == "fast result"
+
+
+# ============================================================
+# v2.6: Feature 1 — Workspace Isolation
+# ============================================================
+
+
+def test_workspace_sandbox_mode(bare_agent, mock_llm_client, tmp_path):
+    """Sandbox-mode child (writer) gets isolated workspace under playground/children/."""
+    from llamagent.modules.child_agent.module import ChildAgentModule
+    from llamagent.modules.child_agent.policy import ChildAgentSpec, ROLE_POLICIES
+
+    bare_agent.project_dir = str(tmp_path / "project")
+    bare_agent.playground_dir = str(tmp_path / "project" / "llama_playground")
+    os.makedirs(bare_agent.playground_dir, exist_ok=True)
+
+    mock_llm_client.set_responses([make_llm_response("draft written")])
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    # Spawn sandbox-mode child (writer role defaults to workspace_mode="sandbox")
+    result = bare_agent.call_tool("spawn_child", {"task": "write a draft", "role": "writer"})
+    assert isinstance(result, str)
+
+    # Find the child workspace under playground/children/
+    children_dir = os.path.join(bare_agent.playground_dir, "children")
+    assert os.path.isdir(children_dir), "children/ directory should be created"
+
+    # There should be exactly one child workspace
+    child_dirs = os.listdir(children_dir)
+    assert len(child_dirs) == 1
+    child_workspace = os.path.join(children_dir, child_dirs[0])
+
+    # Child workspace should NOT be the parent's project_dir
+    assert child_workspace != bare_agent.project_dir
+
+    # Verify child's playground was also created inside workspace
+    child_playground = os.path.join(child_workspace, "llama_playground")
+    assert os.path.isdir(child_playground)
+
+
+def test_workspace_project_mode(bare_agent, mock_llm_client, tmp_path):
+    """Project-mode child (coder) inherits parent's project_dir."""
+    from llamagent.modules.child_agent.module import ChildAgentModule
+    from llamagent.modules.child_agent.policy import ChildAgentSpec, ROLE_POLICIES
+
+    bare_agent.project_dir = str(tmp_path / "project")
+    bare_agent.playground_dir = str(tmp_path / "project" / "llama_playground")
+    os.makedirs(bare_agent.playground_dir, exist_ok=True)
+
+    # Register required tools for coder role
+    bare_agent.register_tool("read_files", lambda paths="": "data", "Read files")
+    bare_agent.register_tool("write_files", lambda files="": "ok", "Write files")
+    bare_agent.register_tool("apply_patch", lambda t="", e="": "patched", "Patch")
+    bare_agent.register_tool("start_job", lambda cmd="": "out", "Job")
+    bare_agent.register_tool("glob_files", lambda p="": "files", "Glob")
+    bare_agent.register_tool("search_text", lambda q="": "found", "Search text")
+
+    mock_llm_client.set_responses([make_llm_response("code written")])
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    # Directly create a coder child to inspect its project_dir
+    spec = ChildAgentSpec(task="implement feature", role="coder", policy=ROLE_POLICIES["coder"])
+    spec.task_id = "test_coder_01"
+    child = module._create_child_agent(spec)
+
+    # Coder (project mode) should share parent's project_dir
+    assert child.project_dir == bare_agent.project_dir
+    assert child.playground_dir == bare_agent.playground_dir
+
+
+# ============================================================
+# v2.6: Feature 2 — Role Model Override
+# ============================================================
+
+
+def test_role_model_override(bare_agent, mock_llm_client, tmp_path):
+    """Config-level role_models override is applied via copy.copy, not mutating ROLE_POLICIES."""
+    import copy
+    from llamagent.modules.child_agent.module import ChildAgentModule
+    from llamagent.modules.child_agent.policy import AgentExecutionPolicy, ROLE_POLICIES
+
+    bare_agent.project_dir = str(tmp_path / "project")
+    bare_agent.playground_dir = str(tmp_path / "project" / "llama_playground")
+    os.makedirs(bare_agent.playground_dir, exist_ok=True)
+
+    # Set a model override for researcher role
+    bare_agent.config.child_agent_role_models = {"researcher": "mock-model-alt"}
+
+    # Snapshot ROLE_POLICIES researcher model BEFORE spawning
+    original_model = ROLE_POLICIES["researcher"].model  # should be None
+
+    mock_llm_client.set_responses([make_llm_response("research results")])
+
+    # Register tools needed by researcher
+    bare_agent.register_tool("web_search", lambda q="": "results", "Search")
+    bare_agent.register_tool("web_fetch", lambda u="": "page", "Fetch")
+    bare_agent.register_tool("search_knowledge", lambda q="": "kb", "KB")
+    bare_agent.register_tool("search_text", lambda q="": "found", "Search text")
+    bare_agent.register_tool("read_files", lambda paths="": "data", "Read files")
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    # Spawn researcher child
+    result = bare_agent.call_tool("spawn_child", {"task": "research AI", "role": "researcher"})
+    assert isinstance(result, str)
+    assert len(result) > 0
+
+    # ROLE_POLICIES should NOT be mutated (model should still be original value)
+    assert ROLE_POLICIES["researcher"].model == original_model
+
+
+def test_role_model_default_inherit(bare_agent, mock_llm_client, tmp_path):
+    """Without role_models override, child uses parent's LLM (default inheritance)."""
+    from llamagent.modules.child_agent.module import ChildAgentModule
+    from llamagent.modules.child_agent.policy import ChildAgentSpec, ROLE_POLICIES
+
+    bare_agent.project_dir = str(tmp_path / "project")
+    bare_agent.playground_dir = str(tmp_path / "project" / "llama_playground")
+    os.makedirs(bare_agent.playground_dir, exist_ok=True)
+
+    # No model overrides configured
+    bare_agent.config.child_agent_role_models = {}
+
+    # Register tools for writer role
+    bare_agent.register_tool("read_files", lambda paths="": "data", "Read files")
+    bare_agent.register_tool("write_files", lambda files="": "ok", "Write files")
+    bare_agent.register_tool("apply_patch", lambda t="", e="": "patched", "Patch")
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    # Create a writer child and inspect its LLM
+    import copy as _copy
+    policy = _copy.copy(ROLE_POLICIES["writer"])
+    spec = ChildAgentSpec(task="write docs", role="writer", policy=policy)
+    spec.task_id = "test_writer_01"
+    child = module._create_child_agent(spec)
+
+    # Child LLM should be a BudgetedLLM wrapping the module's LLM (parent's)
+    from llamagent.modules.child_agent.budget import BudgetedLLM
+    assert isinstance(child.llm, BudgetedLLM)
+    # The inner LLM should be the module's llm (which is the parent's mock)
+    assert child.llm._llm is module.llm
+
+
+# ============================================================
+# v2.6: Feature 3 — Sandbox Spec Serialization
+# ============================================================
+
+
+def test_process_spec_sandbox_enabled(tmp_path):
+    """ProcessRunnerBackend with parent_has_sandbox=True writes sandbox_enabled + execution_policy."""
+    import json
+    from llamagent.modules.child_agent.runners.process import ProcessRunnerBackend
+    from llamagent.modules.child_agent.policy import (
+        AgentExecutionPolicy, ChildAgentSpec, _SANDBOX_AVAILABLE,
+    )
+
+    # Build a minimal parent config
+    from types import SimpleNamespace
+    parent_config = SimpleNamespace(model="test-model", project_dir=str(tmp_path), playground_dir=str(tmp_path / "pg"))
+
+    backend = ProcessRunnerBackend(parent_config=parent_config, parent_has_sandbox=True)
+
+    # Build a spec with execution_policy (coder role has one if sandbox is available)
+    # Create a minimal execution_policy-like dataclass to test serialization
+    if _SANDBOX_AVAILABLE:
+        from llamagent.modules.sandbox.policy import ExecutionPolicy, POLICY_SANDBOXED_CODER
+        ep = POLICY_SANDBOXED_CODER
+    else:
+        # If sandbox module not installed, create a mock dataclass
+        from dataclasses import dataclass as _dc
+        @_dc
+        class _MockEP:
+            runtime: str = "python"
+            isolation: str = "process"
+        ep = _MockEP()
+
+    policy = AgentExecutionPolicy(
+        execution_policy=ep,
+        workspace_mode="project",
+    )
+    spec = ChildAgentSpec(task="code task", role="coder", policy=policy)
+
+    # Write the spec file
+    spec_path = backend._write_spec_file("test_sandbox_01", spec)
+    try:
+        with open(spec_path, "r") as f:
+            data = json.load(f)
+
+        # sandbox_enabled should be True (parent has sandbox)
+        assert data["sandbox_enabled"] is True
+
+        # execution_policy should be serialized as a dict
+        assert "execution_policy" in data
+        assert isinstance(data["execution_policy"], dict)
+        assert "runtime" in data["execution_policy"]
+    finally:
+        os.unlink(spec_path)
+        os.rmdir(os.path.dirname(spec_path))
+
+
+def test_process_spec_sandbox_disabled(tmp_path):
+    """ProcessRunnerBackend with parent_has_sandbox=False writes sandbox_enabled=False, no execution_policy."""
+    import json
+    from llamagent.modules.child_agent.runners.process import ProcessRunnerBackend
+    from llamagent.modules.child_agent.policy import AgentExecutionPolicy, ChildAgentSpec
+
+    from types import SimpleNamespace
+    parent_config = SimpleNamespace(model="test-model", project_dir=str(tmp_path), playground_dir=str(tmp_path / "pg"))
+
+    backend = ProcessRunnerBackend(parent_config=parent_config, parent_has_sandbox=False)
+
+    # Spec without execution_policy (typical for non-coder roles)
+    policy = AgentExecutionPolicy(workspace_mode="sandbox")
+    spec = ChildAgentSpec(task="research task", role="researcher", policy=policy)
+
+    spec_path = backend._write_spec_file("test_nosandbox_01", spec)
+    try:
+        with open(spec_path, "r") as f:
+            data = json.load(f)
+
+        # sandbox_enabled should be False
+        assert data["sandbox_enabled"] is False
+
+        # No execution_policy field (policy.execution_policy is None)
+        assert "execution_policy" not in data
+    finally:
+        os.unlink(spec_path)
+        os.rmdir(os.path.dirname(spec_path))
+
+
+# ============================================================
+# v2.6: Feature 4 — Memory Auto-Memorize
+# ============================================================
+
+
+def test_child_auto_memorize(bare_agent, mock_llm_client, tmp_path):
+    """When parent has MemoryModule and auto_memorize=True, child result is saved to memory."""
+    from unittest.mock import MagicMock, patch
+    from llamagent.core.agent import Module
+    from llamagent.modules.child_agent.module import ChildAgentModule
+
+    bare_agent.project_dir = str(tmp_path / "project")
+    bare_agent.playground_dir = str(tmp_path / "project" / "llama_playground")
+    os.makedirs(bare_agent.playground_dir, exist_ok=True)
+    bare_agent.config.child_agent_auto_memorize = True
+
+    # Create a mock memory module with remember()
+    class MockMemoryModule(Module):
+        name = "memory"
+        description = "mock memory"
+        def __init__(self):
+            self.remembered = []
+        def remember(self, content, category="manual"):
+            self.remembered.append({"content": content, "category": category})
+
+    memory_mod = MockMemoryModule()
+    bare_agent.register_module(memory_mod)
+
+    mock_llm_client.set_responses([make_llm_response("analysis complete: AI trends are...")])
+
+    child_module = ChildAgentModule()
+    bare_agent.register_module(child_module)
+
+    # Spawn a child (inline runner -> completes immediately -> triggers memorize)
+    result = bare_agent.call_tool("spawn_child", {"task": "analyze trends", "role": "worker"})
+    assert isinstance(result, str)
+    assert len(result) > 0
+
+    # Memory module should have been called
+    assert len(memory_mod.remembered) == 1
+    assert memory_mod.remembered[0]["category"] == "child_agent_result"
+    assert "analyze trends" in memory_mod.remembered[0]["content"]
+
+
+def test_child_auto_memorize_disabled(bare_agent, mock_llm_client, tmp_path):
+    """When auto_memorize=False, child result is NOT saved to memory even if MemoryModule exists."""
+    from unittest.mock import MagicMock
+    from llamagent.core.agent import Module
+    from llamagent.modules.child_agent.module import ChildAgentModule
+
+    bare_agent.project_dir = str(tmp_path / "project")
+    bare_agent.playground_dir = str(tmp_path / "project" / "llama_playground")
+    os.makedirs(bare_agent.playground_dir, exist_ok=True)
+    bare_agent.config.child_agent_auto_memorize = False
+
+    # Create a mock memory module with remember()
+    class MockMemoryModule(Module):
+        name = "memory"
+        description = "mock memory"
+        def __init__(self):
+            self.remembered = []
+        def remember(self, content, category="manual"):
+            self.remembered.append({"content": content, "category": category})
+
+    memory_mod = MockMemoryModule()
+    bare_agent.register_module(memory_mod)
+
+    mock_llm_client.set_responses([make_llm_response("done with task")])
+
+    child_module = ChildAgentModule()
+    bare_agent.register_module(child_module)
+
+    # Spawn a child
+    result = bare_agent.call_tool("spawn_child", {"task": "do something", "role": "worker"})
+    assert isinstance(result, str)
+
+    # Memory module should NOT have been called
+    assert len(memory_mod.remembered) == 0
