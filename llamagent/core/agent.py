@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Generator, Literal
 
@@ -326,6 +327,7 @@ class LlamAgent:
             persona: Persona object; uses config.system_prompt as default identity when None
         """
         self.config = config or Config()
+        self.agent_id: str = uuid.uuid4().hex[:12]
         self.persona = persona
         self.llm = LLMClient(
             model=self.config.model,

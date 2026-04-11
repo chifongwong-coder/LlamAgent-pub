@@ -270,11 +270,15 @@ class ChildAgentModule(Module):
         self._runner_name: str = "inline"
         self._role_model_overrides: dict[str, str] = {}
         self._auto_memorize: bool = True
+        # Messaging infrastructure (initialized for continuous mode agents)
+        self._channel = None
+        self._registry = None
+        self._agent_id: str | None = None
 
     def on_attach(self, agent):
         """Initialize controller, task board, and register tools."""
         super().on_attach(agent)
-        self._parent_id = str(id(agent))
+        self._parent_id = agent.agent_id
         self.task_board = TaskBoard()
 
         # Read config-level role model overrides
@@ -388,6 +392,86 @@ class ChildAgentModule(Module):
                 safety_level=1,
             )
 
+        # Initialize messaging infrastructure for continuous mode agents
+        if agent.mode == "continuous":
+            self._init_messaging(agent)
+
+    def _init_messaging(self, agent):
+        """Set up MessageChannel, AgentRegistry, and register messaging tools."""
+        from llamagent.core.message_channel import AgentRegistry, MessageChannel
+
+        self._channel = MessageChannel()
+        self._registry = AgentRegistry(self._channel)
+        self._agent_id = agent.agent_id
+        self._registry.register(self._agent_id, role="parent", mode="continuous")
+
+        agent.register_tool(
+            name="send_message",
+            func=self._tool_send_message,
+            description="Send a message to another agent by agent_id",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "to_id": {
+                        "type": "string",
+                        "description": "The agent_id of the recipient",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Message content to send",
+                    },
+                    "msg_type": {
+                        "type": "string",
+                        "description": "Message type: info, alert, request, or response",
+                        "enum": ["info", "alert", "request", "response"],
+                    },
+                },
+                "required": ["to_id", "content"],
+            },
+            tier="default",
+            safety_level=1,
+        )
+
+        agent.register_tool(
+            name="check_messages",
+            func=self._tool_check_messages,
+            description="Check and return all pending messages in your inbox",
+            tier="default",
+            safety_level=1,
+        )
+
+        agent.register_tool(
+            name="list_agents",
+            func=self._tool_list_agents,
+            description="List all active agents in the registry",
+            tier="default",
+            safety_level=1,
+        )
+
+    def _tool_send_message(self, to_id: str, content: str, msg_type: str = "info") -> str:
+        """Send a message to another agent."""
+        try:
+            msg_id = self._channel.send(self._agent_id, to_id, content, msg_type)
+            return f"Message sent (id: {msg_id})"
+        except KeyError:
+            return f"Agent '{to_id}' not found."
+
+    def _tool_check_messages(self) -> str:
+        """Check and return pending messages."""
+        msgs = self._channel.receive(self._agent_id)
+        if not msgs:
+            return "No pending messages."
+        lines = [f"[{m.from_id} -> {m.msg_type}]: {m.content}" for m in msgs]
+        return "\n".join(lines)
+
+    def _tool_list_agents(self) -> str:
+        """List all registered agents."""
+        agents = self._registry.list_agents()
+        if not agents:
+            return "No other agents registered."
+        lines = [f"- {a['agent_id']} ({a['role']}, {a['mode']})" for a in agents]
+        return "\n".join(lines)
+
     def on_context(self, messages: list[dict], context: str) -> str:
         """Inject parallel child agent guide when runner is async (thread/process)."""
         if self._runner_name in ("thread", "process"):
@@ -397,9 +481,12 @@ class ChildAgentModule(Module):
         return context
 
     def on_shutdown(self):
-        """Shutdown the runner backend and cleanup sandbox workspace directories."""
+        """Shutdown the runner backend, cleanup messaging, and sandbox workspace directories."""
         if self.controller:
             self.controller.runner.shutdown()
+        # Unregister from messaging infrastructure
+        if self._registry and self._agent_id:
+            self._registry.unregister(self._agent_id)
         self._cleanup_workspaces()
 
     def _cleanup_workspaces(self):
