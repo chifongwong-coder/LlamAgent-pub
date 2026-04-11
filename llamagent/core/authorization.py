@@ -150,6 +150,12 @@ class InteractivePolicy(AuthorizationPolicy):
                 return AuthorizationResult(
                     decision=item.message or f"Tool '{tool_name}' cannot operate on '{item.path}'."
                 )
+            # Scope check: if a matching scope exists, consume and skip handler
+            matched_scope = _find_matching_scope(item, tool_name, engine.state.session_scopes)
+            if matched_scope is not None:
+                matched_scope.uses += 1
+                continue
+
             request = ConfirmRequest(
                 kind="operation_confirm", tool_name=tool_name,
                 action=item.action, zone=item.zone,
@@ -161,6 +167,17 @@ class InteractivePolicy(AuthorizationPolicy):
                 return AuthorizationResult(
                     decision=f"Tool '{tool_name}' operation on '{item.path}' was denied."
                 )
+            # Handler approved: write scope for future matches
+            approval_mode = getattr(engine.agent.config, "approval_mode", "persistent")
+            import time as _time
+            new_scope = ApprovalScope(
+                scope="session", zone=item.zone, actions=[item.action],
+                path_prefixes=[item.path],
+                max_uses=None if approval_mode == "persistent" else 1,
+                created_at=_time.time(),
+                source="interactive",
+            )
+            engine.add_scope(new_scope)
 
         return AuthorizationResult()
 
@@ -567,6 +584,23 @@ class AuthorizationEngine:
         """Clear any stale pending scopes from a previous failed prepare."""
         if isinstance(self.policy, TaskPolicy):
             self.policy._pending_buffer.clear()
+
+    def add_scope(self, scope: ApprovalScope) -> None:
+        """Add a scope to session_scopes."""
+        self.state.session_scopes.append(scope)
+
+    def export_scopes(self) -> list[dict]:
+        """Export all scopes (for child agent inheritance)."""
+        from dataclasses import asdict
+        all_scopes = list(self.state.session_scopes)
+        for scopes in self.state.task_scopes.values():
+            all_scopes.extend(scopes)
+        return [asdict(s) for s in all_scopes]
+
+    def import_scopes(self, scopes: list[dict]) -> None:
+        """Import scopes (child agent inheritance)."""
+        for s in scopes:
+            self.state.session_scopes.append(ApprovalScope(**s))
 
     def evaluate(self, tool: dict, args: dict) -> AuthorizationResult:
         """

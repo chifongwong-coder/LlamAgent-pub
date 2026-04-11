@@ -98,6 +98,9 @@ _YAML_MAP = [
     (("web", "search_provider"), "web_search_provider", str),
     (("web", "search_num_results"), "web_search_num_results", int),
     (("authorization", "mode"), "authorization_mode", str),
+    (("authorization", "approval_mode"), "approval_mode", str),
+    (("authorization", "auto_approve"), "auto_approve", bool),
+    (("authorization", "scopes"), "authorization_scopes", list),
     (("module_models",), "module_models", dict),
     (("retrieval_backend",), "retrieval_backend", str),
     (("memory_backend",), "memory_backend", str),
@@ -228,6 +231,9 @@ class Config:
 
         # Authorization
         self.authorization_mode: str = "interactive"
+        self.approval_mode: str = "persistent"  # persistent | temporary
+        self.auto_approve: bool = False  # True = preset full-match scope
+        self.authorization_scopes: list = []  # Preset scope path list
         self.seed_scopes: list | None = None  # Parsed from YAML, list of dicts
 
         # Per-module model overrides (module_name -> model_name)
@@ -374,7 +380,7 @@ class Config:
         for key, value in data.items():
             current_path = prefix + (key,)
             # Special sections with their own parsing, skip validation
-            if current_path in (("hooks",), ("authorization", "seed_scopes")):
+            if current_path in (("hooks",), ("authorization", "seed_scopes"), ("authorization", "scopes")):
                 continue
             if current_path not in _VALID_YAML_PATHS:
                 logger.warning(
