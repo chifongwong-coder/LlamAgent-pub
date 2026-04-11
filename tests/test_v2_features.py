@@ -2190,3 +2190,387 @@ def test_child_auto_memorize_disabled(bare_agent, mock_llm_client, tmp_path):
 
     # Memory module should NOT have been called
     assert len(memory_mod.remembered) == 0
+
+
+# ============================================================
+# v2.7: Scope-based Interactive authorization
+# ============================================================
+
+def _setup_zone_v27(agent, tmp_path):
+    """Set up zone directories for v2.7 scope tests."""
+    agent.project_dir = str(tmp_path)
+    agent.playground_dir = str(tmp_path / "llama_playground")
+    os.makedirs(agent.playground_dir, exist_ok=True)
+
+
+def _reg_tool(agent, name, sl=2, result="ok"):
+    """Register a tool with a path_extractor for zone testing."""
+    agent.register_tool(
+        name, lambda **kw: result, f"tool {name}", safety_level=sl,
+        path_extractor=lambda args: [args["path"]] if "path" in args else [],
+    )
+
+
+def test_scope_check_before_handler(bare_agent, tmp_path):
+    """When a matching scope exists, the handler is NOT called — scope decides directly."""
+    from llamagent.core.authorization import ApprovalScope
+    from llamagent.core.zone import ConfirmResponse
+
+    _setup_zone_v27(bare_agent, tmp_path)
+    _reg_tool(bare_agent, "writer")
+
+    target = os.path.join(str(tmp_path), "src", "main.py")
+
+    # Pre-set a scope that covers target
+    bare_agent._authorization_engine.add_scope(ApprovalScope(
+        scope="session", zone="project", actions=["write"],
+        path_prefixes=[os.path.join(str(tmp_path), "src")],
+    ))
+
+    # Set a handler that tracks calls — it should NOT be called
+    handler_calls = []
+    bare_agent.confirm_handler = lambda req: (
+        handler_calls.append(1), ConfirmResponse(allow=True)
+    )[-1]
+
+    result = bare_agent.call_tool("writer", {"path": target})
+    assert result == "ok"
+    assert len(handler_calls) == 0, "Handler should not be called when scope matches"
+
+
+def test_handler_updates_scope_persistent(bare_agent, tmp_path):
+    """In persistent mode, handler approval creates a scope. Second call skips handler."""
+    from llamagent.core.zone import ConfirmResponse
+
+    _setup_zone_v27(bare_agent, tmp_path)
+    _reg_tool(bare_agent, "writer")
+    bare_agent.config.approval_mode = "persistent"
+
+    target = os.path.join(str(tmp_path), "src", "app.py")
+
+    handler_calls = []
+    bare_agent.confirm_handler = lambda req: (
+        handler_calls.append(1), ConfirmResponse(allow=True)
+    )[-1]
+
+    # First call: no scope, handler called, scope created
+    result1 = bare_agent.call_tool("writer", {"path": target})
+    assert result1 == "ok"
+    assert len(handler_calls) == 1
+
+    # Second call: scope matches, handler NOT called
+    result2 = bare_agent.call_tool("writer", {"path": target})
+    assert result2 == "ok"
+    assert len(handler_calls) == 1, "Handler should not be called on second call (persistent scope)"
+
+
+def test_handler_updates_scope_temporary(bare_agent, tmp_path):
+    """In temporary mode, handler approval creates a one-use scope (max_uses=1).
+    First call: handler. Second call: scope match (consumes it). Third call: handler again."""
+    from llamagent.core.zone import ConfirmResponse
+
+    _setup_zone_v27(bare_agent, tmp_path)
+    _reg_tool(bare_agent, "writer")
+    bare_agent.config.approval_mode = "temporary"
+
+    target = os.path.join(str(tmp_path), "src", "temp.py")
+
+    handler_calls = []
+    bare_agent.confirm_handler = lambda req: (
+        handler_calls.append(1), ConfirmResponse(allow=True)
+    )[-1]
+
+    # First call: no scope, handler called, temporary scope created (max_uses=1, uses=0)
+    result1 = bare_agent.call_tool("writer", {"path": target})
+    assert result1 == "ok"
+    assert len(handler_calls) == 1
+
+    # Second call: scope matches (uses=0 < max_uses=1), consumed (uses becomes 1)
+    result2 = bare_agent.call_tool("writer", {"path": target})
+    assert result2 == "ok"
+    assert len(handler_calls) == 1, "Second call uses scope, handler not called"
+
+    # Third call: scope exhausted (uses=1 >= max_uses=1), handler called again
+    result3 = bare_agent.call_tool("writer", {"path": target})
+    assert result3 == "ok"
+    assert len(handler_calls) == 2, "Third call triggers handler (scope exhausted)"
+
+
+def test_handler_deny_no_scope(bare_agent, tmp_path):
+    """When handler denies, no scope is created and operation is denied."""
+    from llamagent.core.zone import ConfirmResponse
+
+    _setup_zone_v27(bare_agent, tmp_path)
+    _reg_tool(bare_agent, "writer")
+
+    target = os.path.join(str(tmp_path), "src", "deny.py")
+
+    bare_agent.confirm_handler = lambda req: ConfirmResponse(allow=False)
+
+    result = bare_agent.call_tool("writer", {"path": target})
+    assert "denied" in result.lower()
+
+    # Verify no scope was created
+    assert len(bare_agent._authorization_engine.state.session_scopes) == 0
+
+
+def test_no_handler_no_scope_deny(bare_agent, tmp_path):
+    """No handler and no scope: CONFIRMABLE operations are denied."""
+    _setup_zone_v27(bare_agent, tmp_path)
+    _reg_tool(bare_agent, "writer")
+
+    target = os.path.join(str(tmp_path), "src", "nohandler.py")
+
+    # No handler set (default from bare_agent is None)
+    assert bare_agent.confirm_handler is None
+
+    result = bare_agent.call_tool("writer", {"path": target})
+    assert "denied" in result.lower()
+
+
+def test_auto_approve_scope(bare_agent, tmp_path):
+    """auto_approve=True creates a full-match scope; CONFIRMABLE operations pass without handler."""
+    from llamagent.core.authorization import ApprovalScope
+
+    _setup_zone_v27(bare_agent, tmp_path)
+    _reg_tool(bare_agent, "writer")
+
+    # Simulate auto_approve by adding a project-wide scope (as auto_approve does at init)
+    bare_agent._authorization_engine.add_scope(ApprovalScope(
+        scope="session", zone="project", actions=["read", "write"],
+        path_prefixes=[str(tmp_path)],
+    ))
+
+    target = os.path.join(str(tmp_path), "anything", "file.py")
+
+    # No handler — should still pass because scope covers it
+    assert bare_agent.confirm_handler is None
+    result = bare_agent.call_tool("writer", {"path": target})
+    assert result == "ok"
+
+
+# ============================================================
+# v2.7: Child agent scope inheritance
+# ============================================================
+
+def test_sandbox_child_no_scope(bare_agent, mock_llm_client, tmp_path):
+    """Sandbox child gets empty scopes — project writes are denied."""
+    from llamagent.modules.child_agent.module import ChildAgentModule
+    from llamagent.modules.child_agent.policy import ChildAgentSpec, AgentExecutionPolicy
+    from llamagent.core.authorization import ApprovalScope
+    from llamagent.core.zone import ConfirmResponse
+
+    _setup_zone_v27(bare_agent, tmp_path)
+
+    # Give parent a scope
+    bare_agent._authorization_engine.add_scope(ApprovalScope(
+        scope="session", zone="project", actions=["write"],
+        path_prefixes=[str(tmp_path)],
+    ))
+    bare_agent.confirm_handler = lambda req: ConfirmResponse(allow=True)
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    # Spawn a sandbox child
+    spec = ChildAgentSpec(
+        task="sandbox task", role="worker",
+        policy=AgentExecutionPolicy(workspace_mode="sandbox"),
+    )
+    child = module._create_child_agent(spec)
+
+    # Sandbox child should have empty scopes
+    exported = child._authorization_engine.export_scopes()
+    assert len(exported) == 0, "Sandbox child should not inherit parent scopes"
+
+
+def test_project_child_inherit_scope(bare_agent, mock_llm_client, tmp_path):
+    """Project child inherits parent scopes — matching operations pass."""
+    from llamagent.modules.child_agent.module import ChildAgentModule
+    from llamagent.modules.child_agent.policy import ChildAgentSpec, AgentExecutionPolicy
+    from llamagent.core.authorization import ApprovalScope
+
+    _setup_zone_v27(bare_agent, tmp_path)
+
+    # Give parent a scope for src/
+    bare_agent._authorization_engine.add_scope(ApprovalScope(
+        scope="session", zone="project", actions=["write"],
+        path_prefixes=[os.path.join(str(tmp_path), "src")],
+    ))
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    # Spawn a project child
+    spec = ChildAgentSpec(
+        task="project task", role="worker",
+        policy=AgentExecutionPolicy(workspace_mode="project"),
+    )
+    child = module._create_child_agent(spec)
+
+    # Project child should inherit parent scopes
+    exported = child._authorization_engine.export_scopes()
+    assert len(exported) == 1
+    assert exported[0]["zone"] == "project"
+    assert exported[0]["actions"] == ["write"]
+
+    # Register a tool on the child and verify scope works
+    _reg_tool(child, "child_writer")
+    target = os.path.join(str(tmp_path), "src", "child_file.py")
+    result = child.call_tool("child_writer", {"path": target})
+    assert result == "ok", "Project child should be able to write within inherited scope"
+
+
+def test_project_child_no_expansion(bare_agent, mock_llm_client, tmp_path):
+    """Project child cannot write outside inherited scope — no scope expansion."""
+    from llamagent.modules.child_agent.module import ChildAgentModule
+    from llamagent.modules.child_agent.policy import ChildAgentSpec, AgentExecutionPolicy
+    from llamagent.core.authorization import ApprovalScope
+
+    _setup_zone_v27(bare_agent, tmp_path)
+
+    # Parent scope only covers src/
+    bare_agent._authorization_engine.add_scope(ApprovalScope(
+        scope="session", zone="project", actions=["write"],
+        path_prefixes=[os.path.join(str(tmp_path), "src")],
+    ))
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    spec = ChildAgentSpec(
+        task="write docs", role="worker",
+        policy=AgentExecutionPolicy(workspace_mode="project"),
+    )
+    child = module._create_child_agent(spec)
+    # Child has no handler — scope is the only decider
+    child.confirm_handler = None
+
+    _reg_tool(child, "child_writer")
+
+    # Write to docs/ (outside src/ scope) — should be denied
+    target_outside = os.path.join(str(tmp_path), "docs", "readme.md")
+    result = child.call_tool("child_writer", {"path": target_outside})
+    assert "denied" in result.lower(), "Child should not write outside inherited scope"
+
+
+def test_preset_scopes_config(bare_agent, tmp_path):
+    """Config authorization_scopes preset: matching operations pass without handler."""
+    from llamagent.core.authorization import ApprovalScope
+
+    _setup_zone_v27(bare_agent, tmp_path)
+    _reg_tool(bare_agent, "writer")
+
+    # Simulate preset scopes loaded from config (as engine init does)
+    preset_paths = [
+        os.path.join(str(tmp_path), "src"),
+        os.path.join(str(tmp_path), "tests"),
+    ]
+    for p in preset_paths:
+        bare_agent._authorization_engine.add_scope(ApprovalScope(
+            scope="session", zone="project", actions=["read", "write"],
+            path_prefixes=[p],
+        ))
+
+    # No handler
+    assert bare_agent.confirm_handler is None
+
+    # Write to src/ — should pass via preset scope
+    target_src = os.path.join(str(tmp_path), "src", "main.py")
+    assert bare_agent.call_tool("writer", {"path": target_src}) == "ok"
+
+    # Write to tests/ — should pass via preset scope
+    target_test = os.path.join(str(tmp_path), "tests", "test_main.py")
+    assert bare_agent.call_tool("writer", {"path": target_test}) == "ok"
+
+    # Write to docs/ — no scope, no handler => denied
+    target_docs = os.path.join(str(tmp_path), "docs", "plan.md")
+    result = bare_agent.call_tool("writer", {"path": target_docs})
+    assert "denied" in result.lower()
+
+
+# ============================================================
+# v2.7: Regression — backward compatibility
+# ============================================================
+
+def test_task_mode_unchanged(bare_agent, tmp_path):
+    """Task mode still works with scope matching — no behavioral change from v2.7."""
+    from llamagent.core.zone import ConfirmResponse, RequestedScope
+    from llamagent.core.authorization import ApprovalScope
+    from llamagent.core.contract import AuthorizationUpdate
+
+    _setup_zone_v27(bare_agent, tmp_path)
+    _reg_tool(bare_agent, "writer")
+
+    # Set up handler for task mode session_authorize prompt
+    bare_agent.confirm_handler = lambda req: ConfirmResponse(allow=True)
+    bare_agent.set_mode("task")
+
+    # Add a task scope covering src/
+    task_id = "test_task_1"
+    bare_agent._current_task_id = task_id
+    bare_agent._authorization_engine.state.task_scopes[task_id] = [
+        ApprovalScope(
+            scope="task", zone="project", actions=["write"],
+            path_prefixes=[os.path.join(str(tmp_path), "src")],
+            source="contract",
+        ),
+    ]
+
+    # Set controller phase to executing (task mode needs this)
+    bare_agent._authorization_engine.policy.state.phase = "executing"
+    bare_agent._authorization_engine.policy.state.task_id = task_id
+
+    target = os.path.join(str(tmp_path), "src", "file.py")
+    result = bare_agent.call_tool("writer", {"path": target})
+    assert result == "ok", "Task mode scope matching should still work"
+
+
+def test_empty_scope_backward_compat(bare_agent, tmp_path):
+    """Interactive mode with empty scopes behaves like pre-v2.7: handler is called on first access.
+    With persistent mode, scope accumulates. With temporary mode, scope is consumed after one use."""
+    from llamagent.core.zone import ConfirmResponse
+
+    _setup_zone_v27(bare_agent, tmp_path)
+    _reg_tool(bare_agent, "writer")
+
+    # Ensure no scopes
+    assert len(bare_agent._authorization_engine.state.session_scopes) == 0
+
+    target = os.path.join(str(tmp_path), "src", "compat.py")
+
+    handler_calls = []
+    bare_agent.confirm_handler = lambda req: (
+        handler_calls.append(1), ConfirmResponse(allow=True)
+    )[-1]
+
+    # Persistent mode: first call triggers handler, second does not (scope accumulated)
+    bare_agent.config.approval_mode = "persistent"
+
+    result1 = bare_agent.call_tool("writer", {"path": target})
+    assert result1 == "ok"
+    assert len(handler_calls) == 1, "First call triggers handler (no scope)"
+
+    result2 = bare_agent.call_tool("writer", {"path": target})
+    assert result2 == "ok"
+    assert len(handler_calls) == 1, "Second call uses persistent scope, handler not called"
+
+    # Clear scopes to test temporary mode separately
+    bare_agent._authorization_engine.state.session_scopes.clear()
+    handler_calls.clear()
+    bare_agent.config.approval_mode = "temporary"
+
+    # First call: handler called, temporary scope created
+    result3 = bare_agent.call_tool("writer", {"path": target})
+    assert result3 == "ok"
+    assert len(handler_calls) == 1
+
+    # Second call: temporary scope consumed (one free pass)
+    result4 = bare_agent.call_tool("writer", {"path": target})
+    assert result4 == "ok"
+    assert len(handler_calls) == 1, "Second call uses temporary scope"
+
+    # Third call: scope exhausted, handler called again
+    result5 = bare_agent.call_tool("writer", {"path": target})
+    assert result5 == "ok"
+    assert len(handler_calls) == 2, "Third call triggers handler (temporary scope exhausted)"

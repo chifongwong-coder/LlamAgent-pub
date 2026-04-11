@@ -293,6 +293,7 @@ class ChildAgentModule(Module):
             runner = ProcessRunnerBackend(
                 parent_config=agent.config,
                 parent_has_sandbox=agent.tool_executor is not None,
+                parent_agent=agent,
             )
         else:
             runner = InlineRunnerBackend()
@@ -619,6 +620,13 @@ class ChildAgentModule(Module):
         child.confirm_handler = parent.confirm_handler
         child.interaction_handler = getattr(parent, "interaction_handler", None)
         child.mode = getattr(parent, "mode", "interactive")
+
+        # v2.7: scope inheritance — project mode inherits parent scopes,
+        # sandbox mode gets empty scopes (project writes denied)
+        if workspace_mode == "project":
+            parent_scopes = parent._authorization_engine.export_scopes()
+            if parent_scopes:
+                child._authorization_engine.import_scopes(parent_scopes)
         child._tools = {}
         child._tools_version = 0
         child.tool_executor = getattr(parent, "tool_executor", None)  # Inherit sandbox

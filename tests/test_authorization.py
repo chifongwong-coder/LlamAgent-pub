@@ -54,26 +54,35 @@ def test_zone_evaluation_and_confirm_flow(bare_agent, tmp_path, mock_llm_client)
 
     # sl=1 project read: auto-allow
     assert bare_agent.call_tool("r", {"path": p}) == "ok"
-    # sl=2 project write: confirm allow
+    # sl=2 project write: confirm allow (creates scope in persistent mode)
     bare_agent.confirm_handler = lambda req: ConfirmResponse(allow=True)
     assert bare_agent.call_tool("w", {"path": p}) == "ok"
-    # sl=2 project write: confirm deny
+    # sl=2 project write: scope accumulated, so handler not called even with deny handler
     bare_agent.confirm_handler = lambda req: ConfirmResponse(allow=False)
+    assert bare_agent.call_tool("w", {"path": p}) == "ok"
+    # Clear scopes to test deny behavior on a fresh state
+    bare_agent._authorization_engine.state.session_scopes.clear()
+    # sl=2 project write: confirm deny (no scope)
     assert "denied" in bare_agent.call_tool("w", {"path": p}).lower()
-    # sl=2 project write: no handler => denied
+    # sl=2 project write: no handler => denied (no scope)
     bare_agent.confirm_handler = None
     assert "denied" in bare_agent.call_tool("w", {"path": p}).lower()
 
     # External write: hard deny
     bare_agent.confirm_handler = lambda req: ConfirmResponse(allow=True)
     assert "cannot" in bare_agent.call_tool("w", {"path": "/etc/passwd"}).lower() or "not allowed" in bare_agent.call_tool("w", {"path": "/etc/passwd"}).lower()
-    # External read: confirm allow
+    # External read: confirm allow (creates scope)
     assert bare_agent.call_tool("r", {"path": "/tmp/x.txt"}) == "ok"
-    # External read: confirm deny
+    # External read: scope accumulated, handler not called
+    bare_agent.confirm_handler = lambda req: ConfirmResponse(allow=False)
+    assert bare_agent.call_tool("r", {"path": "/tmp/x.txt"}) == "ok"
+    # Clear scopes and test deny
+    bare_agent._authorization_engine.state.session_scopes.clear()
     bare_agent.confirm_handler = lambda req: ConfirmResponse(allow=False)
     assert "denied" in bare_agent.call_tool("r", {"path": "/tmp/x.txt"}).lower()
 
     # -- Mixed paths: playground + project -> only project confirmed --
+    bare_agent._authorization_engine.state.session_scopes.clear()
     bare_agent.confirm_handler = lambda req: ConfirmResponse(allow=True)
     captured = []
     bare_agent.confirm_handler = lambda req: (captured.append(1), ConfirmResponse(allow=True))[1]
@@ -84,12 +93,13 @@ def test_zone_evaluation_and_confirm_flow(bare_agent, tmp_path, mock_llm_client)
     result = bare_agent.call_tool("t", {"paths": [os.path.join(str(tmp_path), "ok.py"), "/etc/shadow"]})
     assert "cannot" in result.lower() or "not allowed" in result.lower()
 
-    # -- No accumulation: confirm fires every time; hard deny skips confirm --
+    # -- Scope accumulation: confirm fires only once for same path (persistent mode) --
+    bare_agent._authorization_engine.state.session_scopes.clear()
     count = [0]
     bare_agent.confirm_handler = lambda req: (count.__setitem__(0, count[0]+1), ConfirmResponse(allow=True))[1]
     bare_agent.call_tool("w", {"path": p})
     bare_agent.call_tool("w", {"path": p})
-    assert count[0] == 2
+    assert count[0] == 1  # Second call matches scope, handler not called
     count[0] = 0
     bare_agent.call_tool("w", {"path": "/etc/passwd"})
     assert count[0] == 0
