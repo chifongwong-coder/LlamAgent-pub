@@ -42,9 +42,11 @@ class ProcessRunnerBackend(AgentRunnerBackend):
 
     name = "process"
 
-    def __init__(self, parent_config=None, on_complete=None, parent_has_sandbox=False):
+    def __init__(self, parent_config=None, on_complete=None, parent_has_sandbox=False,
+                 parent_agent=None):
         self._parent_config = parent_config
         self._parent_has_sandbox = parent_has_sandbox
+        self._parent_agent = parent_agent  # v2.7: for scope export
         self._processes: dict[str, subprocess.Popen] = {}
         self._results: dict[str, TaskRecord] = {}
         self._events: dict[str, threading.Event] = {}
@@ -60,6 +62,7 @@ class ProcessRunnerBackend(AgentRunnerBackend):
         state.pop("_monitor_threads", None)
         state.pop("_events", None)
         state.pop("_processes", None)
+        state.pop("_parent_agent", None)
         return state
 
     def __setstate__(self, state):
@@ -69,6 +72,7 @@ class ProcessRunnerBackend(AgentRunnerBackend):
         self._monitor_threads = {}
         self._events = {}
         self._processes = {}
+        self._parent_agent = None
 
     def spawn(self, spec: ChildAgentSpec, agent_factory, task_id: str | None = None) -> str:
         """
@@ -166,6 +170,16 @@ class ProcessRunnerBackend(AgentRunnerBackend):
         if spec.policy and spec.policy.execution_policy is not None:
             from dataclasses import asdict
             data["execution_policy"] = asdict(spec.policy.execution_policy)
+
+        # v2.7: serialize parent scopes for project mode child scope inheritance
+        workspace_mode = spec.policy.workspace_mode if spec.policy else "sandbox"
+        if workspace_mode == "project" and self._parent_agent is not None:
+            try:
+                parent_scopes = self._parent_agent._authorization_engine.export_scopes()
+                if parent_scopes:
+                    data["parent_scopes"] = parent_scopes
+            except Exception:
+                pass  # Scope export failure should not block child spawn
 
         with open(spec_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)

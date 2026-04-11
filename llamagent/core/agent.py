@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Generator, Literal
 
-from llamagent.core.authorization import AuthorizationEngine
+from llamagent.core.authorization import ApprovalScope, AuthorizationEngine
 from llamagent.core.config import Config
 from llamagent.core.contract import PipelineOutcome
 from llamagent.core.zone import ConfirmRequest, ConfirmResponse
@@ -397,6 +397,21 @@ class LlamAgent:
                     self.set_mode(config_mode)
                 except Exception as e:
                     logger.warning("Failed to apply authorization_mode '%s' from config: %s", config_mode, e)
+
+        # v2.7: load preset scopes into authorization engine
+        for scope_path in getattr(self.config, "authorization_scopes", []):
+            paths = scope_path.get("paths", []) if isinstance(scope_path, dict) else [scope_path]
+            self._authorization_engine.add_scope(ApprovalScope(
+                scope="session", zone="project", actions=["read", "write"],
+                path_prefixes=paths,
+            ))
+
+        # v2.7: auto_approve = full project scope
+        if getattr(self.config, "auto_approve", False):
+            self._authorization_engine.add_scope(ApprovalScope(
+                scope="session", zone="project", actions=["read", "write"],
+                path_prefixes=[self.project_dir],
+            ))
 
     # ============================================================
     # LLM management
