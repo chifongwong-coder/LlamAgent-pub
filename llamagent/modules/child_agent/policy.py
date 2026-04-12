@@ -60,6 +60,11 @@ class ChildAgentSpec:
     parent_task_id: str | None = None
     artifact_refs: list[dict] = field(default_factory=list)
     task_id: str | None = None  # Set by controller before factory call
+    # Continuous child agent fields
+    continuous: bool = False
+    trigger_type: str | None = None        # "timer" | "file"
+    trigger_interval: float = 60           # seconds (timer mode)
+    trigger_watch_dir: str | None = None   # path (file mode)
 
 
 # ---------------------------------------------------------------------------

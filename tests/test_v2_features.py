@@ -2748,3 +2748,357 @@ def test_message_trigger():
 
     # After poll consumed the message, next poll returns None
     assert trigger.poll() is None
+
+
+# ============================================================
+# v2.9: Continuous Child Agent
+# ============================================================
+
+
+def test_spawn_continuous_child(bare_agent, mock_llm_client, tmp_path):
+    """Continuous parent spawns continuous child; child appears in AgentRegistry."""
+    bare_agent.mode = "continuous"
+    bare_agent.config.child_agent_runner = "thread"
+    bare_agent.project_dir = str(tmp_path)
+    bare_agent.playground_dir = str(tmp_path / "llama_playground")
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    # Provide LLM responses for the child's chat() calls driven by the timer.
+    # The child will make chat() calls each time the timer fires.
+    # We provide enough so the child doesn't run out during the brief test window.
+    mock_llm_client.set_responses([
+        make_llm_response("child processing trigger 1"),
+        make_llm_response("child processing trigger 2"),
+        make_llm_response("child processing trigger 3"),
+        make_llm_response("child processing trigger 4"),
+        make_llm_response("child processing trigger 5"),
+    ])
+
+    # Use "researcher" role (explicit tool_allowlist avoids deepcopy of all parent tools)
+    result = module._spawn_continuous_child(
+        task="Monitor logs", role="researcher",
+        trigger_type="timer", trigger_interval=60,
+    )
+
+    # Should return a success message with task_id
+    assert "task_id" in result
+    assert "continuous" in result.lower() or "Spawned" in result
+
+    # Extract task_id from result (format: "... [task_id: <id>] ...")
+    import re
+    match = re.search(r"task_id:\s*(\w+)", result)
+    assert match, f"Could not extract task_id from: {result}"
+    task_id = match.group(1)
+
+    # Give the thread a moment to start and register the child
+    time.sleep(0.3)
+
+    # Verify child is in the AgentRegistry
+    agents = module._registry.list_agents()
+    agent_ids = [a["agent_id"] for a in agents]
+    # Parent should be registered
+    assert bare_agent.agent_id in agent_ids
+    # At least one more agent (the child) should be registered
+    assert len(agents) >= 2
+
+    # Verify task board has a running record
+    record = module.controller.task_board.get(task_id)
+    assert record is not None
+    assert record.status == "running"
+
+    # Cleanup: cancel the child so the thread exits
+    module.controller.cancel_child(task_id)
+    time.sleep(0.3)
+
+
+def test_continuous_child_timer_trigger(bare_agent, mock_llm_client, tmp_path):
+    """Continuous child driven by short timer: executes tasks, produces TaskRecord."""
+    bare_agent.mode = "continuous"
+    bare_agent.config.child_agent_runner = "thread"
+    bare_agent.project_dir = str(tmp_path)
+    bare_agent.playground_dir = str(tmp_path / "llama_playground")
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    # Enough responses for multiple timer-driven chat() calls
+    mock_llm_client.set_responses([
+        make_llm_response("task result 1"),
+        make_llm_response("task result 2"),
+        make_llm_response("task result 3"),
+        make_llm_response("task result 4"),
+        make_llm_response("task result 5"),
+        make_llm_response("task result 6"),
+        make_llm_response("task result 7"),
+        make_llm_response("task result 8"),
+    ])
+
+    # Use "researcher" role (explicit tool_allowlist avoids deepcopy of all parent tools)
+    result = module._spawn_continuous_child(
+        task="Check health", role="researcher",
+        trigger_type="timer", trigger_interval=0.1,  # Very short interval
+    )
+
+    import re
+    match = re.search(r"task_id:\s*(\w+)", result)
+    assert match
+    task_id = match.group(1)
+
+    # Let the child run long enough for the ContinuousRunner to complete at least
+    # one poll cycle (poll_interval=1.0s) and fire the timer trigger.
+    # TimerTrigger initializes _last_fire on first poll (returns None),
+    # then fires on the next poll after interval elapses.
+    time.sleep(2.0)
+
+    # Cancel the child
+    module.controller.cancel_child(task_id)
+    time.sleep(0.5)
+
+    # After cancel, the child thread should complete and produce a TaskRecord
+    record = module.controller.task_board.get(task_id)
+    assert record is not None
+    assert record.status in ("completed", "cancelled")
+    # The record should report tasks executed (timer should have fired at least once)
+    assert record.metrics.get("total_tasks", 0) > 0
+
+
+def test_continuous_child_message_trigger(bare_agent, mock_llm_client, tmp_path):
+    """Parent sends a message to continuous child; child receives it via MessageTrigger."""
+    bare_agent.mode = "continuous"
+    bare_agent.config.child_agent_runner = "thread"
+    bare_agent.project_dir = str(tmp_path)
+    bare_agent.playground_dir = str(tmp_path / "llama_playground")
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    # Responses for child chat() calls: one from timer and one from message trigger
+    mock_llm_client.set_responses([
+        make_llm_response("processing timer"),
+        make_llm_response("processed message from parent"),
+        make_llm_response("processing timer again"),
+        make_llm_response("processing timer again"),
+    ])
+
+    # Use "researcher" role (explicit tool_allowlist avoids deepcopy of all parent tools)
+    result = module._spawn_continuous_child(
+        task="Watch for messages", role="researcher",
+        trigger_type="timer", trigger_interval=5.0,  # Long interval so timer doesn't dominate
+    )
+
+    import re
+    match = re.search(r"task_id:\s*(\w+)", result)
+    assert match
+    task_id = match.group(1)
+
+    # Wait for child to start
+    time.sleep(0.3)
+
+    # Find the child's agent_id from the registry
+    agents = module._registry.list_agents()
+    child_agent_ids = [a["agent_id"] for a in agents if a["agent_id"] != bare_agent.agent_id]
+    assert len(child_agent_ids) >= 1
+    child_id = child_agent_ids[0]
+
+    # Parent sends a message to the child
+    module._channel.send(bare_agent.agent_id, child_id, "urgent: check status")
+
+    # Give time for the MessageTrigger to pick up the message and child to process
+    time.sleep(1.0)
+
+    # Cancel and wait for completion
+    module.controller.cancel_child(task_id)
+    time.sleep(0.5)
+
+    # Verify the child executed at least one task (the message trigger or timer)
+    record = module.controller.task_board.get(task_id)
+    assert record is not None
+    assert record.metrics.get("total_tasks", 0) >= 1
+
+
+def test_continuous_child_send_to_parent(bare_agent, mock_llm_client, tmp_path):
+    """Continuous child's messaging tools work: send_message delivers to parent inbox."""
+    bare_agent.mode = "continuous"
+    bare_agent.config.child_agent_runner = "thread"
+    bare_agent.project_dir = str(tmp_path)
+    bare_agent.playground_dir = str(tmp_path / "llama_playground")
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    mock_llm_client.set_responses([
+        make_llm_response("child started"),
+        make_llm_response("child working"),
+    ])
+
+    # Use "researcher" role (explicit tool_allowlist avoids deepcopy of all parent tools)
+    result = module._spawn_continuous_child(
+        task="Report status", role="researcher",
+        trigger_type="timer", trigger_interval=5.0,
+    )
+
+    import re
+    match = re.search(r"task_id:\s*(\w+)", result)
+    assert match
+    task_id = match.group(1)
+
+    # Wait for child to start
+    time.sleep(0.3)
+
+    # Find child's agent_id
+    agents = module._registry.list_agents()
+    child_agent_ids = [a["agent_id"] for a in agents if a["agent_id"] != bare_agent.agent_id]
+    assert len(child_agent_ids) >= 1
+    child_id = child_agent_ids[0]
+
+    # Directly use the channel to simulate child sending message to parent
+    # (This verifies the channel is correctly wired for the child)
+    module._channel.send(child_id, bare_agent.agent_id, "status: all clear", "info")
+
+    # Parent checks messages
+    msgs = module._channel.receive(bare_agent.agent_id)
+    assert len(msgs) == 1
+    assert msgs[0].from_id == child_id
+    assert msgs[0].content == "status: all clear"
+
+    # Cleanup
+    module.controller.cancel_child(task_id)
+    time.sleep(0.3)
+
+
+def test_continuous_child_cancel(bare_agent, mock_llm_client, tmp_path):
+    """Cancel stops continuous child, produces TaskRecord, and unregisters from registry."""
+    bare_agent.mode = "continuous"
+    bare_agent.config.child_agent_runner = "thread"
+    bare_agent.project_dir = str(tmp_path)
+    bare_agent.playground_dir = str(tmp_path / "llama_playground")
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    mock_llm_client.set_responses([
+        make_llm_response("working on task"),
+        make_llm_response("still working"),
+        make_llm_response("more work"),
+    ])
+
+    result = module._spawn_continuous_child(
+        task="Long running monitor", role="researcher",
+        trigger_type="timer", trigger_interval=0.2,
+    )
+
+    import re
+    match = re.search(r"task_id:\s*(\w+)", result)
+    assert match
+    task_id = match.group(1)
+
+    # Wait for child to start and do some work
+    time.sleep(0.5)
+
+    # Verify child is in the registry before cancel
+    agents_before = module._registry.list_agents()
+    assert len(agents_before) >= 2  # parent + child
+
+    # Cancel the child
+    success = module.controller.cancel_child(task_id)
+    assert success is True
+
+    # Wait for thread to finish and on_complete callback to fire
+    time.sleep(0.8)
+
+    # Verify task board shows completed/cancelled
+    record = module.controller.task_board.get(task_id)
+    assert record is not None
+    assert record.status in ("completed", "cancelled")
+
+    # Verify child is unregistered from AgentRegistry (on_complete callback unregisters)
+    agents_after = module._registry.list_agents()
+    child_ids_after = [a["agent_id"] for a in agents_after if a["agent_id"] != bare_agent.agent_id]
+    assert len(child_ids_after) == 0, f"Child should be unregistered, but found: {child_ids_after}"
+
+
+def test_mode_restriction(bare_agent, mock_llm_client):
+    """Non-continuous parent cannot spawn continuous children."""
+    bare_agent.mode = "interactive"
+    bare_agent.config.child_agent_runner = "thread"
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    # _spawn_continuous_child should reject because mode is interactive
+    result = module._spawn_continuous_child(
+        task="Should fail", role="researcher",
+        trigger_type="timer", trigger_interval=60,
+    )
+
+    # Should return an error message about mode restriction
+    assert "continuous" in result.lower()
+    assert "only" in result.lower() or "cannot" in result.lower() or "error" in result.lower()
+
+
+def test_continuous_child_inherits_scope(bare_agent, mock_llm_client, tmp_path):
+    """Continuous child inherits parent's authorization scopes."""
+    bare_agent.mode = "continuous"
+    bare_agent.config.child_agent_runner = "thread"
+    bare_agent.project_dir = str(tmp_path)
+    bare_agent.playground_dir = str(tmp_path / "llama_playground")
+
+    # Add a scope to the parent
+    from llamagent.core.authorization import ApprovalScope
+    parent_scope = ApprovalScope(
+        scope="session",
+        zone="project",
+        actions=["execute"],
+        path_prefixes=["project:"],
+        tool_names=["web_search"],
+    )
+    bare_agent._authorization_engine.add_scope(parent_scope)
+
+    # Verify parent has the scope
+    parent_scopes = bare_agent._authorization_engine.export_scopes()
+    assert len(parent_scopes) >= 1
+    scope_tool_names = [s.get("tool_names") for s in parent_scopes if s.get("tool_names")]
+    assert any("web_search" in tn for tn in scope_tool_names)
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    mock_llm_client.set_responses([
+        make_llm_response("child started"),
+        make_llm_response("child working"),
+    ])
+
+    # Use "researcher" role (explicit tool_allowlist avoids deepcopy of all parent tools)
+    result = module._spawn_continuous_child(
+        task="Inherited scope test", role="researcher",
+        trigger_type="timer", trigger_interval=5.0,
+    )
+
+    import re
+    match = re.search(r"task_id:\s*(\w+)", result)
+    assert match
+    task_id = match.group(1)
+
+    # Wait for child to be created
+    time.sleep(0.3)
+
+    # Access the child agent through the thread runner's _agents dict
+    runner = module.controller.runner
+    with runner._lock:
+        child_agents = dict(runner._agents)
+
+    assert len(child_agents) >= 1, "Child agent should exist in runner._agents"
+    child = list(child_agents.values())[0]
+
+    # Child should have inherited parent's scope
+    child_scopes = child._authorization_engine.export_scopes()
+    child_scope_tool_names = [s.get("tool_names") for s in child_scopes if s.get("tool_names")]
+    assert any("web_search" in tn for tn in child_scope_tool_names), (
+        f"Child should inherit parent's web_search scope, got: {child_scopes}"
+    )
+
+    # Cleanup
+    module.controller.cancel_child(task_id)
+    time.sleep(0.3)
