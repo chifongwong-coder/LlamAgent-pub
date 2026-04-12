@@ -520,6 +520,10 @@ class ChildAgentModule(Module):
         if self.agent.mode != "continuous":
             return "Only continuous mode agents can spawn continuous children."
 
+        # Runner guard: continuous children need thread runner (inline would block forever)
+        if self._runner_name == "inline":
+            return "Continuous children require thread or process runner (set child_agent_runner='thread')."
+
         policy = copy.copy(ROLE_POLICIES.get(role, AgentExecutionPolicy()))
 
         # Apply config-level model override for this role
@@ -790,7 +794,7 @@ class ChildAgentModule(Module):
             os.makedirs(child.playground_dir, exist_ok=True)
         child.confirm_handler = parent.confirm_handler
         child.interaction_handler = getattr(parent, "interaction_handler", None)
-        child.mode = getattr(parent, "mode", "interactive")
+        child.mode = "interactive"  # Short-task children always use interactive mode
 
         # v2.7: scope inheritance — project mode inherits parent scopes,
         # sandbox mode gets empty scopes (project writes denied)
@@ -920,7 +924,11 @@ class ChildAgentModule(Module):
 
         # 6. Override _MODE_DEFAULTS side effects with reasonable child values
         # set_mode("continuous") applies _MODE_DEFAULTS which may set unlimited values.
-        config.max_react_steps = 10
+        # Restore child-appropriate values (budget may have specified different values).
+        budget_timeout = spec.policy.budget.max_time_seconds if spec.policy and spec.policy.budget else 600
+        budget_steps = spec.policy.budget.max_steps if spec.policy and spec.policy.budget else 10
+        config.max_react_steps = budget_steps
+        config.react_timeout = budget_timeout
         config.max_duplicate_actions = 2
         config.max_observation_tokens = 1500
         config.context_window_size = 20
