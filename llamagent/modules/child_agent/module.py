@@ -395,6 +395,9 @@ class ChildAgentModule(Module):
         # Initialize messaging infrastructure for continuous mode agents
         if agent.mode == "continuous":
             self._init_messaging(agent)
+            # Pass channel to thread runner for MessageTrigger creation
+            if self._runner_name == "thread" and self._channel is not None:
+                self.controller.runner._channel = self._channel
 
     def _init_messaging(self, agent):
         """Set up MessageChannel, AgentRegistry, and register messaging tools."""
@@ -448,6 +451,42 @@ class ChildAgentModule(Module):
             safety_level=1,
         )
 
+        agent.register_tool(
+            name="spawn_continuous_child",
+            func=self._spawn_continuous_child,
+            description="Spawn a long-running continuous child agent driven by triggers",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Ongoing task description for the child agent",
+                    },
+                    "role": {
+                        "type": "string",
+                        "description": "Role: researcher/writer/analyst/coder/worker",
+                        "enum": ["researcher", "writer", "analyst", "coder", "worker"],
+                    },
+                    "trigger_type": {
+                        "type": "string",
+                        "description": "Trigger type: timer (periodic) or file (watch directory)",
+                        "enum": ["timer", "file"],
+                    },
+                    "trigger_interval": {
+                        "type": "number",
+                        "description": "Seconds between triggers (timer mode, default 60)",
+                    },
+                    "trigger_watch_dir": {
+                        "type": "string",
+                        "description": "Directory to watch for new files (file mode)",
+                    },
+                },
+                "required": ["task", "trigger_type"],
+            },
+            tier="default",
+            safety_level=2,
+        )
+
     def _tool_send_message(self, to_id: str, content: str, msg_type: str = "info") -> str:
         """Send a message to another agent."""
         try:
@@ -471,6 +510,43 @@ class ChildAgentModule(Module):
             return "No other agents registered."
         lines = [f"- {a['agent_id']} ({a['role']}, {a['mode']})" for a in agents]
         return "\n".join(lines)
+
+    def _spawn_continuous_child(self, task: str, role: str = "worker",
+                               trigger_type: str = "timer",
+                               trigger_interval: float = 60,
+                               trigger_watch_dir: str | None = None) -> str:
+        """Spawn a long-running continuous child agent driven by triggers."""
+        # Runtime guard: only continuous mode parents
+        if self.agent.mode != "continuous":
+            return "Only continuous mode agents can spawn continuous children."
+
+        policy = copy.copy(ROLE_POLICIES.get(role, AgentExecutionPolicy()))
+
+        # Apply config-level model override for this role
+        model_override = self._role_model_overrides.get(role)
+        if model_override:
+            policy.model = model_override
+
+        spec = ChildAgentSpec(
+            task=task,
+            role=role,
+            context="",
+            policy=policy,
+            parent_task_id=self._parent_id,
+            continuous=True,
+            trigger_type=trigger_type,
+            trigger_interval=trigger_interval,
+            trigger_watch_dir=trigger_watch_dir,
+        )
+        try:
+            task_id = self.controller.spawn_child(spec, self._create_child_agent)
+        except RuntimeError as e:
+            return f"Cannot spawn continuous child agent: {e}"
+
+        return (
+            f"Spawned continuous child agent [task_id: {task_id}] with role={role}, "
+            f"trigger={trigger_type}. Use send_message to communicate with it."
+        )
 
     def on_context(self, messages: list[dict], context: str) -> str:
         """Inject parallel child agent guide when runner is async (thread/process)."""
@@ -624,10 +700,18 @@ class ChildAgentModule(Module):
         """
         Factory: create a constrained LlamAgent for child execution.
 
-        The child inherits the parent's LLM and selected tools, but operates
-        with a minimal configuration: no memory, no reflection, limited steps,
-        and tool access filtered by the role policy.
+        For short-task children: inherits parent's LLM and selected tools,
+        operates with minimal config.
+
+        For continuous children: created in interactive mode first (clean state),
+        then switched to continuous mode with proper scope setup.
         """
+        if spec.continuous:
+            return self._create_continuous_child_agent(spec)
+        return self._create_short_child_agent(spec)
+
+    def _create_short_child_agent(self, spec: ChildAgentSpec):
+        """Factory for short-lived child agents (existing logic)."""
         from llamagent.core.agent import LlamAgent, SimpleReAct
         from llamagent.core.config import Config
 
@@ -745,14 +829,225 @@ class ChildAgentModule(Module):
 
         return child
 
+    def _create_continuous_child_agent(self, spec: ChildAgentSpec):
+        """
+        Factory for continuous child agents.
+
+        Creation sequence:
+        1. Build config with authorization_mode="interactive" (clean construction)
+        2. Create LlamAgent (interactive mode, clean state)
+        3. Set project_dir/playground_dir
+        4. Set confirm_handler = None (no user interaction)
+        5. Call set_mode("continuous") — creates default scope with correct project_dir
+        6. Override config values that set_mode's _MODE_DEFAULTS may have set
+        7. Import parent scopes (layered on top of default scope)
+        8. Inject task into system_prompt
+        9. Register to AgentRegistry + register messaging tools
+        """
+        from llamagent.core.agent import LlamAgent, SimpleReAct
+        import os
+
+        parent = self.agent
+
+        # 1. Build config
+        config = copy.copy(parent.config)
+        if not hasattr(config, 'api_retry_count'):
+            config.api_retry_count = 1
+        config.authorization_mode = "interactive"  # Clean construction
+        config.memory_mode = "off"
+        config.reflection_write_mode = "off"
+        config.reflection_read_mode = "off"
+        config.max_plan_adjustments = 3
+        config.permission_level = 1
+        config.context_compress_threshold = 0.7
+        config.compress_keep_turns = 2
+        config.max_duplicate_actions = 2
+        config.max_observation_tokens = 1500
+
+        # Apply budget constraints for initial config
+        if spec.policy and spec.policy.budget:
+            config.max_react_steps = spec.policy.budget.max_steps or 10
+            config.react_timeout = spec.policy.budget.max_time_seconds or 600
+        else:
+            config.max_react_steps = 10
+            config.react_timeout = 600
+
+        # Determine base LLM
+        if spec.policy and spec.policy.model:
+            base_llm = parent._get_llm(spec.policy.model)
+        else:
+            base_llm = self.llm
+
+        # Wrap with budget tracking if needed
+        if spec.policy and spec.policy.budget:
+            tracker = BudgetTracker(spec.policy.budget)
+            child_llm = BudgetedLLM(base_llm, tracker)
+        else:
+            child_llm = base_llm
+
+        # 2. Create child agent in interactive mode (clean state)
+        child = LlamAgent(config)
+        child.llm = child_llm
+        child.persona = None
+        child.modules = {}
+        child.history = []
+        child.summary = None
+        child.conversation = child.history
+        child._execution_strategy = SimpleReAct()
+
+        # 3. Set project_dir/playground_dir
+        workspace_mode = spec.policy.workspace_mode if spec.policy else "project"
+        if workspace_mode == "project":
+            child.project_dir = parent.project_dir
+            child.playground_dir = parent.playground_dir
+        else:
+            import uuid as _uuid
+            child_task_id = spec.task_id or _uuid.uuid4().hex[:12]
+            workspace_dir = os.path.join(
+                parent.playground_dir, "children", child_task_id
+            )
+            os.makedirs(workspace_dir, exist_ok=True)
+            child.project_dir = workspace_dir
+            child.playground_dir = os.path.join(workspace_dir, "llama_playground")
+            os.makedirs(child.playground_dir, exist_ok=True)
+
+        # 4. No user interaction for continuous children
+        child.confirm_handler = None
+        child.interaction_handler = None
+
+        # 5. Switch to continuous mode (creates default scope with correct project_dir)
+        child.set_mode("continuous")
+
+        # 6. Override _MODE_DEFAULTS side effects with reasonable child values
+        # set_mode("continuous") applies _MODE_DEFAULTS which may set unlimited values.
+        config.max_react_steps = 10
+        config.max_duplicate_actions = 2
+        config.max_observation_tokens = 1500
+        config.context_window_size = 20
+
+        # 7. Import parent scopes (layered on top of default scope)
+        parent_scopes = parent._authorization_engine.export_scopes()
+        if parent_scopes:
+            child._authorization_engine.import_scopes(parent_scopes)
+
+        # 8. Inject task into system_prompt
+        config.system_prompt = (
+            f"You are a {spec.role}. Your ongoing task: {spec.task}\n"
+            f"You will receive trigger events. Process them according to your task."
+        )
+
+        # Set up tools
+        child._tools = {}
+        child._tools_version = 0
+        child.tool_executor = getattr(parent, "tool_executor", None)
+
+        # Filter tools by allowlist/denylist
+        if spec.policy and spec.policy.tool_allowlist is not None:
+            for tool_name in spec.policy.tool_allowlist:
+                if tool_name in parent._tools:
+                    child._tools[tool_name] = copy.deepcopy(parent._tools[tool_name])
+        else:
+            child._tools = copy.deepcopy(parent._tools)
+
+        if spec.policy and spec.policy.tool_denylist:
+            for tool_name in spec.policy.tool_denylist:
+                child._tools.pop(tool_name, None)
+
+        # Remove parent-only tools from child
+        if spec.policy and not spec.policy.can_spawn_children:
+            child._tools.pop("spawn_child", None)
+            child._tools.pop("spawn_continuous_child", None)
+            child._tools.pop("list_children", None)
+            child._tools.pop("collect_results", None)
+            child._tools.pop("wait_child", None)
+        # Also remove parent's messaging tools (child gets its own below)
+        child._tools.pop("send_message", None)
+        child._tools.pop("check_messages", None)
+        child._tools.pop("list_agents", None)
+
+        # Apply role-level execution_policy
+        if spec.policy and spec.policy.execution_policy is not None:
+            for tool_name, tool in child._tools.items():
+                if tool.get("execution_policy") is None:
+                    tool["execution_policy"] = spec.policy.execution_policy
+
+        # 9. Register to AgentRegistry and register messaging tools on child
+        if self._registry:
+            self._registry.register(child.agent_id, role=spec.role, mode="continuous")
+        self._register_child_messaging_tools(child)
+
+        return child
+
+    def _register_child_messaging_tools(self, child):
+        """Register messaging tools on a continuous child agent with its own agent_id."""
+        child_id = child.agent_id
+        channel = self._channel
+        registry = self._registry
+
+        def send(to_id: str, content: str, msg_type: str = "info") -> str:
+            try:
+                msg_id = channel.send(child_id, to_id, content, msg_type)
+                return f"Message sent (id: {msg_id})"
+            except KeyError:
+                return f"Agent '{to_id}' not found."
+
+        def check() -> str:
+            msgs = channel.receive(child_id)
+            if not msgs:
+                return "No pending messages."
+            return "\n".join(f"[{m.from_id} -> {m.msg_type}]: {m.content}" for m in msgs)
+
+        def list_all() -> str:
+            agents = registry.list_agents()
+            if not agents:
+                return "No agents registered."
+            return "\n".join(f"- {a['agent_id']} ({a['role']}, {a['mode']})" for a in agents)
+
+        child.register_tool(
+            name="send_message", func=send,
+            description="Send a message to another agent",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "to_id": {"type": "string", "description": "Target agent ID"},
+                    "content": {"type": "string", "description": "Message content"},
+                    "msg_type": {"type": "string", "description": "Message type: info/alert/request/response"},
+                },
+                "required": ["to_id", "content"],
+            },
+            tier="default", safety_level=1,
+        )
+
+        child.register_tool(
+            name="check_messages", func=check,
+            description="Check for pending messages from other agents",
+            parameters={"type": "object", "properties": {}, "required": []},
+            tier="default", safety_level=1,
+        )
+
+        child.register_tool(
+            name="list_agents", func=list_all,
+            description="List all active agents",
+            parameters={"type": "object", "properties": {}, "required": []},
+            tier="default", safety_level=1,
+        )
+
     # ============================================================
     # Memory callbacks
     # ============================================================
 
     def _on_module_child_complete(self, task_id: str, record: TaskRecord):
-        """Module-level callback: auto-memorize child results."""
+        """Module-level callback: auto-memorize child results, unregister continuous agents."""
         if self._auto_memorize and record.status == "completed" and record.result:
             self._save_child_result_to_memory(record.task, record.role, record.result)
+
+        # Unregister continuous child agent from AgentRegistry
+        agent_id = record.metrics.get("agent_id") if record.metrics else None
+        if self._registry and agent_id:
+            try:
+                self._registry.unregister(agent_id)
+            except Exception:
+                pass
 
     def _save_child_result_to_memory(self, task: str, role: str, result: str):
         """If parent has memory module, save child result as a memory fact."""
