@@ -232,6 +232,8 @@ def bare_agent(mock_llm_client):
     config.approval_mode = "persistent"
     config.auto_approve = False
     config.authorization_scopes = []
+    config.fallback_model = None
+    config.resilience_max_retries = 3
 
     import uuid
     agent = LlamAgent.__new__(LlamAgent)

@@ -3102,3 +3102,372 @@ def test_continuous_child_inherits_scope(bare_agent, mock_llm_client, tmp_path):
     # Cleanup
     module.controller.cancel_child(task_id)
     time.sleep(0.3)
+
+
+# ============================================================
+# v2.9.1: ResilienceModule
+# ============================================================
+
+from llamagent.core.llm import LLMClient
+from llamagent.modules.resilience.classifier import classify, ClassifiedError, _extract_retry_after
+from llamagent.modules.resilience.resilient_llm import ResilientLLM
+from llamagent.modules.resilience.module import ResilienceModule
+from llamagent.modules.child_agent.budget import BudgetedLLM, BudgetTracker, Budget
+
+
+def _make_http_error(status_code, message="error"):
+    """Build an exception with status_code attribute (like litellm errors)."""
+    e = Exception(message)
+    e.status_code = status_code
+    return e
+
+
+def _make_context_window_error(message="context length exceeded"):
+    """Build an exception whose class name contains 'ContextWindow'."""
+    class ContextWindowExceededError(Exception):
+        pass
+    return ContextWindowExceededError(message)
+
+
+# --- Classifier tests ---
+
+def test_classify_rate_limit():
+    """429 -> rate_limit + retryable."""
+    err = _make_http_error(429, "rate limit exceeded")
+    result = classify(err)
+    assert result.reason == "rate_limit"
+    assert result.retryable is True
+    assert result.should_failover is False
+    assert result.original is err
+
+
+def test_classify_auth_error():
+    """401 -> auth + not retryable."""
+    err = _make_http_error(401, "unauthorized")
+    result = classify(err)
+    assert result.reason == "auth"
+    assert result.retryable is False
+    assert result.should_failover is False
+
+
+def test_classify_server_error():
+    """500/502/503 -> server_error + retryable + should_failover."""
+    for status in (500, 502, 503):
+        result = classify(_make_http_error(status))
+        assert result.reason == "server_error"
+        assert result.retryable is True
+        assert result.should_failover is True
+
+
+def test_classify_context_overflow_by_type():
+    """ContextWindowExceededError (by class name) -> context_overflow + not retryable + should_failover."""
+    err = _make_context_window_error("some provider-specific message")
+    result = classify(err)
+    assert result.reason == "context_overflow"
+    assert result.retryable is False
+    assert result.should_failover is True
+
+
+def test_classify_context_overflow_by_message():
+    """Error message containing 'context length' -> context_overflow."""
+    err = Exception("maximum context length exceeded for model gpt-4")
+    result = classify(err)
+    assert result.reason == "context_overflow"
+    assert result.retryable is False
+    assert result.should_failover is True
+
+
+def test_classify_network_error():
+    """ConnectionError -> network + retryable."""
+    err = ConnectionError("connection refused")
+    result = classify(err)
+    assert result.reason == "network"
+    assert result.retryable is True
+    assert result.should_failover is False
+
+
+def test_classify_billing():
+    """Error with 'quota' in message -> billing + not retryable."""
+    err = Exception("quota exceeded for this account")
+    result = classify(err)
+    assert result.reason == "billing"
+    assert result.retryable is False
+
+
+def test_classify_unknown():
+    """Unrecognized error -> unknown + retryable."""
+    err = ValueError("something weird")
+    result = classify(err)
+    assert result.reason == "unknown"
+    assert result.retryable is True
+    assert result.should_failover is False
+
+
+def test_extract_retry_after_header():
+    """Extracts retry-after from response headers."""
+    from types import SimpleNamespace
+    err = Exception("rate limited")
+    err.response = SimpleNamespace(headers={"retry-after": "30"})
+    result = _extract_retry_after(err)
+    assert result == 30.0
+
+
+def test_extract_retry_after_ms_header():
+    """Extracts retry-after-ms from response headers (milliseconds)."""
+    from types import SimpleNamespace
+    err = Exception("rate limited")
+    err.response = SimpleNamespace(headers={"retry-after-ms": "5000"})
+    result = _extract_retry_after(err)
+    assert result == 5.0
+
+
+# --- ResilientLLM tests ---
+
+def test_resilient_retry_success(mock_llm_client):
+    """First call fails (retryable), second succeeds."""
+    retryable_err = _make_http_error(429, "rate limit")
+    mock_llm_client.set_responses([retryable_err, make_llm_response("ok")])
+
+    resilient = ResilientLLM.__new__(ResilientLLM)
+    resilient.model = "mock-model"
+    resilient.api_retry_count = 0
+    resilient.max_context_tokens = 8192
+    resilient._fallback_llm = None
+    resilient._max_retries = 3
+
+    import unittest.mock as um
+    with um.patch.object(LLMClient, "chat", side_effect=mock_llm_client.chat), \
+         um.patch("llamagent.modules.resilience.resilient_llm.time.sleep"):
+        result = resilient.chat([{"role": "user", "content": "hi"}])
+    assert result.choices[0].message.content == "ok"
+
+
+def test_resilient_failover(mock_llm_client):
+    """All retries fail -> fallback model succeeds."""
+    server_err = _make_http_error(500, "internal server error")
+    mock_llm_client.set_responses([server_err, server_err, server_err, server_err])
+
+    fallback = LLMClient.__new__(LLMClient)
+    fallback.model = "fallback-model"
+    fallback.api_retry_count = 0
+    fallback.max_context_tokens = 8192
+    fallback_response = make_llm_response("fallback ok")
+
+    resilient = ResilientLLM.__new__(ResilientLLM)
+    resilient.model = "mock-model"
+    resilient.api_retry_count = 0
+    resilient.max_context_tokens = 8192
+    resilient._fallback_llm = fallback
+    resilient._max_retries = 1  # Only 1 retry to keep test fast
+
+    import unittest.mock as um
+    with um.patch.object(LLMClient, "chat", side_effect=mock_llm_client.chat), \
+         um.patch.object(fallback, "chat", return_value=fallback_response), \
+         um.patch("llamagent.modules.resilience.resilient_llm.time.sleep"):
+        result = resilient.chat([{"role": "user", "content": "hi"}])
+    assert result.choices[0].message.content == "fallback ok"
+
+
+def test_resilient_context_overflow_failover(mock_llm_client):
+    """context_overflow -> no retry, direct failover."""
+    ctx_err = _make_context_window_error("context length exceeded")
+    mock_llm_client.set_responses([ctx_err])
+
+    fallback = LLMClient.__new__(LLMClient)
+    fallback.model = "fallback-model"
+    fallback.api_retry_count = 0
+    fallback.max_context_tokens = 128000
+    fallback_response = make_llm_response("handled by big model")
+
+    resilient = ResilientLLM.__new__(ResilientLLM)
+    resilient.model = "mock-model"
+    resilient.api_retry_count = 0
+    resilient.max_context_tokens = 8192
+    resilient._fallback_llm = fallback
+    resilient._max_retries = 3
+
+    call_count = [0]
+    original_chat = mock_llm_client.chat
+    def counting_chat(*args, **kwargs):
+        call_count[0] += 1
+        return original_chat(*args, **kwargs)
+
+    import unittest.mock as um
+    with um.patch.object(LLMClient, "chat", side_effect=counting_chat), \
+         um.patch.object(fallback, "chat", return_value=fallback_response):
+        result = resilient.chat([{"role": "user", "content": "hi"}])
+
+    assert result.choices[0].message.content == "handled by big model"
+    # Should only try main LLM once (no retry for context_overflow)
+    assert call_count[0] == 1
+
+
+def test_resilient_non_retryable_no_failover():
+    """Auth error -> not retryable, no failover -> raises."""
+    auth_err = _make_http_error(401, "invalid api key")
+
+    resilient = ResilientLLM.__new__(ResilientLLM)
+    resilient.model = "mock-model"
+    resilient.api_retry_count = 0
+    resilient.max_context_tokens = 8192
+    resilient._fallback_llm = None
+    resilient._max_retries = 3
+
+    import unittest.mock as um
+    with um.patch.object(LLMClient, "chat", side_effect=auth_err):
+        with pytest.raises(Exception, match="invalid api key"):
+            resilient.chat([{"role": "user", "content": "hi"}])
+
+
+def test_resilient_retries_exhausted_no_failover():
+    """All retries exhausted on retryable error, no fallback -> raises original."""
+    network_err = ConnectionError("connection refused")
+
+    resilient = ResilientLLM.__new__(ResilientLLM)
+    resilient.model = "mock-model"
+    resilient.api_retry_count = 0
+    resilient.max_context_tokens = 8192
+    resilient._fallback_llm = None
+    resilient._max_retries = 1
+
+    import unittest.mock as um
+    with um.patch.object(LLMClient, "chat", side_effect=network_err), \
+         um.patch("llamagent.modules.resilience.resilient_llm.time.sleep"):
+        with pytest.raises(ConnectionError, match="connection refused"):
+            resilient.chat([{"role": "user", "content": "hi"}])
+
+
+def test_resilient_fallback_also_fails(mock_llm_client):
+    """All retries fail, fallback also fails -> raises fallback error."""
+    server_err = _make_http_error(500, "primary down")
+    fallback_err = _make_http_error(500, "fallback also down")
+    mock_llm_client.set_responses([server_err, server_err])
+
+    fallback = LLMClient.__new__(LLMClient)
+    fallback.model = "fallback-model"
+    fallback.api_retry_count = 0
+    fallback.max_context_tokens = 8192
+
+    resilient = ResilientLLM.__new__(ResilientLLM)
+    resilient.model = "mock-model"
+    resilient.api_retry_count = 0
+    resilient.max_context_tokens = 8192
+    resilient._fallback_llm = fallback
+    resilient._max_retries = 0
+
+    import unittest.mock as um
+    with um.patch.object(LLMClient, "chat", side_effect=mock_llm_client.chat), \
+         um.patch.object(fallback, "chat", side_effect=fallback_err), \
+         um.patch("llamagent.modules.resilience.resilient_llm.time.sleep"):
+        with pytest.raises(Exception, match="fallback also down"):
+            resilient.chat([{"role": "user", "content": "hi"}])
+
+
+def test_resilient_ask_gets_resilience(mock_llm_client):
+    """ask() (inherited from LLMClient) gets resilience through self.chat()."""
+    retryable_err = _make_http_error(429, "rate limit")
+    mock_llm_client.set_responses([retryable_err, make_llm_response("recovered")])
+
+    resilient = ResilientLLM.__new__(ResilientLLM)
+    resilient.model = "mock-model"
+    resilient.api_retry_count = 0
+    resilient.max_context_tokens = 8192
+    resilient._fallback_llm = None
+    resilient._max_retries = 3
+
+    import unittest.mock as um
+    with um.patch("llamagent.core.llm._LITELLM_AVAILABLE", True), \
+         um.patch.object(LLMClient, "chat", side_effect=mock_llm_client.chat), \
+         um.patch("llamagent.modules.resilience.resilient_llm.time.sleep"):
+        result = resilient.ask("hello")
+    assert result == "recovered"
+
+
+def test_resilient_no_module(bare_agent, mock_llm_client):
+    """Without ResilienceModule, agent.llm is plain LLMClient — behavior unchanged."""
+    assert type(bare_agent.llm).__name__ != "ResilientLLM"
+    mock_llm_client.set_responses([make_llm_response("plain")])
+    resp = bare_agent.llm.chat([{"role": "user", "content": "hi"}])
+    assert resp.choices[0].message.content == "plain"
+
+
+def test_resilient_chat_stream_passthrough(mock_llm_client):
+    """chat_stream is inherited from LLMClient, passthrough without resilience."""
+    resilient = ResilientLLM.__new__(ResilientLLM)
+    resilient.model = "mock-model"
+    resilient.api_retry_count = 0
+    resilient.max_context_tokens = 8192
+    resilient._fallback_llm = None
+    resilient._max_retries = 3
+
+    stream_chunks = make_stream_chunks("hello stream")
+
+    import unittest.mock as um
+    with um.patch("llamagent.core.llm._LITELLM_AVAILABLE", True), \
+         um.patch("llamagent.core.llm.completion", side_effect=lambda **kw: iter(stream_chunks) if kw.get("stream") else None):
+        chunks = list(resilient.chat_stream([{"role": "user", "content": "hi"}]))
+    assert len(chunks) > 0
+
+
+def test_resilient_isinstance_transparent():
+    """ResilientLLM isinstance check is transparent — IS-A LLMClient."""
+    resilient = ResilientLLM.__new__(ResilientLLM)
+    assert isinstance(resilient, LLMClient)
+
+
+# --- Module integration tests ---
+
+def test_resilience_module_attach(bare_agent):
+    """ResilienceModule replaces agent.llm with ResilientLLM, _llm_cache untouched."""
+    original_cache_llm = bare_agent._llm_cache.get("mock-model")
+
+    module = ResilienceModule()
+    bare_agent.register_module(module)
+
+    # agent.llm is now ResilientLLM
+    assert isinstance(bare_agent.llm, ResilientLLM)
+    assert isinstance(bare_agent.llm, LLMClient)
+    # _llm_cache still has the original
+    assert bare_agent._llm_cache["mock-model"] is original_cache_llm
+    assert bare_agent._llm_cache["mock-model"] is not bare_agent.llm
+
+
+def test_resilience_module_child_agent_same_model(bare_agent):
+    """Child agent using same model via _get_llm gets original LLMClient, not affected."""
+    module = ResilienceModule()
+    bare_agent.register_module(module)
+
+    child_llm = bare_agent._get_llm("mock-model")
+    # Should be the original cached LLMClient, not ResilientLLM
+    assert type(child_llm).__name__ != "ResilientLLM"
+    assert child_llm is bare_agent._llm_cache["mock-model"]
+
+
+# --- BudgetedLLM __getattr__ test ---
+
+def test_budgeted_llm_getattr_proxy(mock_llm_client):
+    """BudgetedLLM proxies unknown attributes to underlying LLM."""
+    tracker = BudgetTracker(Budget())
+    budgeted = BudgetedLLM(mock_llm_client, tracker)
+    # max_context_tokens is on mock_llm_client but not on BudgetedLLM
+    assert budgeted.max_context_tokens == mock_llm_client.max_context_tokens
+    # model is a direct attribute (shadows proxy)
+    assert budgeted.model == mock_llm_client.model
+
+
+def test_classify_defensive_classifier_failure():
+    """If classify() raises internally, _call_with_resilience falls back to unknown/retryable."""
+    import unittest.mock as um
+
+    resilient = ResilientLLM.__new__(ResilientLLM)
+    resilient.model = "mock-model"
+    resilient.api_retry_count = 0
+    resilient.max_context_tokens = 8192
+    resilient._fallback_llm = None
+    resilient._max_retries = 0  # No retries, just test the defensive catch
+
+    original_err = Exception("some llm error")
+    with um.patch.object(LLMClient, "chat", side_effect=original_err), \
+         um.patch("llamagent.modules.resilience.resilient_llm.classify", side_effect=RuntimeError("classifier bug")):
+        with pytest.raises(Exception, match="some llm error"):
+            resilient.chat([{"role": "user", "content": "hi"}])
