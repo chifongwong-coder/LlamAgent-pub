@@ -157,6 +157,10 @@ class BudgetedLLM:
         """Delegate token counting to the underlying LLM (no budget check)."""
         return self._llm.count_tokens(messages)
 
+    def __getattr__(self, name):
+        """Proxy unknown attributes to the underlying LLM."""
+        return getattr(self._llm, name)
+
     @staticmethod
     def _estimate_tokens(response) -> int:
         """

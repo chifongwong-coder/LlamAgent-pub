@@ -33,6 +33,7 @@ from llamagent.core import LlamAgent, Config, Persona, PersonaManager
 # are not installed.
 
 AVAILABLE_MODULES = {
+    "resilience": "llamagent.modules.resilience.ResilienceModule",  # First: wraps agent.llm
     "safety": "llamagent.modules.safety.SafetyModule",
     "compression": "llamagent.modules.compression.CompressionModule",
     "persistence": "llamagent.modules.persistence.PersistenceModule",

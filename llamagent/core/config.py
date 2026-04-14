@@ -57,6 +57,8 @@ _YAML_MAP = [
     (("model", "name"), "model", str),
     (("model", "max_context_tokens"), "max_context_tokens", int),
     (("model", "api_retry_count"), "api_retry_count", int),
+    (("llm", "fallback_model"), "fallback_model", str),
+    (("llm", "resilience_max_retries"), "resilience_max_retries", int),
     (("agent", "system_prompt"), "system_prompt", str),
     (("agent", "context_window_size"), "context_window_size", int),
     (("agent", "context_compress_threshold"), "context_compress_threshold", float),
@@ -159,6 +161,8 @@ class Config:
         self.model: str = ""  # empty = auto-detect in _post_process
         self.max_context_tokens: int = 0  # 0 = auto-detect in _post_process
         self.api_retry_count: int = 1
+        self.fallback_model: str | None = None
+        self.resilience_max_retries: int = 3
 
         # Agent
         self.system_prompt: str = (
