@@ -3221,6 +3221,24 @@ def test_extract_retry_after_ms_header():
     assert result == 5.0
 
 
+def test_extract_retry_after_message_seconds():
+    """Extracts retry-after from error message text (seconds)."""
+    err = Exception("Please retry after 30s")
+    assert _extract_retry_after(err) == 30.0
+
+
+def test_extract_retry_after_message_minutes():
+    """Extracts retry-after from error message text (minutes → seconds)."""
+    err = Exception("try again in 2 minutes")
+    assert _extract_retry_after(err) == 120.0
+
+
+def test_extract_retry_after_default_zero():
+    """Returns 0 when no retry-after info found."""
+    err = Exception("some random error")
+    assert _extract_retry_after(err) == 0
+
+
 # --- ResilientLLM tests ---
 
 def test_resilient_retry_success(mock_llm_client):
@@ -3234,6 +3252,7 @@ def test_resilient_retry_success(mock_llm_client):
     resilient.max_context_tokens = 8192
     resilient._fallback_llm = None
     resilient._max_retries = 3
+    resilient._primary_cooldown_until = 0
 
     import unittest.mock as um
     with um.patch.object(LLMClient, "chat", side_effect=mock_llm_client.chat), \
@@ -3259,6 +3278,7 @@ def test_resilient_failover(mock_llm_client):
     resilient.max_context_tokens = 8192
     resilient._fallback_llm = fallback
     resilient._max_retries = 1  # Only 1 retry to keep test fast
+    resilient._primary_cooldown_until = 0
 
     import unittest.mock as um
     with um.patch.object(LLMClient, "chat", side_effect=mock_llm_client.chat), \
@@ -3285,6 +3305,7 @@ def test_resilient_context_overflow_failover(mock_llm_client):
     resilient.max_context_tokens = 8192
     resilient._fallback_llm = fallback
     resilient._max_retries = 3
+    resilient._primary_cooldown_until = 0
 
     call_count = [0]
     original_chat = mock_llm_client.chat
@@ -3312,6 +3333,7 @@ def test_resilient_non_retryable_no_failover():
     resilient.max_context_tokens = 8192
     resilient._fallback_llm = None
     resilient._max_retries = 3
+    resilient._primary_cooldown_until = 0
 
     import unittest.mock as um
     with um.patch.object(LLMClient, "chat", side_effect=auth_err):
@@ -3329,6 +3351,7 @@ def test_resilient_retries_exhausted_no_failover():
     resilient.max_context_tokens = 8192
     resilient._fallback_llm = None
     resilient._max_retries = 1
+    resilient._primary_cooldown_until = 0
 
     import unittest.mock as um
     with um.patch.object(LLMClient, "chat", side_effect=network_err), \
@@ -3354,6 +3377,7 @@ def test_resilient_fallback_also_fails(mock_llm_client):
     resilient.max_context_tokens = 8192
     resilient._fallback_llm = fallback
     resilient._max_retries = 0
+    resilient._primary_cooldown_until = 0
 
     import unittest.mock as um
     with um.patch.object(LLMClient, "chat", side_effect=mock_llm_client.chat), \
@@ -3374,6 +3398,7 @@ def test_resilient_ask_gets_resilience(mock_llm_client):
     resilient.max_context_tokens = 8192
     resilient._fallback_llm = None
     resilient._max_retries = 3
+    resilient._primary_cooldown_until = 0
 
     import unittest.mock as um
     with um.patch("llamagent.core.llm._LITELLM_AVAILABLE", True), \
@@ -3399,6 +3424,7 @@ def test_resilient_chat_stream_passthrough(mock_llm_client):
     resilient.max_context_tokens = 8192
     resilient._fallback_llm = None
     resilient._max_retries = 3
+    resilient._primary_cooldown_until = 0
 
     stream_chunks = make_stream_chunks("hello stream")
 
@@ -3465,9 +3491,137 @@ def test_classify_defensive_classifier_failure():
     resilient.max_context_tokens = 8192
     resilient._fallback_llm = None
     resilient._max_retries = 0  # No retries, just test the defensive catch
+    resilient._primary_cooldown_until = 0
 
     original_err = Exception("some llm error")
     with um.patch.object(LLMClient, "chat", side_effect=original_err), \
          um.patch("llamagent.modules.resilience.resilient_llm.classify", side_effect=RuntimeError("classifier bug")):
         with pytest.raises(Exception, match="some llm error"):
             resilient.chat([{"role": "user", "content": "hi"}])
+
+
+# ============================================================
+# v2.9.2: Turn-scoped failover recovery
+# ============================================================
+
+def _make_resilient_with_fallback(mock_llm_client, fallback_responses, max_retries=0):
+    """Helper: create ResilientLLM with a mock fallback."""
+    import unittest.mock as um
+
+    fallback = LLMClient.__new__(LLMClient)
+    fallback.model = "fallback-model"
+    fallback.api_retry_count = 0
+    fallback.max_context_tokens = 8192
+
+    _fb_idx = [0]
+    def _fb_chat(*args, **kwargs):
+        idx = _fb_idx[0]
+        _fb_idx[0] += 1
+        if idx < len(fallback_responses):
+            r = fallback_responses[idx]
+            if isinstance(r, Exception):
+                raise r
+            return r
+        return make_llm_response("fallback default")
+
+    fallback.chat = _fb_chat
+
+    resilient = ResilientLLM.__new__(ResilientLLM)
+    resilient.model = "mock-model"
+    resilient.api_retry_count = 0
+    resilient.max_context_tokens = 8192
+    resilient._fallback_llm = fallback
+    resilient._max_retries = max_retries
+    resilient._primary_cooldown_until = 0
+    return resilient, fallback
+
+
+def test_turn_scoped_failover_sets_cooldown(mock_llm_client):
+    """After successful failover, primary enters cooldown; next call uses fallback directly."""
+    server_err = _make_http_error(500, "primary down")
+    mock_llm_client.set_responses([server_err])  # Primary fails
+
+    resilient, fallback = _make_resilient_with_fallback(
+        mock_llm_client,
+        [make_llm_response("fallback 1"), make_llm_response("fallback 2")],
+        max_retries=0,
+    )
+
+    import unittest.mock as um
+    with um.patch.object(LLMClient, "chat", side_effect=mock_llm_client.chat), \
+         um.patch("llamagent.modules.resilience.resilient_llm.time.sleep"):
+        # First call: primary fails → failover succeeds → cooldown set
+        result1 = resilient.chat([{"role": "user", "content": "hi"}])
+        assert result1.choices[0].message.content == "fallback 1"
+        assert resilient._primary_cooldown_until > time.time()
+
+        # Second call: during cooldown → uses fallback directly (skips primary)
+        result2 = resilient.chat([{"role": "user", "content": "hi again"}])
+        assert result2.choices[0].message.content == "fallback 2"
+
+
+def test_turn_scoped_primary_recovery(mock_llm_client):
+    """After cooldown expires, primary is tried again; success clears cooldown."""
+    resilient, fallback = _make_resilient_with_fallback(
+        mock_llm_client, [], max_retries=0,
+    )
+    # Simulate expired cooldown
+    resilient._primary_cooldown_until = time.time() - 1
+
+    mock_llm_client.set_responses([make_llm_response("primary recovered")])
+
+    import unittest.mock as um
+    with um.patch.object(LLMClient, "chat", side_effect=mock_llm_client.chat):
+        result = resilient.chat([{"role": "user", "content": "hi"}])
+
+    assert result.choices[0].message.content == "primary recovered"
+    assert resilient._primary_cooldown_until == 0  # Cooldown cleared
+
+
+def test_turn_scoped_fallback_fails_tries_primary(mock_llm_client):
+    """During cooldown, if fallback fails, falls through to primary retry."""
+    resilient, fallback = _make_resilient_with_fallback(
+        mock_llm_client,
+        [Exception("fallback down")],  # Fallback fails
+        max_retries=0,
+    )
+    resilient._primary_cooldown_until = time.time() + 300  # In cooldown
+
+    mock_llm_client.set_responses([make_llm_response("primary ok")])
+
+    import unittest.mock as um
+    with um.patch.object(LLMClient, "chat", side_effect=mock_llm_client.chat), \
+         um.patch("llamagent.modules.resilience.resilient_llm.time.sleep"):
+        result = resilient.chat([{"role": "user", "content": "hi"}])
+
+    assert result.choices[0].message.content == "primary ok"
+    assert resilient._primary_cooldown_until == 0  # Primary recovered, cooldown cleared
+
+
+def test_turn_scoped_cooldown_uses_retry_after(mock_llm_client):
+    """Cooldown duration uses retry_after when available (capped at 300s)."""
+    primary_err = Exception("primary down")
+
+    resilient, fallback = _make_resilient_with_fallback(
+        mock_llm_client,
+        [make_llm_response("fallback ok")],
+        max_retries=0,
+    )
+
+    # Mock classify to return should_failover=True with retry_after=45
+    fake_classified = ClassifiedError(
+        reason="server_error", retryable=False, should_failover=True,
+        retry_after=45, original=primary_err,
+    )
+
+    import unittest.mock as um
+    before = time.time()
+    with um.patch.object(LLMClient, "chat", side_effect=primary_err), \
+         um.patch("llamagent.modules.resilience.resilient_llm.classify", return_value=fake_classified), \
+         um.patch("llamagent.modules.resilience.resilient_llm.time.sleep"):
+        result = resilient.chat([{"role": "user", "content": "hi"}])
+
+    assert result.choices[0].message.content == "fallback ok"
+    # Cooldown should be ~45s (from retry_after), not default 60
+    expected_cooldown = before + 45
+    assert abs(resilient._primary_cooldown_until - expected_cooldown) < 2
