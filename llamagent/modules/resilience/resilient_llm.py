@@ -37,6 +37,7 @@ class ResilientLLM(LLMClient):
         super().__init__(model, api_retry_count=0)
         self._fallback_llm = fallback_llm
         self._max_retries = max_retries
+        self._primary_cooldown_until: float = 0  # Turn-scoped: use fallback during cooldown
 
     def chat(self, messages, **kwargs):
         """Chat with error classification, smart retry, and model failover."""
@@ -44,18 +45,35 @@ class ResilientLLM(LLMClient):
 
     def _call_with_resilience(self, messages, **kwargs):
         """
-        Retry loop with error classification and failover.
+        Retry loop with error classification, failover, and turn-scoped recovery.
 
-        1. Try super().chat() (single attempt, api_retry_count=0)
-        2. Classify failure → decide retry / failover / give up
+        Turn-scoped failover: after a successful failover, the primary model enters
+        a cooldown period. During cooldown, fallback is used directly (avoiding
+        repeated failures on primary). After cooldown, primary is tried again.
+
+        Flow:
+        1. If primary is in cooldown and fallback exists, use fallback directly
+        2. Try super().chat() with retry loop
         3. After retries exhausted, try fallback model if should_failover
-        4. If all fails, raise the original exception
+        4. On successful failover, set primary cooldown
+        5. On successful primary call, clear cooldown
         """
+        # Turn-scoped: during cooldown, use fallback directly
+        if self._fallback_llm and time.time() < self._primary_cooldown_until:
+            logger.info("Primary in cooldown, using fallback model: %s", self._fallback_llm.model)
+            try:
+                return self._fallback_llm.chat(messages, **kwargs)
+            except Exception:
+                logger.warning("Fallback failed during cooldown, trying primary")
+                # Fall through to normal primary retry
+
         last_error = None
 
         for attempt in range(self._max_retries + 1):
             try:
-                return super().chat(messages, **kwargs)
+                result = super().chat(messages, **kwargs)
+                self._primary_cooldown_until = 0  # Primary recovered, clear cooldown
+                return result
             except Exception as e:
                 # Defensive: if classifier itself fails, treat as unknown/retryable
                 try:
@@ -89,7 +107,12 @@ class ResilientLLM(LLMClient):
         if last_error and last_error.should_failover and self._fallback_llm:
             logger.warning("Failing over to fallback model: %s", self._fallback_llm.model)
             try:
-                return self._fallback_llm.chat(messages, **kwargs)
+                result = self._fallback_llm.chat(messages, **kwargs)
+                # Successful failover → set primary cooldown
+                cooldown = min(last_error.retry_after, 300) if last_error.retry_after > 0 else 60
+                self._primary_cooldown_until = time.time() + cooldown
+                logger.info("Primary cooldown set for %.0fs", cooldown)
+                return result
             except Exception as fallback_error:
                 logger.error("Failover also failed: %s", fallback_error)
                 raise fallback_error
