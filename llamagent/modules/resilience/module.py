@@ -31,6 +31,9 @@ class ResilienceModule(Module):
         fallback_model = getattr(agent.config, "fallback_model", None)
         fallback_llm = LLMClient(fallback_model) if fallback_model else None
 
+        simple_model = getattr(agent.config, "simple_model", None)
+        simple_llm = LLMClient(simple_model) if simple_model else None
+
         max_retries = getattr(agent.config, "resilience_max_retries", 3)
 
         # Create a new ResilientLLM instance using the model string.
@@ -39,11 +42,13 @@ class ResilienceModule(Module):
             model=agent.llm.model,
             fallback_llm=fallback_llm,
             max_retries=max_retries,
+            simple_llm=simple_llm,
         )
         agent.llm = resilient
 
         logger.info(
-            "ResilienceModule attached: max_retries=%d, fallback=%s",
+            "ResilienceModule attached: max_retries=%d, fallback=%s, simple=%s",
             max_retries,
             fallback_model or "none",
+            simple_model or "none",
         )

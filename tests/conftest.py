@@ -234,6 +234,7 @@ def bare_agent(mock_llm_client):
     config.authorization_scopes = []
     config.fallback_model = None
     config.resilience_max_retries = 3
+    config.simple_model = None
 
     import uuid
     agent = LlamAgent.__new__(LlamAgent)
