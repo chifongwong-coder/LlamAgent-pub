@@ -59,6 +59,7 @@ _YAML_MAP = [
     (("model", "api_retry_count"), "api_retry_count", int),
     (("llm", "fallback_model"), "fallback_model", str),
     (("llm", "resilience_max_retries"), "resilience_max_retries", int),
+    (("llm", "routing_simple_model"), "routing_simple_model", str),
     (("agent", "system_prompt"), "system_prompt", str),
     (("agent", "context_window_size"), "context_window_size", int),
     (("agent", "context_compress_threshold"), "context_compress_threshold", float),
@@ -163,6 +164,7 @@ class Config:
         self.api_retry_count: int = 1
         self.fallback_model: str | None = None
         self.resilience_max_retries: int = 3
+        self.routing_simple_model: str | None = None
 
         # Agent
         self.system_prompt: str = (

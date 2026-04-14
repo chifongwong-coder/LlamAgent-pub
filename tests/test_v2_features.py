@@ -3253,6 +3253,7 @@ def test_resilient_retry_success(mock_llm_client):
     resilient._fallback_llm = None
     resilient._max_retries = 3
     resilient._primary_cooldown_until = 0
+    resilient._simple_llm = None
 
     import unittest.mock as um
     with um.patch.object(LLMClient, "chat", side_effect=mock_llm_client.chat), \
@@ -3279,6 +3280,7 @@ def test_resilient_failover(mock_llm_client):
     resilient._fallback_llm = fallback
     resilient._max_retries = 1  # Only 1 retry to keep test fast
     resilient._primary_cooldown_until = 0
+    resilient._simple_llm = None
 
     import unittest.mock as um
     with um.patch.object(LLMClient, "chat", side_effect=mock_llm_client.chat), \
@@ -3306,6 +3308,7 @@ def test_resilient_context_overflow_failover(mock_llm_client):
     resilient._fallback_llm = fallback
     resilient._max_retries = 3
     resilient._primary_cooldown_until = 0
+    resilient._simple_llm = None
 
     call_count = [0]
     original_chat = mock_llm_client.chat
@@ -3334,6 +3337,7 @@ def test_resilient_non_retryable_no_failover():
     resilient._fallback_llm = None
     resilient._max_retries = 3
     resilient._primary_cooldown_until = 0
+    resilient._simple_llm = None
 
     import unittest.mock as um
     with um.patch.object(LLMClient, "chat", side_effect=auth_err):
@@ -3352,6 +3356,7 @@ def test_resilient_retries_exhausted_no_failover():
     resilient._fallback_llm = None
     resilient._max_retries = 1
     resilient._primary_cooldown_until = 0
+    resilient._simple_llm = None
 
     import unittest.mock as um
     with um.patch.object(LLMClient, "chat", side_effect=network_err), \
@@ -3378,6 +3383,7 @@ def test_resilient_fallback_also_fails(mock_llm_client):
     resilient._fallback_llm = fallback
     resilient._max_retries = 0
     resilient._primary_cooldown_until = 0
+    resilient._simple_llm = None
 
     import unittest.mock as um
     with um.patch.object(LLMClient, "chat", side_effect=mock_llm_client.chat), \
@@ -3399,6 +3405,7 @@ def test_resilient_ask_gets_resilience(mock_llm_client):
     resilient._fallback_llm = None
     resilient._max_retries = 3
     resilient._primary_cooldown_until = 0
+    resilient._simple_llm = None
 
     import unittest.mock as um
     with um.patch("llamagent.core.llm._LITELLM_AVAILABLE", True), \
@@ -3425,6 +3432,7 @@ def test_resilient_chat_stream_passthrough(mock_llm_client):
     resilient._fallback_llm = None
     resilient._max_retries = 3
     resilient._primary_cooldown_until = 0
+    resilient._simple_llm = None
 
     stream_chunks = make_stream_chunks("hello stream")
 
@@ -3492,6 +3500,7 @@ def test_classify_defensive_classifier_failure():
     resilient._fallback_llm = None
     resilient._max_retries = 0  # No retries, just test the defensive catch
     resilient._primary_cooldown_until = 0
+    resilient._simple_llm = None
 
     original_err = Exception("some llm error")
     with um.patch.object(LLMClient, "chat", side_effect=original_err), \
@@ -3533,6 +3542,7 @@ def _make_resilient_with_fallback(mock_llm_client, fallback_responses, max_retri
     resilient._fallback_llm = fallback
     resilient._max_retries = max_retries
     resilient._primary_cooldown_until = 0
+    resilient._simple_llm = None
     return resilient, fallback
 
 
@@ -3625,3 +3635,135 @@ def test_turn_scoped_cooldown_uses_retry_after(mock_llm_client):
     # Cooldown should be ~45s (from retry_after), not default 60
     expected_cooldown = before + 45
     assert abs(resilient._primary_cooldown_until - expected_cooldown) < 2
+
+
+# ============================================================
+# v2.9.3: Smart model routing
+# ============================================================
+
+def test_smart_routing_simple_query():
+    """Simple query (short, no code, no URL) routes to simple model."""
+    simple = LLMClient.__new__(LLMClient)
+    simple.model = "cheap-model"
+    simple.api_retry_count = 0
+    simple.max_context_tokens = 8192
+
+    resilient = ResilientLLM.__new__(ResilientLLM)
+    resilient.model = "main-model"
+    resilient.api_retry_count = 0
+    resilient.max_context_tokens = 8192
+    resilient._fallback_llm = None
+    resilient._max_retries = 0
+    resilient._primary_cooldown_until = 0
+    resilient._simple_llm = simple
+
+    import unittest.mock as um
+    with um.patch.object(simple, "chat", return_value=make_llm_response("cheap answer")):
+        result = resilient.chat([{"role": "user", "content": "What is 2+2?"}])
+    assert result.choices[0].message.content == "cheap answer"
+
+
+def test_smart_routing_complex_query(mock_llm_client):
+    """Complex query (long or has code) uses main model."""
+    simple = LLMClient.__new__(LLMClient)
+    simple.model = "cheap-model"
+
+    resilient = ResilientLLM.__new__(ResilientLLM)
+    resilient.model = "mock-model"
+    resilient.api_retry_count = 0
+    resilient.max_context_tokens = 8192
+    resilient._fallback_llm = None
+    resilient._max_retries = 0
+    resilient._primary_cooldown_until = 0
+    resilient._simple_llm = simple
+
+    mock_llm_client.set_responses([make_llm_response("main answer")])
+
+    import unittest.mock as um
+    with um.patch.object(LLMClient, "chat", side_effect=mock_llm_client.chat):
+        # Code block → complex
+        result = resilient.chat([{"role": "user", "content": "Fix this:\n```python\nprint('hello')\n```"}])
+    assert result.choices[0].message.content == "main answer"
+
+
+def test_smart_routing_with_tools(mock_llm_client):
+    """When tools are provided, always use main model (tool calling needs capable model)."""
+    simple = LLMClient.__new__(LLMClient)
+    simple.model = "cheap-model"
+
+    resilient = ResilientLLM.__new__(ResilientLLM)
+    resilient.model = "mock-model"
+    resilient.api_retry_count = 0
+    resilient.max_context_tokens = 8192
+    resilient._fallback_llm = None
+    resilient._max_retries = 0
+    resilient._primary_cooldown_until = 0
+    resilient._simple_llm = simple
+
+    mock_llm_client.set_responses([make_llm_response("main with tools")])
+
+    import unittest.mock as um
+    with um.patch.object(LLMClient, "chat", side_effect=mock_llm_client.chat):
+        result = resilient.chat(
+            [{"role": "user", "content": "Hi"}],
+            tools=[{"type": "function", "function": {"name": "test"}}],
+        )
+    assert result.choices[0].message.content == "main with tools"
+
+
+def test_smart_routing_simple_fails_fallthrough(mock_llm_client):
+    """If simple model fails, falls through to main model."""
+    simple = LLMClient.__new__(LLMClient)
+    simple.model = "cheap-model"
+
+    resilient = ResilientLLM.__new__(ResilientLLM)
+    resilient.model = "mock-model"
+    resilient.api_retry_count = 0
+    resilient.max_context_tokens = 8192
+    resilient._fallback_llm = None
+    resilient._max_retries = 0
+    resilient._primary_cooldown_until = 0
+    resilient._simple_llm = simple
+
+    mock_llm_client.set_responses([make_llm_response("main fallback")])
+
+    import unittest.mock as um
+    with um.patch.object(simple, "chat", side_effect=Exception("cheap model down")), \
+         um.patch.object(LLMClient, "chat", side_effect=mock_llm_client.chat):
+        result = resilient.chat([{"role": "user", "content": "Hello"}])
+    assert result.choices[0].message.content == "main fallback"
+
+
+def test_smart_routing_no_simple_model(mock_llm_client):
+    """Without simple_model configured, all queries use main model."""
+    resilient = ResilientLLM.__new__(ResilientLLM)
+    resilient.model = "mock-model"
+    resilient.api_retry_count = 0
+    resilient.max_context_tokens = 8192
+    resilient._fallback_llm = None
+    resilient._max_retries = 0
+    resilient._primary_cooldown_until = 0
+    resilient._simple_llm = None
+
+    mock_llm_client.set_responses([make_llm_response("main only")])
+
+    import unittest.mock as um
+    with um.patch.object(LLMClient, "chat", side_effect=mock_llm_client.chat):
+        result = resilient.chat([{"role": "user", "content": "Hi"}])
+    assert result.choices[0].message.content == "main only"
+
+
+def test_is_simple_query():
+    """_is_simple_query correctly classifies queries."""
+    assert ResilientLLM._is_simple_query([{"role": "user", "content": "Hi"}]) is True
+    assert ResilientLLM._is_simple_query([{"role": "user", "content": "What is Python?"}]) is True
+    # Long text → complex
+    assert ResilientLLM._is_simple_query([{"role": "user", "content": "x" * 200}]) is False
+    # Code block → complex
+    assert ResilientLLM._is_simple_query([{"role": "user", "content": "```code```"}]) is False
+    # URL → complex
+    assert ResilientLLM._is_simple_query([{"role": "user", "content": "Check http://example.com"}]) is False
+    # No user message → False
+    assert ResilientLLM._is_simple_query([{"role": "system", "content": "hi"}]) is False
+    # Empty → False
+    assert ResilientLLM._is_simple_query([]) is False

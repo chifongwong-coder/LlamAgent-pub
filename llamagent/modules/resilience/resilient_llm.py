@@ -27,21 +27,46 @@ class ResilientLLM(LLMClient):
     get resilience (they call litellm directly).
     """
 
-    def __init__(self, model: str, fallback_llm: LLMClient | None = None, max_retries: int = 3):
+    def __init__(
+        self,
+        model: str,
+        fallback_llm: LLMClient | None = None,
+        max_retries: int = 3,
+        simple_llm: LLMClient | None = None,
+    ):
         """
         Args:
             model: Model identifier string (same as LLMClient).
             fallback_llm: Independent LLMClient for failover (optional).
             max_retries: Maximum retry attempts before failover/give up.
+            simple_llm: Cheap model for simple queries (optional, smart routing).
         """
         super().__init__(model, api_retry_count=0)
         self._fallback_llm = fallback_llm
         self._max_retries = max(0, max_retries)
         self._primary_cooldown_until: float = 0  # Turn-scoped: use fallback during cooldown
+        self._simple_llm = simple_llm
 
     def chat(self, messages, **kwargs):
-        """Chat with error classification, smart retry, and model failover."""
+        """Chat with smart routing, error classification, retry, and failover."""
+        # Smart routing: simple queries → cheap model (skip resilience overhead)
+        if self._simple_llm and not kwargs.get("tools") and self._is_simple_query(messages):
+            try:
+                return self._simple_llm.chat(messages, **kwargs)
+            except Exception:
+                logger.debug("Simple model failed, falling through to primary")
         return self._call_with_resilience(messages, **kwargs)
+
+    @staticmethod
+    def _is_simple_query(messages: list[dict]) -> bool:
+        """Check if the last user message is a simple query (short, no code, no URLs)."""
+        last_user = next((m for m in reversed(messages) if m.get("role") == "user"), None)
+        if not last_user:
+            return False
+        content = last_user.get("content", "")
+        if not isinstance(content, str):
+            return False
+        return len(content) < 200 and "```" not in content and "http" not in content
 
     def _call_with_resilience(self, messages, **kwargs):
         """
