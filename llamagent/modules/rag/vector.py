@@ -38,6 +38,11 @@ class VectorBackend(ABC):
         ...
 
     @abstractmethod
+    def get_all(self, where: dict | None = None) -> list[dict]:
+        """Return all documents, optionally filtered by metadata conditions."""
+        ...
+
+    @abstractmethod
     def clear(self) -> None:
         """Remove all documents from the store."""
         ...
@@ -136,6 +141,20 @@ class ChromaVectorBackend(VectorBackend):
         if metadata is not None:
             kwargs["metadatas"] = [metadata]
         self._collection.update(**kwargs)
+
+    def get_all(self, where: dict | None = None) -> list[dict]:
+        """Return all documents, optionally filtered by metadata conditions."""
+        self._ensure_collection()
+        kwargs = {}
+        if where:
+            kwargs["where"] = where
+        result = self._collection.get(**kwargs)
+        items = []
+        for i, doc_id in enumerate(result.get("ids", [])):
+            meta = result["metadatas"][i] if result.get("metadatas") else {}
+            text = result["documents"][i] if result.get("documents") else ""
+            items.append({"id": doc_id, "text": text, "metadata": meta})
+        return items
 
     def count(self) -> int:
         """Return the number of documents in the collection."""

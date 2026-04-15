@@ -2164,3 +2164,348 @@ def test_normal_yields_to_urgent(bare_agent, mock_llm_client):
     # urgent_mid should appear between normal_1 and normal_2
     assert execution_order.index("normal_1") < execution_order.index("urgent_mid")
     assert execution_order.index("urgent_mid") < execution_order.index("normal_2")
+
+
+# ============================================================
+# v2.9.6: Memory consolidation ("Dream")
+# ============================================================
+
+
+def test_consolidate_tool_registered(bare_agent, mock_llm_client, tmp_path):
+    """consolidate_memory tool is registered when memory_mode is autonomous or hybrid."""
+    from llamagent.modules.memory.module import MemoryModule
+
+    for mode in ("autonomous", "hybrid"):
+        agent = bare_agent
+        agent._tools = {}
+        agent.modules = {}
+        agent.config.memory_backend = "fs"
+        agent.config.memory_mode = mode
+        agent.config.memory_recall_mode = "tool"
+        agent.config.memory_fs_dir = str(tmp_path / f"mem_{mode}")
+
+        mod = MemoryModule()
+        agent.register_module(mod)
+
+        assert "consolidate_memory" in agent._tools, f"Tool missing for mode={mode}"
+
+
+def test_consolidate_deletes_old_episode(bare_agent, mock_llm_client, tmp_path):
+    """Outdated episode facts are archived by consolidation."""
+    import json
+    from llamagent.modules.memory.module import MemoryModule
+    from llamagent.modules.memory.fact import MemoryFact
+
+    bare_agent.config.memory_backend = "fs"
+    bare_agent.config.memory_mode = "autonomous"
+    bare_agent.config.memory_recall_mode = "tool"
+    bare_agent.config.memory_fs_dir = str(tmp_path / "memory")
+
+    mod = MemoryModule()
+    bare_agent.register_module(mod)
+
+    # Save an episode fact
+    fact = MemoryFact(
+        fact_id="ep001",
+        kind="episode",
+        subject="meeting",
+        attribute="status",
+        value="sprint planning at 2pm",
+        source_text="Sprint planning at 2pm today",
+        created_at="2026-01-01T00:00:00",
+        updated_at="2026-01-01T00:00:00",
+    )
+    mod.store.save_fact(fact)
+
+    # Mock LLM to return delete action
+    mock_llm_client.set_responses([
+        make_llm_response(json.dumps({
+            "actions": [
+                {"fact_id": "ep001", "action": "delete", "reason": "outdated meeting"}
+            ]
+        })),
+    ])
+
+    result = mod._consolidate()
+    assert "Archived: 1" in result
+
+    # Verify the fact is now archived
+    all_facts = mod.store.list_all_active_facts()
+    assert len(all_facts) == 0
+
+
+def test_consolidate_keeps_profile(bare_agent, mock_llm_client, tmp_path):
+    """Profile facts that LLM marks as keep remain active."""
+    import json
+    from llamagent.modules.memory.module import MemoryModule
+    from llamagent.modules.memory.fact import MemoryFact
+
+    bare_agent.config.memory_backend = "fs"
+    bare_agent.config.memory_mode = "autonomous"
+    bare_agent.config.memory_recall_mode = "tool"
+    bare_agent.config.memory_fs_dir = str(tmp_path / "memory")
+
+    mod = MemoryModule()
+    bare_agent.register_module(mod)
+
+    fact = MemoryFact(
+        fact_id="prf001",
+        kind="profile",
+        subject="user",
+        attribute="name",
+        value="Alice",
+        source_text="User said her name is Alice",
+    )
+    mod.store.save_fact(fact)
+
+    # LLM says keep
+    mock_llm_client.set_responses([
+        make_llm_response(json.dumps({
+            "actions": [
+                {"fact_id": "prf001", "action": "keep", "reason": "still valid"}
+            ]
+        })),
+    ])
+
+    result = mod._consolidate()
+    assert "Kept: 1" in result
+
+    active = mod.store.list_all_active_facts()
+    assert len(active) == 1
+    assert active[0]["fact_id"] == "prf001"
+
+
+def test_consolidate_updates_value(bare_agent, mock_llm_client, tmp_path):
+    """Facts with action=update have their value changed."""
+    import json
+    from llamagent.modules.memory.module import MemoryModule
+    from llamagent.modules.memory.fact import MemoryFact
+
+    bare_agent.config.memory_backend = "fs"
+    bare_agent.config.memory_mode = "autonomous"
+    bare_agent.config.memory_recall_mode = "tool"
+    bare_agent.config.memory_fs_dir = str(tmp_path / "memory")
+
+    mod = MemoryModule()
+    bare_agent.register_module(mod)
+
+    fact = MemoryFact(
+        fact_id="fct001",
+        kind="project_fact",
+        subject="project",
+        attribute="version",
+        value="v2.0",
+        source_text="Project is at v2.0",
+    )
+    mod.store.save_fact(fact)
+
+    mock_llm_client.set_responses([
+        make_llm_response(json.dumps({
+            "actions": [
+                {"fact_id": "fct001", "action": "update", "reason": "version changed",
+                 "new_value": "v2.9.6"}
+            ]
+        })),
+    ])
+
+    result = mod._consolidate()
+    assert "Updated: 1" in result
+
+    active = mod.store.list_all_active_facts()
+    assert len(active) == 1
+    assert active[0]["value"] == "v2.9.6"
+
+
+def test_consolidate_30_percent_cap(bare_agent, mock_llm_client, tmp_path):
+    """Consolidation deletes at most 30% of total active facts."""
+    import json
+    from llamagent.modules.memory.module import MemoryModule
+    from llamagent.modules.memory.fact import MemoryFact
+
+    bare_agent.config.memory_backend = "fs"
+    bare_agent.config.memory_mode = "autonomous"
+    bare_agent.config.memory_recall_mode = "tool"
+    bare_agent.config.memory_fs_dir = str(tmp_path / "memory")
+
+    mod = MemoryModule()
+    bare_agent.register_module(mod)
+
+    # Save 10 facts
+    for i in range(10):
+        fact = MemoryFact(
+            fact_id=f"fact_{i:03d}",
+            kind="episode",
+            subject="event",
+            attribute=f"item_{i}",
+            value=f"event {i}",
+            source_text=f"Something about event {i}",
+        )
+        mod.store.save_fact(fact)
+
+    # LLM wants to delete all 10
+    mock_llm_client.set_responses([
+        make_llm_response(json.dumps({
+            "actions": [
+                {"fact_id": f"fact_{i:03d}", "action": "delete", "reason": "outdated"}
+                for i in range(10)
+            ]
+        })),
+    ])
+
+    result = mod._consolidate()
+    # max_deletes = max(1, int(10 * 0.3)) = 3
+    assert "Archived: 3" in result
+
+    active = mod.store.list_all_active_facts()
+    assert len(active) == 7
+
+
+def test_consolidate_soft_delete(bare_agent, mock_llm_client, tmp_path):
+    """Delete action results in status=archived, not physical deletion."""
+    import json
+    from llamagent.modules.memory.module import MemoryModule
+    from llamagent.modules.memory.fact import MemoryFact
+    from llamagent.modules.memory.fs_store import FSMemoryStore
+
+    bare_agent.config.memory_backend = "fs"
+    bare_agent.config.memory_mode = "autonomous"
+    bare_agent.config.memory_recall_mode = "tool"
+    bare_agent.config.memory_fs_dir = str(tmp_path / "memory")
+
+    mod = MemoryModule()
+    bare_agent.register_module(mod)
+
+    fact = MemoryFact(
+        fact_id="del001",
+        kind="episode",
+        subject="meeting",
+        attribute="note",
+        value="old meeting notes",
+        source_text="Meeting notes from January",
+    )
+    mod.store.save_fact(fact)
+
+    mock_llm_client.set_responses([
+        make_llm_response(json.dumps({
+            "actions": [
+                {"fact_id": "del001", "action": "delete", "reason": "outdated"}
+            ]
+        })),
+    ])
+
+    mod._consolidate()
+
+    # Active list is empty
+    active = mod.store.list_all_active_facts()
+    assert len(active) == 0
+
+    # But the fact still exists in the file (soft delete)
+    all_sections = mod.store._read_sections()
+    assert len(all_sections) == 1
+    assert all_sections[0]["meta"]["status"] == "archived"
+
+
+def test_consolidate_auto_trigger_hybrid(bare_agent, mock_llm_client, tmp_path):
+    """Hybrid mode on_input auto-triggers consolidation when conditions are met."""
+    import json
+    from llamagent.modules.memory.module import MemoryModule
+    from llamagent.modules.memory.fact import MemoryFact
+
+    bare_agent.config.memory_backend = "fs"
+    bare_agent.config.memory_mode = "hybrid"
+    bare_agent.config.memory_recall_mode = "tool"
+    bare_agent.config.memory_fs_dir = str(tmp_path / "memory")
+    bare_agent.config.memory_consolidation_interval = 24
+    bare_agent.config.memory_consolidation_min_count = 2  # Low threshold for testing
+
+    mod = MemoryModule()
+    bare_agent.register_module(mod)
+
+    # Save 3 facts (above min_count=2)
+    for i in range(3):
+        fact = MemoryFact(
+            fact_id=f"auto_{i:03d}",
+            kind="episode",
+            subject="event",
+            attribute=f"item_{i}",
+            value=f"event {i}",
+            source_text=f"Event {i}",
+        )
+        mod.store.save_fact(fact)
+
+    # Set last consolidation to long ago (trigger)
+    mod._last_consolidation = 0.0
+
+    # LLM response for consolidation review, then for hybrid on_output compile
+    mock_llm_client.set_responses([
+        make_llm_response(json.dumps({
+            "actions": [
+                {"fact_id": "auto_000", "action": "delete", "reason": "outdated"},
+                {"fact_id": "auto_001", "action": "keep", "reason": "still valid"},
+                {"fact_id": "auto_002", "action": "keep", "reason": "still valid"},
+            ]
+        })),
+    ])
+
+    # on_input triggers consolidation in hybrid mode
+    mod.on_input("hello")
+
+    # Verify consolidation ran (last_consolidation updated)
+    assert mod._last_consolidation > 0.0
+
+    # 1 fact archived
+    active = mod.store.list_all_active_facts()
+    assert len(active) == 2
+
+
+def test_consolidate_no_trigger_autonomous(bare_agent, mock_llm_client, tmp_path):
+    """Autonomous mode on_input does NOT auto-trigger consolidation."""
+    from llamagent.modules.memory.module import MemoryModule
+    from llamagent.modules.memory.fact import MemoryFact
+
+    bare_agent.config.memory_backend = "fs"
+    bare_agent.config.memory_mode = "autonomous"
+    bare_agent.config.memory_recall_mode = "tool"
+    bare_agent.config.memory_fs_dir = str(tmp_path / "memory")
+    bare_agent.config.memory_consolidation_min_count = 1
+
+    mod = MemoryModule()
+    bare_agent.register_module(mod)
+
+    fact = MemoryFact(
+        fact_id="auto_a",
+        kind="episode",
+        subject="event",
+        attribute="note",
+        value="something",
+        source_text="Something happened",
+    )
+    mod.store.save_fact(fact)
+
+    mod._last_consolidation = 0.0
+
+    # on_input should not trigger consolidation (autonomous mode)
+    mod.on_input("hello")
+
+    # last_consolidation should remain unchanged
+    assert mod._last_consolidation == 0.0
+
+    # All facts should remain
+    active = mod.store.list_all_active_facts()
+    assert len(active) == 1
+
+
+def test_consolidate_empty_memories(bare_agent, mock_llm_client, tmp_path):
+    """Consolidation with no memories returns early with message."""
+    from llamagent.modules.memory.module import MemoryModule
+
+    bare_agent.config.memory_backend = "fs"
+    bare_agent.config.memory_mode = "autonomous"
+    bare_agent.config.memory_recall_mode = "tool"
+    bare_agent.config.memory_fs_dir = str(tmp_path / "memory")
+
+    mod = MemoryModule()
+    bare_agent.register_module(mod)
+
+    result = mod._consolidate()
+    assert result == "No memories to consolidate."

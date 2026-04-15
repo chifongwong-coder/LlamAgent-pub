@@ -194,6 +194,8 @@ def bare_agent(mock_llm_client):
     config.memory_recall_top_k = 5
     config.memory_auto_recall_max_inject = 3
     config.memory_auto_recall_threshold = 0.35
+    config.memory_consolidation_interval = 24
+    config.memory_consolidation_min_count = 20
     config.embedding_provider = "chromadb"
     config.embedding_model = ""
     config.retrieval_persist_dir = "/tmp/llamagent_test_retrieval"

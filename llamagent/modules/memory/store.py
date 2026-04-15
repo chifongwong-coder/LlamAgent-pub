@@ -151,16 +151,22 @@ class MemoryStore:
         """
         Update the lifecycle status of an existing fact.
 
+        Uses read-then-write to preserve all metadata fields (ChromaDB
+        replaces entire metadata on update).
+
         Args:
             fact_id: The fact_id to update.
             status: New status ("active", "superseded", or "archived").
         """
         if self._pipeline is not None:
             try:
-                self._pipeline.vector.update(
-                    id=fact_id,
-                    metadata={"status": status, "updated_at": datetime.now().isoformat()},
-                )
+                doc = self._pipeline.vector.get(fact_id)
+                if not doc:
+                    return
+                meta = doc.get("metadata", {})
+                meta["status"] = status
+                meta["updated_at"] = datetime.now().isoformat()
+                self._pipeline.vector.update(id=fact_id, metadata=meta)
             except Exception as e:
                 logger.warning("[Memory] Status update failed for %s: %s", fact_id, e)
 
@@ -193,6 +199,43 @@ class MemoryStore:
                 )
             except Exception as e:
                 logger.warning("[Memory] Access update failed for %s: %s", fact_id, e)
+
+    def list_all_active_facts(self) -> list[dict]:
+        """Return metadata dicts for all active facts.
+
+        Returns:
+            List of metadata dicts (each dict has fact_id, kind, subject, etc.).
+        """
+        if self._pipeline is None:
+            return []
+        try:
+            results = self._pipeline.vector.get_all(where={"status": "active"})
+            return [r["metadata"] for r in results]
+        except Exception as e:
+            logger.warning("[Memory] list_all_active_facts failed: %s", e)
+            return []
+
+    def update_fact_value(self, fact_id: str, new_value: str) -> None:
+        """Update a fact's value and updated_at timestamp.
+
+        Uses read-then-write to preserve all metadata fields (ChromaDB
+        replaces entire metadata on update).
+
+        Args:
+            fact_id: The fact_id to update.
+            new_value: New value string for the fact.
+        """
+        if self._pipeline is not None:
+            try:
+                doc = self._pipeline.vector.get(fact_id)
+                if not doc:
+                    return
+                meta = doc.get("metadata", {})
+                meta["value"] = new_value
+                meta["updated_at"] = datetime.now().isoformat()
+                self._pipeline.vector.update(id=fact_id, metadata=meta)
+            except Exception as e:
+                logger.warning("[Memory] Value update failed for %s: %s", fact_id, e)
 
     def clear(self) -> None:
         """Clear all stored facts."""
