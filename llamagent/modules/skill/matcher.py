@@ -123,24 +123,6 @@ Candidate skills:
 
 Which skill(s) should be activated? Return JSON: {{"selected": [...]}}"""
 
-FALLBACK_SYSTEM = """\
-You are a skill selection assistant. Given the user's query and the complete \
-list of available skills, determine if any skill is relevant.
-
-Rules:
-- Select only skills that are clearly relevant to the query.
-- If none are relevant, return an empty list.
-- Return JSON only: {"selected": ["skill-name-1", "skill-name-2"]}
-"""
-
-FALLBACK_USER_TEMPLATE = """\
-User query: {query}
-
-Available skills:
-{skills}
-
-Which skill(s), if any, should be activated? Return JSON: {{"selected": [...]}}"""
-
 
 def format_skill_list(skills: list) -> str:
     """

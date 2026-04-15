@@ -46,7 +46,6 @@ def _setup_tools_and_skill(bare_agent, tmp_path):
     # Then SkillModule (skill-driven pack activation)
     bare_agent.config.skill_dirs = []
     bare_agent.config.skill_max_active = 2
-    bare_agent.config.skill_llm_fallback = False
     skill_mod = SkillModule()
     bare_agent.register_module(skill_mod)
 

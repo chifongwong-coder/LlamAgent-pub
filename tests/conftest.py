@@ -217,7 +217,6 @@ def bare_agent(mock_llm_client):
     config.agent_tools_dir = "/tmp/llamagent_test_tools"
     config.skill_dirs = []
     config.skill_max_active = 2
-    config.skill_llm_fallback = False
     config.job_default_timeout = 300.0
     config.job_max_active = 10
     config.job_profiles = {}

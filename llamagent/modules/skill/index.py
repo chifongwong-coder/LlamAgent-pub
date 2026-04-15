@@ -1,37 +1,48 @@
 """
 SkillMeta and SkillIndex: metadata model and directory scanning/lookup.
 
-SkillMeta holds the structured metadata parsed from config.yaml.
+SkillMeta holds the structured metadata for a skill.
 SkillIndex scans skill directories, builds an in-memory index,
 and provides lookup and tag-matching methods.
+
+Supports three skill formats:
+- Format A: config.yaml + SKILL.md (requires PyYAML)
+- Format B: SKILL.md with YAML frontmatter (uses fs_store/parser.py)
+- Format C: single .md file with optional frontmatter (uses fs_store/parser.py)
 """
 
 from __future__ import annotations
 
+import glob as _glob
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 
 from llamagent.modules.skill.matcher import normalize_word, _TOKEN_PATTERN
 
 logger = logging.getLogger(__name__)
 
-# PyYAML is optional; graceful degradation when not installed
+# PyYAML is optional; only needed for Format A (config.yaml)
 try:
     import yaml
 
     _YAML_AVAILABLE = True
 except ImportError:
     _YAML_AVAILABLE = False
-    logger.warning(
-        "PyYAML is not installed, skill module cannot parse config.yaml. "
-        "Please run: pip install pyyaml"
+    logger.info(
+        "PyYAML is not installed; config.yaml skills (Format A) will be skipped. "
+        "Frontmatter and plain .md skills still work. "
+        "To enable Format A: pip install pyyaml"
     )
+
+# Files to exclude from Format C scan (not skill files)
+_EXCLUDED_MD_FILES = {"SKILL.md", "README.md", "CHANGELOG.md"}
 
 
 @dataclass
 class SkillMeta:
-    """Skill metadata, parsed from config.yaml."""
+    """Skill metadata, parsed from config.yaml, frontmatter, or inferred from .md file."""
 
     name: str
     description: str
@@ -41,6 +52,9 @@ class SkillMeta:
     skill_dir: str = ""
     priority: str = ""  # "project" / "compat" / "user" / "user-compat" / "custom"
     required_tool_packs: list[str] = field(default_factory=list)  # v1.6: packs to activate
+    content_path: str = ""  # Full path to SKILL.md or .md file
+    source_format: str = "config"  # "config" / "frontmatter" / "plain_md"
+    always: bool = False  # L4: inject every turn
 
 
 class SkillIndex:
@@ -61,6 +75,11 @@ class SkillIndex:
         """
         Scan skill directories and build the index.
 
+        Supports three formats:
+        - Format A: subdirectory with config.yaml + SKILL.md (requires PyYAML)
+        - Format B: subdirectory with SKILL.md containing frontmatter
+        - Format C: single .md file in the base directory
+
         Args:
             paths: List of (directory_path, priority_label) tuples,
                    ordered from highest to lowest priority.
@@ -68,10 +87,6 @@ class SkillIndex:
         Returns:
             List of all indexed SkillMeta objects.
         """
-        if not _YAML_AVAILABLE:
-            logger.warning("Skipping skill scan: PyYAML is not installed")
-            return []
-
         self._skills.clear()
         self._alias_map.clear()
         self._content_cache.clear()
@@ -80,6 +95,7 @@ class SkillIndex:
             if not os.path.isdir(base_dir):
                 continue
 
+            # 1. Scan subdirectories (Format A / B)
             for entry in sorted(os.listdir(base_dir)):
                 skill_dir = os.path.join(base_dir, entry)
                 if not os.path.isdir(skill_dir):
@@ -87,35 +103,40 @@ class SkillIndex:
 
                 config_path = os.path.join(skill_dir, "config.yaml")
                 if not os.path.isfile(config_path):
-                    # Also check config.yml
                     config_path = os.path.join(skill_dir, "config.yml")
-                    if not os.path.isfile(config_path):
-                        continue
 
-                meta = self._parse_config(config_path, skill_dir, priority)
+                skill_path = os.path.join(skill_dir, "SKILL.md")
+
+                meta = None
+                if os.path.isfile(config_path) and _YAML_AVAILABLE:
+                    # Format A: config.yaml + SKILL.md
+                    meta = self._parse_config(config_path, skill_dir, priority)
+                elif os.path.isfile(skill_path):
+                    # Format B: SKILL.md with frontmatter
+                    # Falls back to Format-C-style inference if no frontmatter
+                    meta = self._load_from_frontmatter(
+                        skill_path, fallback_name=entry
+                    )
+                    if meta:
+                        meta.priority = priority
+                else:
+                    continue
+
                 if meta is None:
                     continue
 
-                # Higher priority wins: skip if already indexed
-                if meta.name in self._skills:
-                    logger.debug(
-                        "Skill '%s' already indexed (priority=%s), "
-                        "skipping duplicate from %s",
-                        meta.name,
-                        self._skills[meta.name].priority,
-                        skill_dir,
-                    )
+                self._register_meta(meta, skill_dir)
+
+            # 2. Scan loose .md files (Format C)
+            for md_path in sorted(_glob.glob(os.path.join(base_dir, "*.md"))):
+                basename = os.path.basename(md_path)
+                if basename in _EXCLUDED_MD_FILES:
                     continue
 
-                self._skills[meta.name] = meta
-                for alias in meta.aliases:
-                    key = alias.lower()
-                    # Skip if alias collides with an existing skill name
-                    if key in self._skills:
-                        continue
-                    # First-registered alias wins (higher priority)
-                    if key not in self._alias_map:
-                        self._alias_map[key] = meta.name
+                meta = self._load_from_md_file(md_path)
+                if meta:
+                    meta.priority = priority
+                    self._register_meta(meta, base_dir)
 
         count = len(self._skills)
         if count > 0:
@@ -124,6 +145,26 @@ class SkillIndex:
             logger.debug("Skill index built: no skills found")
 
         return list(self._skills.values())
+
+    def _register_meta(self, meta: SkillMeta, skill_dir: str) -> None:
+        """Register a SkillMeta in the index (dedup by name, first wins)."""
+        if meta.name in self._skills:
+            logger.debug(
+                "Skill '%s' already indexed (priority=%s), "
+                "skipping duplicate from %s",
+                meta.name,
+                self._skills[meta.name].priority,
+                skill_dir,
+            )
+            return
+
+        self._skills[meta.name] = meta
+        for alias in meta.aliases:
+            key = alias.lower()
+            if key in self._skills:
+                continue
+            if key not in self._alias_map:
+                self._alias_map[key] = meta.name
 
     def _parse_config(
         self, config_path: str, skill_dir: str, priority: str
@@ -175,6 +216,12 @@ class SkillIndex:
         required_tool_packs = [str(p).strip() for p in raw_packs if p is not None] if isinstance(raw_packs, list) else []
         required_tool_packs = [p for p in required_tool_packs if p]
 
+        # content_path: SKILL.md alongside config.yaml
+        content_path = os.path.join(skill_dir, "SKILL.md")
+
+        # always flag (L4)
+        always = bool(data.get("always", False))
+
         return SkillMeta(
             name=str(name).strip(),
             description=str(description).strip(),
@@ -184,7 +231,172 @@ class SkillIndex:
             skill_dir=skill_dir,
             priority=priority,
             required_tool_packs=required_tool_packs,
+            content_path=content_path,
+            source_format="config",
+            always=always,
         )
+
+    # ------------------------------------------------------------------
+    # Format B/C loaders
+    # ------------------------------------------------------------------
+
+    def _load_from_frontmatter(
+        self, skill_path: str, fallback_name: str
+    ) -> SkillMeta | None:
+        """Load skill metadata from a SKILL.md file with optional frontmatter (Format B).
+
+        If frontmatter is empty or missing, falls back to Format-C-style inference
+        (name from fallback_name, description from first heading).
+
+        Args:
+            skill_path: Full path to the SKILL.md file.
+            fallback_name: Name to use when frontmatter has no 'name' field
+                           (typically the parent directory name).
+        """
+        try:
+            with open(skill_path, "r", encoding="utf-8-sig") as f:
+                raw = f.read()
+        except OSError as e:
+            logger.warning("Failed to read %s: %s", skill_path, e)
+            return None
+
+        from llamagent.modules.fs_store.parser import parse_frontmatter
+
+        meta_dict, body = parse_frontmatter(raw)
+
+        name = str(meta_dict.get("name", fallback_name)).strip()
+        if not name:
+            name = fallback_name
+
+        # Description: from frontmatter, or first heading, or name
+        description = str(meta_dict.get("description", "")).strip()
+        if not description:
+            description = self._extract_first_heading(body) or name
+
+        # Tags
+        raw_tags = meta_dict.get("tags", [])
+        tags = self._normalize_list(raw_tags)
+
+        # Aliases
+        raw_aliases = meta_dict.get("aliases", [])
+        aliases = self._normalize_list(raw_aliases)
+
+        # Invocation
+        invocation = str(meta_dict.get("invocation", "both")).strip()
+        if invocation not in ("user-invocable", "auto-trigger", "both"):
+            invocation = "both"
+
+        # Tool packs
+        raw_packs = meta_dict.get("required_tool_packs", [])
+        tool_packs = self._normalize_list(raw_packs)
+
+        # Always
+        always = bool(meta_dict.get("always", False))
+
+        # source_format: "frontmatter" if we got real frontmatter, "plain_md" otherwise
+        source_format = "frontmatter" if meta_dict else "plain_md"
+
+        return SkillMeta(
+            name=name,
+            description=description,
+            tags=tags,
+            aliases=aliases,
+            invocation=invocation,
+            skill_dir=os.path.dirname(skill_path),
+            required_tool_packs=tool_packs,
+            content_path=skill_path,
+            source_format=source_format,
+            always=always,
+        )
+
+    def _load_from_md_file(self, md_path: str) -> SkillMeta | None:
+        """Load skill metadata from a standalone .md file (Format C).
+
+        Name is derived from filename (without .md). If frontmatter is present,
+        it is used for metadata; otherwise metadata is inferred.
+
+        Args:
+            md_path: Full path to the .md file.
+        """
+        try:
+            with open(md_path, "r", encoding="utf-8-sig") as f:
+                raw = f.read()
+        except OSError as e:
+            logger.warning("Failed to read %s: %s", md_path, e)
+            return None
+
+        from llamagent.modules.fs_store.parser import parse_frontmatter
+
+        meta_dict, body = parse_frontmatter(raw)
+
+        # Name: from frontmatter, or filename without extension
+        basename = os.path.basename(md_path)
+        file_name = os.path.splitext(basename)[0]
+        name = str(meta_dict.get("name", file_name)).strip()
+        if not name:
+            name = file_name
+
+        # Description: from frontmatter, or first heading, or name
+        description = str(meta_dict.get("description", "")).strip()
+        if not description:
+            description = self._extract_first_heading(body) or name
+
+        # Tags
+        raw_tags = meta_dict.get("tags", [])
+        tags = self._normalize_list(raw_tags)
+
+        # Aliases
+        raw_aliases = meta_dict.get("aliases", [])
+        aliases = self._normalize_list(raw_aliases)
+
+        # Invocation
+        invocation = str(meta_dict.get("invocation", "both")).strip()
+        if invocation not in ("user-invocable", "auto-trigger", "both"):
+            invocation = "both"
+
+        # Tool packs
+        raw_packs = meta_dict.get("required_tool_packs", [])
+        tool_packs = self._normalize_list(raw_packs)
+
+        # Always
+        always = bool(meta_dict.get("always", False))
+
+        # source_format
+        source_format = "frontmatter" if meta_dict else "plain_md"
+
+        return SkillMeta(
+            name=name,
+            description=description,
+            tags=tags,
+            aliases=aliases,
+            invocation=invocation,
+            skill_dir=os.path.dirname(md_path),
+            required_tool_packs=tool_packs,
+            content_path=md_path,
+            source_format=source_format,
+            always=always,
+        )
+
+    # ------------------------------------------------------------------
+    # Shared helpers for B/C format loaders
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_first_heading(text: str) -> str:
+        """Extract the text of the first markdown heading (any level)."""
+        for line in text.splitlines():
+            m = re.match(r"^#+\s+(.+)$", line)
+            if m:
+                return m.group(1).strip()
+        return ""
+
+    @staticmethod
+    def _normalize_list(raw) -> list[str]:
+        """Normalize a value into a list of non-empty strings."""
+        if not isinstance(raw, list):
+            return []
+        result = [str(item).strip() for item in raw if item is not None]
+        return [r for r in result if r]
 
     # ------------------------------------------------------------------
     # Lookup
@@ -285,7 +497,10 @@ class SkillIndex:
 
     def load_content(self, meta: SkillMeta) -> str:
         """
-        Lazy-load SKILL.md content for a skill.
+        Lazy-load skill content from content_path.
+
+        For Format A (config), content_path points to SKILL.md with no frontmatter.
+        For Format B/C (frontmatter/plain_md), frontmatter is stripped before returning.
 
         Results are cached to avoid re-reading on subsequent activations.
 
@@ -293,22 +508,35 @@ class SkillIndex:
             meta: SkillMeta whose content to load.
 
         Returns:
-            SKILL.md content string, or empty string on error.
+            Skill content string, or empty string on error.
         """
         if meta.name in self._content_cache:
             return self._content_cache[meta.name]
 
-        skill_md_path = os.path.join(meta.skill_dir, "SKILL.md")
-        if not os.path.isfile(skill_md_path):
-            logger.warning("SKILL.md not found: %s", skill_md_path)
+        # Determine the file to read
+        content_path = meta.content_path
+        if not content_path:
+            # Legacy fallback: SKILL.md in skill_dir
+            content_path = os.path.join(meta.skill_dir, "SKILL.md")
+
+        if not os.path.isfile(content_path):
+            logger.warning("Skill content not found: %s", content_path)
             return ""
 
         try:
-            with open(skill_md_path, "r", encoding="utf-8-sig") as f:
-                content = f.read()
+            with open(content_path, "r", encoding="utf-8-sig") as f:
+                raw = f.read()
         except Exception as e:
-            logger.warning("Failed to read SKILL.md for skill '%s': %s", meta.name, e)
+            logger.warning("Failed to read content for skill '%s': %s", meta.name, e)
             return ""
+
+        # Format A: SKILL.md has no frontmatter, return as-is
+        if meta.source_format == "config":
+            content = raw
+        else:
+            # Format B/C: strip frontmatter, return body only
+            from llamagent.modules.fs_store.parser import parse_frontmatter
+            _, content = parse_frontmatter(raw)
 
         self._content_cache[meta.name] = content
         return content

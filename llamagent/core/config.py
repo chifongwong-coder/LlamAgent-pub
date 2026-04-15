@@ -95,7 +95,6 @@ _YAML_MAP = [
     (("safety", "permission_level"), "permission_level", int),
     (("skill", "dirs"), "skill_dirs", list),
     (("skill", "max_active"), "skill_max_active", int),
-    (("skill", "llm_fallback"), "skill_llm_fallback", bool),
     (("job", "default_timeout"), "job_default_timeout", float),
     (("job", "max_active"), "job_max_active", int),
     (("job", "profiles"), "job_profiles", dict),
@@ -230,7 +229,6 @@ class Config:
         # Skill
         self.skill_dirs: list[str] = []
         self.skill_max_active: int = 2
-        self.skill_llm_fallback: bool = False
 
         # Job
         self.job_default_timeout: float = 300.0

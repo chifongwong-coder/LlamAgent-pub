@@ -95,7 +95,6 @@ def part1_basic_skill():
     config = Config()
     config.skill_dirs = []
     config.skill_max_active = 2
-    config.skill_llm_fallback = False
 
     agent = LlamAgent(config)
     agent.project_dir = tmp  # Point to our temp dir for scanning
