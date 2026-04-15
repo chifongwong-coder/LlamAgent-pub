@@ -2509,3 +2509,249 @@ def test_consolidate_empty_memories(bare_agent, mock_llm_client, tmp_path):
 
     result = mod._consolidate()
     assert result == "No memories to consolidate."
+
+
+# ============================================================
+# v2.9.7: 4-layer skill matching + external skill format support
+# ============================================================
+
+def _make_skill_agent(bare_agent, tmp_path, skills_data):
+    """Helper: create skill directories and register SkillModule on bare_agent."""
+    from llamagent.modules.skill.module import SkillModule
+
+    skills_dir = os.path.join(str(tmp_path), ".llamagent", "skills")
+    os.makedirs(skills_dir, exist_ok=True)
+
+    for sd in skills_data:
+        fmt = sd.get("format", "A")
+
+        if fmt == "A":
+            # Format A: config.yaml + SKILL.md
+            skill_dir = os.path.join(skills_dir, sd["name"])
+            os.makedirs(skill_dir, exist_ok=True)
+            config = f"name: {sd['name']}\ndescription: {sd['description']}\n"
+            if sd.get("tags"):
+                config += f"tags: [{', '.join(sd['tags'])}]\n"
+            if sd.get("required_tool_packs"):
+                config += f"required_tool_packs: [{', '.join(sd['required_tool_packs'])}]\n"
+            if sd.get("always"):
+                config += "always: true\n"
+            with open(os.path.join(skill_dir, "config.yaml"), "w") as f:
+                f.write(config)
+            with open(os.path.join(skill_dir, "SKILL.md"), "w") as f:
+                f.write(sd.get("content", f"## Goal\n{sd['name']} playbook."))
+
+        elif fmt == "B":
+            # Format B: SKILL.md with frontmatter (in subdirectory)
+            skill_dir = os.path.join(skills_dir, sd["name"])
+            os.makedirs(skill_dir, exist_ok=True)
+            fm_lines = ["---"]
+            if "name" in sd:
+                fm_lines.append(f"name: {sd['name']}")
+            if "description" in sd:
+                fm_lines.append(f"description: {sd['description']}")
+            if sd.get("tags"):
+                fm_lines.append(f"tags: [{', '.join(sd['tags'])}]")
+            if sd.get("required_tool_packs"):
+                fm_lines.append(f"required_tool_packs: [{', '.join(sd['required_tool_packs'])}]")
+            if sd.get("always"):
+                fm_lines.append("always: true")
+            fm_lines.append("---")
+            fm_lines.append("")
+            fm_lines.append(sd.get("content", f"# {sd['name']}\nFrontmatter skill content."))
+            with open(os.path.join(skill_dir, "SKILL.md"), "w") as f:
+                f.write("\n".join(fm_lines))
+
+        elif fmt == "C":
+            # Format C: single .md file
+            md_content = sd.get("content", f"# {sd['name']}\nPlain md skill content.")
+            if sd.get("frontmatter"):
+                # Format C with frontmatter
+                fm_lines = ["---"]
+                if "name" in sd:
+                    fm_lines.append(f"name: {sd['name']}")
+                if "description" in sd:
+                    fm_lines.append(f"description: {sd['description']}")
+                if sd.get("tags"):
+                    fm_lines.append(f"tags: [{', '.join(sd['tags'])}]")
+                if sd.get("required_tool_packs"):
+                    fm_lines.append(f"required_tool_packs: [{', '.join(sd['required_tool_packs'])}]")
+                if sd.get("always"):
+                    fm_lines.append("always: true")
+                fm_lines.append("---")
+                fm_lines.append("")
+                fm_lines.append(md_content)
+                md_content = "\n".join(fm_lines)
+            with open(os.path.join(skills_dir, f"{sd['name']}.md"), "w") as f:
+                f.write(md_content)
+
+    bare_agent.project_dir = str(tmp_path)
+    bare_agent.config.skill_dirs = []
+    bare_agent.config.skill_max_active = 2
+    bare_agent.config.skill_llm_fallback = False
+
+    mod = SkillModule()
+    bare_agent.register_module(mod)
+    return mod
+
+
+def test_load_skill_tool_registered(bare_agent, tmp_path):
+    """load_skill tool is registered on on_attach with correct tier and safety_level."""
+    mod = _make_skill_agent(bare_agent, tmp_path, [
+        {"name": "test-skill", "description": "Test", "tags": ["test"]},
+    ])
+
+    assert "load_skill" in bare_agent._tools
+    tool = bare_agent._tools["load_skill"]
+    assert tool["tier"] == "default"
+    assert tool["safety_level"] == 1
+
+
+def test_load_skill_returns_content(bare_agent, tmp_path):
+    """load_skill tool returns the full skill content."""
+    mod = _make_skill_agent(bare_agent, tmp_path, [
+        {"name": "deploy", "description": "Deploy workflow",
+         "tags": ["deploy"], "content": "## Steps\n1. Build\n2. Ship"},
+    ])
+
+    result = mod._load_skill_handler("deploy")
+    assert "## Steps" in result
+    assert "1. Build" in result
+    assert "2. Ship" in result
+
+
+def test_load_skill_not_found(bare_agent, tmp_path):
+    """load_skill tool returns error message for unknown skill name."""
+    mod = _make_skill_agent(bare_agent, tmp_path, [
+        {"name": "deploy", "description": "Deploy workflow", "tags": ["deploy"]},
+    ])
+
+    result = mod._load_skill_handler("nonexistent")
+    assert "not found" in result
+
+
+def test_skill_index_in_context(bare_agent, tmp_path):
+    """on_context injects skill index listing name + description (L3)."""
+    mod = _make_skill_agent(bare_agent, tmp_path, [
+        {"name": "deploy", "description": "Deploy workflow", "tags": ["zzzunique"]},
+        {"name": "review", "description": "Code review process", "tags": ["zzzunique2"]},
+    ])
+
+    # Query that does not match any tags -> no L2 activation -> L3 index injected
+    result = mod.on_context("something unrelated", "")
+    assert "[Available Skills]" in result
+    assert "- deploy: Deploy workflow" in result
+    assert "- review: Code review process" in result
+    assert "load_skill" in result
+
+
+def test_skill_index_excludes_activated(bare_agent, tmp_path):
+    """L2-activated skills are excluded from the L3 skill index."""
+    mod = _make_skill_agent(bare_agent, tmp_path, [
+        {"name": "deploy", "description": "Deploy workflow", "tags": ["deploy"]},
+        {"name": "review", "description": "Code review process", "tags": ["review"]},
+    ])
+
+    result = mod.on_context("run the deploy process", "")
+    # deploy is L2-activated -> should not be in index
+    assert "[Active Skill: deploy]" in result
+    # review should still be in the index
+    assert "- review: Code review process" in result
+    # deploy should not be in the index
+    assert "- deploy:" not in result
+
+
+def test_always_skill_injected(bare_agent, tmp_path):
+    """always=true skills (L4) are injected every turn, exempt from truncation."""
+    mod = _make_skill_agent(bare_agent, tmp_path, [
+        {"name": "safety-rules", "description": "Safety rules",
+         "always": True, "content": "Always follow safety rules."},
+        {"name": "deploy", "description": "Deploy workflow",
+         "tags": ["deploy"], "content": "Deploy playbook."},
+    ])
+
+    # Query that does not match any tags
+    result = mod.on_context("hello world", "")
+    assert "[Active Skill: safety-rules]" in result
+    assert "Always follow safety rules." in result
+
+    # safety-rules should not be in the index (always skills excluded)
+    assert "- safety-rules:" not in result
+
+
+def test_frontmatter_format_scan(bare_agent, tmp_path):
+    """Format B: SKILL.md with frontmatter is correctly scanned and loaded."""
+    mod = _make_skill_agent(bare_agent, tmp_path, [
+        {"name": "fm-skill", "description": "Frontmatter skill",
+         "tags": ["frontmatter"], "format": "B",
+         "content": "# FM Skill\nFrontmatter body content."},
+    ])
+
+    meta = mod.index.lookup("fm-skill")
+    assert meta is not None
+    assert meta.description == "Frontmatter skill"
+    assert meta.source_format == "frontmatter"
+    assert meta.tags == ["frontmatter"]
+
+    # Content should strip frontmatter
+    content = mod.index.load_content(meta)
+    assert "---" not in content
+    assert "Frontmatter body content." in content
+
+
+def test_plain_md_format_scan(bare_agent, tmp_path):
+    """Format C: plain .md file is correctly scanned with metadata inferred."""
+    mod = _make_skill_agent(bare_agent, tmp_path, [
+        {"name": "quick-guide", "description": "Quick guide",
+         "format": "C",
+         "content": "# Quick Guide\nThis is a plain md skill."},
+    ])
+
+    meta = mod.index.lookup("quick-guide")
+    assert meta is not None
+    # Description inferred from first heading
+    assert "Quick Guide" in meta.description
+    assert meta.source_format == "plain_md"
+
+    # Content should be the full body (no frontmatter to strip)
+    content = mod.index.load_content(meta)
+    assert "# Quick Guide" in content
+    assert "This is a plain md skill." in content
+
+
+def test_config_yaml_still_works(bare_agent, tmp_path):
+    """Format A: existing config.yaml + SKILL.md format is fully backward compatible."""
+    mod = _make_skill_agent(bare_agent, tmp_path, [
+        {"name": "legacy-skill", "description": "Legacy format skill",
+         "tags": ["legacy"], "format": "A",
+         "content": "## Steps\nLegacy skill content."},
+    ])
+
+    meta = mod.index.lookup("legacy-skill")
+    assert meta is not None
+    assert meta.source_format == "config"
+    assert meta.description == "Legacy format skill"
+
+    content = mod.index.load_content(meta)
+    assert "## Steps" in content
+    assert "Legacy skill content." in content
+
+    # L2 tag matching still works
+    result = mod.on_context("legacy task", "")
+    assert "[Active Skill: legacy-skill]" in result
+
+
+def test_l3_tool_pack_limitation(bare_agent, tmp_path):
+    """load_skill returns content with note about tool pack limitation."""
+    mod = _make_skill_agent(bare_agent, tmp_path, [
+        {"name": "tooled-skill", "description": "Skill with tools",
+         "tags": ["tooled"],
+         "required_tool_packs": ["workspace"],
+         "content": "## Steps\nUse workspace tools."},
+    ])
+
+    result = mod._load_skill_handler("tooled-skill")
+    assert "## Steps" in result
+    assert "Use workspace tools." in result
+    assert "/skill tooled-skill" in result
+    assert "tool activation" in result

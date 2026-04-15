@@ -129,7 +129,9 @@ class TestTagMatchingAndLLMFallbackFlow:
         ])
 
         result = mod.on_context("what is the weather today", "original context")
-        assert result == "original context"
+        assert "original context" in result
+        # No skill should be activated (L2 miss), but L3 index may be appended
+        assert "[Active Skill:" not in result
 
         # --- max_active truncation: only N skills injected ---
         bare_agent.modules.clear()
@@ -156,9 +158,13 @@ class TestTagMatchingAndLLMFallbackFlow:
         ])
 
         result = mod.on_context("something completely different", "ctx")
-        assert result == "ctx"
+        assert "ctx" in result
+        # No skill should be activated
+        assert "[Active Skill:" not in result
 
-        # --- Fallback enabled: C-level triggers on 0 B-level candidates ---
+        # --- Fallback deprecated: skill_llm_fallback=True no longer triggers C-level ---
+        # L3 (skill index + load_skill tool) replaces C-level fallback.
+        # The skill appears in the index instead of being force-activated.
         bare_agent.modules.clear()
         mod = _make_agent_with_skills(bare_agent, tmp_path, [
             {"name": "release-checklist", "description": "Pre-release checklist",
@@ -166,26 +172,22 @@ class TestTagMatchingAndLLMFallbackFlow:
         ])
 
         bare_agent.config.skill_llm_fallback = True
-        mock_llm_client.set_responses([
-            make_llm_response(json.dumps({"selected": ["release-checklist"]})),
-        ])
 
         result = mod.on_context("what should I do before going live", "")
-        assert "[Active Skill: release-checklist]" in result
+        # Not force-activated, but available in the L3 index
+        assert "[Active Skill: release-checklist]" not in result
+        assert "release-checklist" in result  # present in L3 index
 
-        # --- Fallback LLM returns empty: no skill injected ---
+        # --- No tag match: skill appears in index, not activated ---
         bare_agent.modules.clear()
         bare_agent.config.skill_llm_fallback = True
         mod = _make_agent_with_skills(bare_agent, tmp_path, [
             {"name": "deploy", "description": "Deploy", "tags": ["deploy"]},
         ])
 
-        mock_llm_client.set_responses([
-            make_llm_response(json.dumps({"selected": []})),
-        ])
-
         result = mod.on_context("what is the weather", "ctx")
-        assert result == "ctx"
+        assert "ctx" in result
+        assert "[Active Skill:" not in result
 
 
 # ============================================================
@@ -206,8 +208,8 @@ class TestInjectionFormatAndContext:
 
         mod._forced_skill = "my-skill"
         result = mod.on_context("test", "")
-        assert result.startswith("[Active Skill: my-skill]")
-        assert result.endswith("[End Skill]")
+        assert "[Active Skill: my-skill]" in result
+        assert "[End Skill]" in result
         assert "Line 1\nLine 2" in result
 
         # --- Existing context preserved, skill appended after ---
@@ -222,7 +224,7 @@ class TestInjectionFormatAndContext:
         assert "[Active Skill: s1]" in result
         assert result.index("[Memory]") < result.index("[Active Skill:")
 
-        # --- Empty index: no skills -> context unchanged ---
+        # --- No custom skills: context preserved, but L3 index may include builtins ---
         bare_agent.modules.clear()
         skills_dir = os.path.join(str(tmp_path), ".llamagent", "skills")
         os.makedirs(skills_dir, exist_ok=True)
@@ -235,7 +237,9 @@ class TestInjectionFormatAndContext:
         mod = SkillModule()
         bare_agent.register_module(mod)
         result = mod.on_context("hello there", "original")
-        assert result == "original"
+        assert "original" in result
+        # No skill should be activated (no tag match)
+        assert "[Active Skill:" not in result
 
 
 # ============================================================

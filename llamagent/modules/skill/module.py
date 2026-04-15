@@ -52,7 +52,7 @@ class SkillModule(Module):
     # ============================================================
 
     def on_attach(self, agent: LlamAgent) -> None:
-        """Scan skill directories and build metadata index."""
+        """Scan skill directories, build metadata index, and register load_skill tool."""
         super().on_attach(agent)
 
         # Build scan paths (highest priority first)
@@ -64,6 +64,28 @@ class SkillModule(Module):
         if skills:
             names = [s.name for s in skills]
             logger.info("SkillModule loaded %d skill(s): %s", len(skills), names)
+
+        # Register load_skill tool (L3: LLM can self-serve skill content)
+        agent.register_tool(
+            name="load_skill",
+            func=self._load_skill_handler,
+            description=(
+                "Load a skill's full content by name. Use this when you need detailed "
+                "instructions from an available skill listed in the context."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Skill name from the available skills list",
+                    },
+                },
+                "required": ["name"],
+            },
+            tier="default",
+            safety_level=1,
+        )
 
     def _build_scan_paths(self, agent: LlamAgent) -> list[tuple[str, str]]:
         """
@@ -119,65 +141,70 @@ class SkillModule(Module):
 
     def on_context(self, query: str, context: str) -> str:
         """
-        Match query against skills and inject activated playbook content.
+        4-layer skill matching and injection.
 
-        Matching flow:
-        A-level: /skill command (forced activation via _forced_skill)
-        B-level: tokenize query -> match tags -> LLM disambiguate if 2+ candidates
-        C-level: LLM full metadata scan (optional, config.skill_llm_fallback)
+        L1: /skill command (forced activation)
+        L4: always=true skills (injected every turn, exempt from truncation)
+        L2: tag matching (skipped if L1 fired)
+        L3: skill index injection (name + description for LLM self-serve via load_skill)
         """
         if self.index is None or len(self.index) == 0:
             self._forced_skill = None
             return context
 
         activated: list[SkillMeta] = []
+        activated_names: set[str] = set()
+        l1_fired = False
 
-        # --- A-level: forced skill ---
+        # --- L1: /skill command ---
         if self._forced_skill:
             meta = self.index.lookup(self._forced_skill)
             if meta:
-                activated = [meta]
+                activated.append(meta)
+                activated_names.add(meta.name)
+                l1_fired = True
                 logger.info("Skill '%s' activated via /skill command", meta.name)
             else:
                 logger.warning(
                     "Skill '%s' not found, falling back to auto-match",
                     self._forced_skill,
                 )
-                # Fall through to B-level
             self._forced_skill = None
 
-        # --- B-level: tag matching ---
-        if not activated:
+        # --- L4: always=true skills (exempt from truncation) ---
+        always_skills: list[SkillMeta] = []
+        for skill in self.index.all_skills():
+            if skill.always and skill.name not in activated_names:
+                always_skills.append(skill)
+                activated_names.add(skill.name)
+
+        # --- L2: tag matching (skip if L1 fired) ---
+        if not l1_fired:
             tokens = tokenize_query(query)
             candidates = self.index.match_tags(tokens, query)
+            candidates = [c for c in candidates if c.name not in activated_names]
 
             if len(candidates) == 1:
-                activated = candidates
+                activated.append(candidates[0])
+                activated_names.add(candidates[0].name)
                 logger.debug("Skill '%s' activated via tag match", candidates[0].name)
             elif len(candidates) >= 2:
-                activated = self._disambiguate(query, candidates)
-            # candidates == 0 -> fall through to C-level check
+                selected = self._disambiguate(query, candidates)
+                for s in selected:
+                    activated.append(s)
+                    activated_names.add(s.name)
 
-        # --- C-level: LLM full metadata fallback (optional) ---
-        if not activated and getattr(self.agent.config, "skill_llm_fallback", False):
-            activated = self._llm_fallback(query)
-
-        # --- Truncation ---
+        # --- Truncation (only L1+L2 skills; always skills are exempt) ---
         max_active = getattr(self.agent.config, "skill_max_active", 2)
         if len(activated) > max_active:
             activated = activated[:max_active]
 
-        # --- Injection ---
-        if not activated:
-            return context
+        # Merge: always skills + L1/L2 activated
+        activated = always_skills + activated
+        activated_names = {s.name for s in activated}
 
-        # Activate required tool packs for matched skills
-        for meta in activated:
-            if meta.required_tool_packs:
-                for pack_name in meta.required_tool_packs:
-                    self.agent._active_packs.add(pack_name)
-
-        blocks = []
+        # --- Inject activated skill content + activate tool packs ---
+        blocks: list[str] = []
         for meta in activated:
             content = self.index.load_content(meta)
             if content:
@@ -185,12 +212,23 @@ class SkillModule(Module):
                     f"[Active Skill: {meta.name}]\n{content}\n[End Skill]"
                 )
                 logger.info("Skill '%s' injected into context", meta.name)
+            if meta.required_tool_packs:
+                for pack_name in meta.required_tool_packs:
+                    self.agent._active_packs.add(pack_name)
 
-        if not blocks:
-            return context
+        # --- L3: inject skill index (exclude already activated) ---
+        skill_index = self._build_skill_index(activated_names)
 
-        skill_text = "\n\n".join(blocks)
-        return f"{context}\n\n{skill_text}" if context else skill_text
+        # --- Assemble ---
+        parts: list[str] = []
+        if context:
+            parts.append(context)
+        if blocks:
+            parts.append("\n\n".join(blocks))
+        if skill_index:
+            parts.append(skill_index)
+
+        return "\n\n".join(parts) if parts else ""
 
     # ============================================================
     # LLM disambiguation and fallback
@@ -279,6 +317,59 @@ class SkillModule(Module):
             logger.warning("LLM skill fallback failed: %s", e)
 
         return []
+
+    # ============================================================
+    # L3: Skill index and load_skill tool
+    # ============================================================
+
+    def _build_skill_index(self, exclude_names: set[str]) -> str:
+        """Build lightweight skill index for system prompt (L3).
+
+        Lists available skills by name + description so the LLM can decide
+        whether to load them via the load_skill tool.
+
+        Args:
+            exclude_names: Names of already-activated skills to exclude.
+        """
+        all_skills = self.index.all_skills()
+        available = [
+            s for s in all_skills
+            if s.name not in exclude_names and not s.always
+        ]
+        if not available:
+            return ""
+
+        lines = ["[Available Skills] Use load_skill tool to load detailed instructions:"]
+        for s in available:
+            lines.append(f"- {s.name}: {s.description}")
+        return "\n".join(lines)
+
+    def _load_skill_handler(self, name: str) -> str:
+        """Tool handler for load_skill (L3).
+
+        Returns the full skill content. If the skill has required_tool_packs,
+        appends a note that /skill command is needed for full tool activation.
+        """
+        if self.index is None:
+            return f"Skill '{name}' not found. No skills are loaded."
+
+        meta = self.index.lookup(name)
+        if meta is None:
+            return f"Skill '{name}' not found. Check the available skills list in context."
+
+        content = self.index.load_content(meta)
+        if not content:
+            return f"Skill '{name}' has no content."
+
+        # L3 limitation: tool packs cannot be activated mid-ReAct
+        note = ""
+        if meta.required_tool_packs:
+            note = (
+                f"\n\n[Note: This skill works best with '/skill {name}' "
+                f"for full tool activation]"
+            )
+
+        return content + note
 
     # ============================================================
     # External API
