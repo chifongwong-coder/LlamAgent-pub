@@ -228,9 +228,12 @@ class MessageTrigger(Trigger):
     the ContinuousRunner's multi-trigger polling architecture.
     """
 
-    def __init__(self, channel: MessageChannel, agent_id: str):
+    def __init__(self, channel: MessageChannel, agent_id: str, *,
+                 interruptible: bool = True, on_interrupt: str = "discard"):
         self._channel = channel
         self._agent_id = agent_id
+        self.interruptible = interruptible
+        self.on_interrupt = on_interrupt
 
     def poll(self) -> str | None:
         """Return formatted pending messages, or None if no messages."""
