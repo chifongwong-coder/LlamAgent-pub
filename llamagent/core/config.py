@@ -113,6 +113,10 @@ _YAML_MAP = [
     (("persistence", "enabled"), "persistence_enabled", bool),
     (("persistence", "auto_restore"), "persistence_auto_restore", bool),
     (("persistence_dir",), "persistence_dir", str),
+    (("compression", "tool_result_strategy"), "tool_result_strategy", str),
+    (("compression", "tool_result_max_chars"), "tool_result_max_chars", int),
+    (("compression", "tool_result_head_lines"), "tool_result_head_lines", int),
+    (("compression", "strip_thinking"), "strip_thinking", bool),
     (("child_agent", "runner"), "child_agent_runner", str),
     (("child_agent", "max_children"), "child_agent_max_children", int),
     (("child_agent", "role_models"), "child_agent_role_models", dict),
@@ -251,6 +255,12 @@ class Config:
         self.fs_data_dir: str = str(BASE_DIR / "data" / "fs")
         self.memory_fs_dir: str | None = None
         self.knowledge_dir: str | None = None
+
+        # Compression (v2.9.4: tool result compression for history trace)
+        self.tool_result_strategy: str = "none"
+        self.tool_result_max_chars: int = 2000
+        self.tool_result_head_lines: int = 10
+        self.strip_thinking: bool = False
 
         # Persistence
         self.persistence_enabled: bool = False
@@ -565,6 +575,13 @@ class Config:
                 self.child_agent_runner,
             )
             self.child_agent_runner = "inline"
+
+        if self.tool_result_strategy not in ("none", "placeholder", "head", "llm_summary"):
+            logger.warning(
+                "tool_result_strategy='%s' is invalid, falling back to 'none'",
+                self.tool_result_strategy,
+            )
+            self.tool_result_strategy = "none"
 
         # Backward compatibility alias
         self.chroma_dir = self.retrieval_persist_dir

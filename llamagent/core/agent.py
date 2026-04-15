@@ -1101,9 +1101,18 @@ class LlamAgent:
             self._unregister_prepare_tools()
 
         # 6. History (skip for prepare mode and when record_history=False)
+        # Always consume _react_trace to prevent stale data leaking
+        trace = getattr(self, "_react_trace", None)
+        self._react_trace = None
+
         if record_history and not is_prepare:
             self.history.append({"role": "user", "content": processed})
-            self.history.append({"role": "assistant", "content": response})
+            if trace:
+                for msg in trace:
+                    self.history.append(self._prepare_trace_message(msg))
+            else:
+                # Fallback: no trace (e.g., simple LLM call without tools)
+                self.history.append({"role": "assistant", "content": response})
             self._trim_history()
 
         return outcome
@@ -1374,9 +1383,18 @@ class LlamAgent:
                     logger.error("Module '%s' on_output error: %s", mod.name, e)
 
             # 10. Record history (on_output processed version)
+            # Consume trace BEFORE the guard to prevent stale data
+            trace = getattr(self, "_react_trace", None)
+            self._react_trace = None
+
             if accumulated:
                 self.history.append({"role": "user", "content": processed})
-                self.history.append({"role": "assistant", "content": final_text})
+                if trace:
+                    for msg in trace:
+                        self.history.append(self._prepare_trace_message(msg))
+                else:
+                    self.history.append({"role": "assistant", "content": final_text})
+                self._trim_history()
 
             # 11. POST_CHAT hook
             self.emit_hook(HookEvent.POST_CHAT, {
@@ -1418,8 +1436,11 @@ class LlamAgent:
         """
         # No tools: direct LLM call returning text
         if not tools_schema:
+            self._react_trace = None
             return self._simple_llm_call(messages)
 
+        self._react_trace = None  # Clear stale trace from previous calls
+        initial_len = len(messages)
         steps = 0
         last_action: tuple | None = None  # Previous (name, args_json)
         duplicate_count = 0
@@ -1428,6 +1449,7 @@ class LlamAgent:
         while self.config.max_react_steps == -1 or steps < self.config.max_react_steps:
             # --- v2.0: abort check (before LLM call) ---
             if self._abort:
+                self._react_trace = messages[initial_len:] if len(messages) > initial_len else None
                 return ReactResult(text="Operation aborted.", status="aborted",
                                    terminal=True, steps_used=steps)
 
@@ -1444,9 +1466,11 @@ class LlamAgent:
                 if "ContextWindow" in error_name:
                     logger.warning("Context window overflow during ReAct loop, aborting")
                     text = last_text_response or "The task is too complex. Consider enabling the Planning module for step-by-step execution, or use /clear to clear conversation history."
+                    self._react_trace = messages[initial_len:] if len(messages) > initial_len else None
                     return ReactResult(text=text, status="context_overflow",
                                        error=str(e), steps_used=steps, terminal=True)
                 logger.error("ReAct LLM call failed: %s", e)
+                self._react_trace = messages[initial_len:] if len(messages) > initial_len else None
                 return ReactResult(text=f"ReAct execution error: {e}", status="error",
                                    error=str(e), steps_used=steps)
 
@@ -1454,7 +1478,14 @@ class LlamAgent:
 
             # --- No tool_calls -> return text directly ---
             if not message.tool_calls:
-                return ReactResult(text=message.content or "", status="completed",
+                final_text = message.content or ""
+                # Append the final assistant text to trace if tool calls preceded this
+                if len(messages) > initial_len:
+                    messages.append({"role": "assistant", "content": final_text})
+                    self._react_trace = messages[initial_len:]
+                else:
+                    self._react_trace = None  # No tool interactions, no trace
+                return ReactResult(text=final_text, status="completed",
                                    steps_used=steps)
 
             # Record text response (if any)
@@ -1483,6 +1514,7 @@ class LlamAgent:
                             tool_name,
                             duplicate_count,
                         )
+                        self._react_trace = messages[initial_len:] if len(messages) > initial_len else None
                         return ReactResult(
                             text=f"Duplicate action detected ({tool_name}), execution aborted.",
                             status="error", steps_used=steps)
@@ -1510,6 +1542,7 @@ class LlamAgent:
 
                 # --- v2.0: abort check (after tool call) ---
                 if self._abort:
+                    self._react_trace = messages[initial_len:] if len(messages) > initial_len else None
                     return ReactResult(text="Operation aborted.", status="aborted",
                                        terminal=True, steps_used=steps)
 
@@ -1517,6 +1550,7 @@ class LlamAgent:
                 if should_continue is not None:
                     stop_reason = should_continue()
                     if stop_reason is not None:
+                        self._react_trace = messages[initial_len:] if len(messages) > initial_len else None
                         return ReactResult(text=result, status="interrupted",
                                            reason=stop_reason, steps_used=steps)
 
@@ -1525,6 +1559,7 @@ class LlamAgent:
             if elapsed > self.config.react_timeout:
                 logger.warning("ReAct single step timeout (%.1fs > %.1fs)", elapsed, self.config.react_timeout)
                 text = last_text_response or "Execution timed out. Please simplify the request and try again."
+                self._react_trace = messages[initial_len:] if len(messages) > initial_len else None
                 return ReactResult(text=text, status="timeout",
                                    error="Execution timed out", steps_used=steps)
 
@@ -1532,6 +1567,7 @@ class LlamAgent:
 
         # Reached maximum steps
         logger.warning("ReAct loop reached maximum steps (%d)", self.config.max_react_steps)
+        self._react_trace = messages[initial_len:] if len(messages) > initial_len else None
         return ReactResult(text="Maximum execution steps reached. Please simplify the request or ask in smaller steps.",
                            status="max_steps", steps_used=steps)
 
@@ -1564,6 +1600,7 @@ class LlamAgent:
         """
         # No tools: pure stream
         if not tools_schema:
+            self._react_trace = None
             try:
                 for chunk in self.llm.chat_stream(messages):
                     delta = chunk.choices[0].delta
@@ -1574,100 +1611,109 @@ class LlamAgent:
                 yield f"\n[Error: {e}]"
             return
 
-        steps = 0
-        last_action: tuple | None = None
-        duplicate_count = 0
+        self._react_trace = None
+        initial_len = len(messages)
 
-        while self.config.max_react_steps == -1 or steps < self.config.max_react_steps:
-            # Abort check
-            if self._abort:
-                yield "\n[Operation aborted]"
-                return
+        try:
+            steps = 0
+            last_action: tuple | None = None
+            duplicate_count = 0
 
-            step_start = time.time()
-            self._confirm_wait_time = 0.0
-
-            # Stream LLM call, yield content and accumulate tool_calls
-            accumulated_content = ""
-            accumulated_tool_calls: list[dict] = []
-
-            try:
-                for chunk in self.llm.chat_stream(messages, tools=tools_schema,
-                                                   timeout=self.config.react_timeout):
-                    delta = chunk.choices[0].delta
-                    if hasattr(delta, "content") and delta.content:
-                        accumulated_content += delta.content
-                        yield delta.content
-                    if hasattr(delta, "tool_calls") and delta.tool_calls:
-                        self._merge_tool_call_deltas(accumulated_tool_calls, delta.tool_calls)
-            except Exception as e:
-                error_name = type(e).__name__
-                if "ContextWindow" in error_name:
-                    yield "\n[Context window overflow]"
-                    return
-                logger.error("ReAct stream LLM call failed: %s", e)
-                yield f"\n[Error: {e}]"
-                return
-
-            # No tool calls → pure text (already yielded)
-            if not accumulated_tool_calls:
-                return
-
-            # Build assistant message and append to messages
-            assistant_msg: dict[str, Any] = {"role": "assistant", "content": accumulated_content or ""}
-            assistant_msg["tool_calls"] = [
-                {"id": tc["id"], "type": "function",
-                 "function": {"name": tc["function"]["name"],
-                              "arguments": tc["function"]["arguments"]}}
-                for tc in accumulated_tool_calls
-            ]
-            messages.append(assistant_msg)
-
-            # Dispatch each tool call
-            for tc in accumulated_tool_calls:
-                tool_name = tc["function"]["name"]
-                try:
-                    tool_args = json.loads(tc["function"]["arguments"]) if tc["function"]["arguments"] else {}
-                except json.JSONDecodeError:
-                    tool_args = {}
-
-                # Duplicate detection
-                current_action = (tool_name, json.dumps(tool_args, sort_keys=True))
-                if current_action == last_action:
-                    duplicate_count += 1
-                    if self.config.max_duplicate_actions != -1 and duplicate_count >= self.config.max_duplicate_actions:
-                        yield f"\n[Duplicate action detected ({tool_name}), aborting]"
-                        return
-                else:
-                    last_action = current_action
-                    duplicate_count = 1
-
-                yield f"\n[Calling {tool_name}...]\n"
-                try:
-                    result = tool_dispatch(tool_name, tool_args)
-                    result = str(result) if result is not None else ""
-                except Exception as e:
-                    logger.error("Tool '%s' dispatch error: %s", tool_name, e)
-                    result = f"Tool execution error: {e}"
-                result = self._truncate_observation(result, tool_name=tool_name)
-                yield f"[{tool_name} done]\n"
-
-                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
-
-                # Abort check after each tool
+            while self.config.max_react_steps == -1 or steps < self.config.max_react_steps:
+                # Abort check
                 if self._abort:
                     yield "\n[Operation aborted]"
                     return
 
-            # Timeout check
-            elapsed = time.time() - step_start - self._confirm_wait_time
-            if elapsed > self.config.react_timeout:
-                yield "\n[Step timeout]"
-                return
+                step_start = time.time()
+                self._confirm_wait_time = 0.0
 
-            steps += 1
+                # Stream LLM call, yield content and accumulate tool_calls
+                accumulated_content = ""
+                accumulated_tool_calls: list[dict] = []
 
-        yield "\n[Maximum steps reached]"
+                try:
+                    for chunk in self.llm.chat_stream(messages, tools=tools_schema,
+                                                       timeout=self.config.react_timeout):
+                        delta = chunk.choices[0].delta
+                        if hasattr(delta, "content") and delta.content:
+                            accumulated_content += delta.content
+                            yield delta.content
+                        if hasattr(delta, "tool_calls") and delta.tool_calls:
+                            self._merge_tool_call_deltas(accumulated_tool_calls, delta.tool_calls)
+                except Exception as e:
+                    error_name = type(e).__name__
+                    if "ContextWindow" in error_name:
+                        yield "\n[Context window overflow]"
+                        return
+                    logger.error("ReAct stream LLM call failed: %s", e)
+                    yield f"\n[Error: {e}]"
+                    return
+
+                # No tool calls → pure text (already yielded)
+                if not accumulated_tool_calls:
+                    # Append the final assistant text to trace if tool calls preceded this
+                    if len(messages) > initial_len:
+                        messages.append({"role": "assistant", "content": accumulated_content or ""})
+                    return
+
+                # Build assistant message and append to messages
+                assistant_msg: dict[str, Any] = {"role": "assistant", "content": accumulated_content or ""}
+                assistant_msg["tool_calls"] = [
+                    {"id": tc["id"], "type": "function",
+                     "function": {"name": tc["function"]["name"],
+                                  "arguments": tc["function"]["arguments"]}}
+                    for tc in accumulated_tool_calls
+                ]
+                messages.append(assistant_msg)
+
+                # Dispatch each tool call
+                for tc in accumulated_tool_calls:
+                    tool_name = tc["function"]["name"]
+                    try:
+                        tool_args = json.loads(tc["function"]["arguments"]) if tc["function"]["arguments"] else {}
+                    except json.JSONDecodeError:
+                        tool_args = {}
+
+                    # Duplicate detection
+                    current_action = (tool_name, json.dumps(tool_args, sort_keys=True))
+                    if current_action == last_action:
+                        duplicate_count += 1
+                        if self.config.max_duplicate_actions != -1 and duplicate_count >= self.config.max_duplicate_actions:
+                            yield f"\n[Duplicate action detected ({tool_name}), aborting]"
+                            return
+                    else:
+                        last_action = current_action
+                        duplicate_count = 1
+
+                    yield f"\n[Calling {tool_name}...]\n"
+                    try:
+                        result = tool_dispatch(tool_name, tool_args)
+                        result = str(result) if result is not None else ""
+                    except Exception as e:
+                        logger.error("Tool '%s' dispatch error: %s", tool_name, e)
+                        result = f"Tool execution error: {e}"
+                    result = self._truncate_observation(result, tool_name=tool_name)
+                    yield f"[{tool_name} done]\n"
+
+                    messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+
+                    # Abort check after each tool
+                    if self._abort:
+                        yield "\n[Operation aborted]"
+                        return
+
+                # Timeout check
+                elapsed = time.time() - step_start - self._confirm_wait_time
+                if elapsed > self.config.react_timeout:
+                    yield "\n[Step timeout]"
+                    return
+
+                steps += 1
+
+            yield "\n[Maximum steps reached]"
+        finally:
+            self._react_trace = messages[initial_len:] if len(messages) > initial_len else None
 
     @staticmethod
     def _merge_tool_call_deltas(accumulated: list[dict], deltas: list) -> None:
@@ -1853,14 +1899,33 @@ class LlamAgent:
 
         return "\n\n".join(parts)
 
+    def _prepare_trace_message(self, msg: dict) -> dict:
+        """Prepare a trace message for history storage.
+
+        If CompressionModule is loaded, applies tool result compression
+        and thinking stripping. Otherwise stores as-is.
+        """
+        msg = dict(msg)  # Shallow copy, don't mutate run_react's messages
+
+        # Delegate to CompressionModule if loaded
+        compression = self.modules.get("compression")
+        if compression and hasattr(compression, "prepare_trace_message"):
+            return compression.prepare_trace_message(msg)
+
+        return msg
+
     def compress_conversation(self, new_summary: str, keep_turns: int) -> None:
         """Replace old history with summary, keeping recent turns.
 
         Called by compression module. Agent manages its own state.
+        Turn boundaries are defined by user messages.
         """
-        keep_messages = keep_turns * 2
-        if len(self.history) > keep_messages:
-            self.history[:] = self.history[-keep_messages:]
+        # Find turn boundaries
+        user_indices = [i for i, m in enumerate(self.history) if m.get("role") == "user"]
+        if len(user_indices) <= keep_turns:
+            return
+        cut_at = user_indices[-keep_turns]
+        self.history[:] = self.history[cut_at:]
         self.summary = new_summary
 
     def _check_context_compression(self) -> None:
@@ -1877,17 +1942,21 @@ class LlamAgent:
             logger.debug("Context check error (non-fatal): %s", e)
 
     def _trim_history(self) -> None:
-        """
-        Turn window management: discard oldest turns when context_window_size is exceeded.
+        """Turn window management: keep the most recent context_window_size turns.
 
-        Each conversation turn consists of 2 messages (user + assistant), so the message limit is context_window_size * 2.
+        A turn starts at each user message. Handles variable-length turns
+        (user + assistant with tool_calls + tool results + final assistant).
         Summary is preserved independently and unaffected.
         """
-        max_messages = self.config.context_window_size * 2
-        if len(self.history) > max_messages:
-            overflow = len(self.history) - max_messages
-            self.history[:] = self.history[overflow:]
-            logger.debug("Conversation history trimmed, discarded %d oldest messages", overflow)
+        max_turns = self.config.context_window_size
+        # Find turn boundaries (user message positions)
+        user_indices = [i for i, m in enumerate(self.history) if m.get("role") == "user"]
+        if len(user_indices) <= max_turns:
+            return
+        # Keep from the (len - max_turns)-th user message onward
+        cut_at = user_indices[-max_turns]
+        self.history[:] = self.history[cut_at:]
+        logger.debug("History trimmed: kept last %d turns", max_turns)
 
     def clear_conversation(self) -> None:
         """Clear conversation history and summary."""
@@ -1929,5 +1998,5 @@ class LlamAgent:
             "modules": {
                 name: mod.description for name, mod in self.modules.items()
             },
-            "conversation_turns": len(self.history) // 2,
+            "conversation_turns": sum(1 for m in self.history if m.get("role") == "user"),
         }
