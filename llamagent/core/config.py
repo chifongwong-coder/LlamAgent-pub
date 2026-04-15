@@ -78,6 +78,8 @@ _YAML_MAP = [
     (("memory", "auto_recall", "top_k"), "memory_recall_top_k", int),
     (("memory", "auto_recall", "max_inject"), "memory_auto_recall_max_inject", int),
     (("memory", "auto_recall", "threshold"), "memory_auto_recall_threshold", float),
+    (("memory", "consolidation_interval"), "memory_consolidation_interval", int),
+    (("memory", "consolidation_min_count"), "memory_consolidation_min_count", int),
     (("rag", "top_k"), "rag_top_k", int),
     (("rag", "chunk_size"), "chunk_size", int),
     (("rag", "retrieval_mode"), "rag_retrieval_mode", str),
@@ -197,6 +199,8 @@ class Config:
         self.memory_recall_top_k: int = 5
         self.memory_auto_recall_max_inject: int = 3
         self.memory_auto_recall_threshold: float = 0.35
+        self.memory_consolidation_interval: int = 24
+        self.memory_consolidation_min_count: int = 20
 
         # RAG
         self.rag_top_k: int = 3

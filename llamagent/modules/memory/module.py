@@ -130,6 +130,7 @@ class MemoryModule(Module):
         self._backend: str = "rag"
         self._available: bool = False
         self._pending_query: str | None = None  # For hybrid mode on_output
+        self._last_consolidation: float = 0.0  # Timestamp of last consolidation
 
     # ============================================================
     # Lifecycle
@@ -190,6 +191,10 @@ class MemoryModule(Module):
                 self._register_fs_recall_tools()
             else:
                 self._register_recall_tool()
+
+        # Register consolidation tool when write_mode supports it
+        if self._write_mode in ("autonomous", "hybrid"):
+            self._register_consolidate_tool()
 
     def _init_rag_backend(self, agent):
         """Initialize the RAG (ChromaDB) backend for memory storage."""
@@ -252,6 +257,16 @@ class MemoryModule(Module):
         except Exception as e:
             logger.warning("[Memory] Failed to build retrieval pipeline: %s", e)
             return None
+
+    def on_input(self, user_input: str) -> str:
+        """Check if memory consolidation is needed (hybrid mode auto-trigger)."""
+        if self._write_mode == "hybrid" and self._should_consolidate():
+            try:
+                self._consolidate()
+            except Exception as e:
+                logger.warning("[Memory] Auto-consolidation failed: %s", e)
+
+        return user_input
 
     # ============================================================
     # Tool registration
@@ -360,6 +375,23 @@ class MemoryModule(Module):
             },
             tier="default",
             safety_level=1,
+        )
+
+    def _register_consolidate_tool(self):
+        """Register the consolidate_memory tool."""
+        def consolidate_handler(**kwargs):
+            return self._consolidate()
+
+        self.agent.register_tool(
+            name="consolidate_memory",
+            func=consolidate_handler,
+            description=(
+                "Review and clean up stored memories. Removes outdated, redundant, "
+                "or irrelevant memories. Call when memories feel cluttered or inaccurate."
+            ),
+            parameters={"type": "object", "properties": {}, "required": []},
+            tier="default",
+            safety_level=2,
         )
 
     # ============================================================
@@ -759,6 +791,133 @@ class MemoryModule(Module):
     ) -> str:
         """Handle a failed compile result according to the fallback config."""
         return self._save_fallback(content, category)
+
+    # ============================================================
+    # Memory consolidation
+    # ============================================================
+
+    def _consolidate(self) -> str:
+        """Run memory consolidation: LLM reviews and cleans up stored memories."""
+        if not self._available or self.store is None:
+            return "Memory storage is currently unavailable."
+
+        all_facts = self._load_all_active_facts()
+        if not all_facts:
+            return "No memories to consolidate."
+
+        # Sort by priority: episode first, profile/preference last
+        prioritized = self._prioritize_for_review(all_facts)
+
+        total_deleted = 0
+        total_updated = 0
+        total_reviewed = 0
+        max_deletes = max(1, int(len(all_facts) * 0.3))  # 30% cap
+
+        for batch in self._batch(prioritized, 30):
+            if total_deleted >= max_deletes:
+                break  # Deletion cap reached
+
+            total_reviewed += len(batch)
+            actions = self._llm_review_batch(batch)
+            for action in actions:
+                if action.get("action") == "delete" and total_deleted < max_deletes:
+                    self.store.update_fact_status(action["fact_id"], "archived")
+                    total_deleted += 1
+                elif action.get("action") == "update" and action.get("new_value"):
+                    self._update_fact_value(action["fact_id"], action["new_value"])
+                    total_updated += 1
+
+        self._last_consolidation = time.time()
+
+        summary = (
+            f"Memory consolidation complete:\n"
+            f"- Reviewed: {total_reviewed}\n"
+            f"- Archived: {total_deleted}\n"
+            f"- Updated: {total_updated}\n"
+            f"- Kept: {total_reviewed - total_deleted - total_updated}"
+        )
+        logger.info(summary)
+        return summary
+
+    def _prioritize_for_review(self, facts: list) -> list:
+        """Sort facts by cleanup priority: episodes first, profile/preference last."""
+        priority_map = {
+            "episode": 0,
+            "project_fact": 1,
+            "decision": 1,
+            "preference": 2,
+            "profile": 2,
+            "instruction": 2,
+        }
+        return sorted(facts, key=lambda f: (
+            priority_map.get(f.get("kind", ""), 1),
+            float(f.get("strength", 1.0)),  # Low strength first (FS backend stores as string)
+            f.get("last_accessed_at", ""),  # Empty string = never accessed -> sorts first
+        ))
+
+    def _llm_review_batch(self, batch: list) -> list:
+        """Send a batch of facts to LLM for review, return action list."""
+        batch_text = "\n".join(
+            f"- [{f['fact_id']}] {f['kind']}: {f['subject']}.{f['attribute']} = {f['value']} "
+            f"(strength={f.get('strength', '?')}, created={f.get('created_at', '?')}, "
+            f"last_accessed={f.get('last_accessed_at', 'never')})"
+            for f in batch
+        )
+
+        prompt = (
+            "You are reviewing stored memories for cleanup. For each memory, decide:\n"
+            "- keep: still relevant and accurate\n"
+            "- delete: outdated, irrelevant, or was just a casual mention\n"
+            "- update: still relevant but the value needs correction (provide new_value)\n\n"
+            "Context about memory kinds:\n"
+            "- episode: time-sensitive events, most likely to be outdated\n"
+            "- project_fact/decision: project-related, may be outdated if project is done\n"
+            "- preference/profile/instruction: usually long-term valuable, be conservative\n\n"
+            'Respond in JSON object: '
+            '{"actions": [{"fact_id": "...", "action": "keep|delete|update", '
+            '"reason": "...", "new_value": "..."}]}\n\n'
+            f"Memories to review:\n{batch_text}"
+        )
+
+        result = self.llm.ask_json(prompt, temperature=0.2)
+
+        # Defensive: handle various response formats
+        if isinstance(result, dict) and "actions" in result and isinstance(result["actions"], list):
+            return result["actions"]
+        if isinstance(result, list):
+            return result  # LLM returned actions array directly
+        if isinstance(result, dict) and "raw_response" in result:
+            logger.warning("Consolidation LLM returned non-JSON, skipping batch")
+        return []
+
+    def _load_all_active_facts(self) -> list:
+        """Load all active facts as metadata dicts from the store."""
+        return self.store.list_all_active_facts()
+
+    def _update_fact_value(self, fact_id: str, new_value: str):
+        """Update a fact's value and timestamp."""
+        self.store.update_fact_value(fact_id, new_value)
+
+    def _should_consolidate(self) -> bool:
+        """Check if consolidation is needed based on time and memory count."""
+        interval = getattr(self.agent.config, "memory_consolidation_interval", 24)
+        if interval <= 0:
+            return False  # Disabled
+
+        now = time.time()
+        if now - self._last_consolidation < interval * 3600:
+            return False  # Too soon
+
+        # Only consolidate if there are enough active memories to warrant it
+        active_count = len(self._load_all_active_facts())
+        min_count = getattr(self.agent.config, "memory_consolidation_min_count", 20)
+        return active_count >= min_count
+
+    @staticmethod
+    def _batch(items, size):
+        """Yield successive batches from items."""
+        for i in range(0, len(items), size):
+            yield items[i:i + size]
 
     # ============================================================
     # Programmatic interface (external use)

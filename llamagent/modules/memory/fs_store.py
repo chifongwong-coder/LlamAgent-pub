@@ -329,6 +329,34 @@ class FSMemoryStore:
     # FS-specific methods (used by MemoryModule FS backend)
     # ============================================================
 
+    def list_all_active_facts(self) -> list[dict]:
+        """Return metadata dicts for all active facts.
+
+        Returns:
+            List of metadata dicts (each dict has fact_id, kind, subject, etc.).
+        """
+        sections = self._read_sections()
+        return [s["meta"] for s in sections if s["meta"].get("status", "active") == "active"]
+
+    def update_fact_value(self, fact_id: str, new_value: str) -> None:
+        """Update a fact's value and updated_at timestamp.
+
+        Args:
+            fact_id: The fact_id to update.
+            new_value: New value string for the fact.
+        """
+        sections = self._read_sections()
+        modified = False
+        for sec in sections:
+            if sec["meta"].get("fact_id") == fact_id:
+                sec["meta"]["value"] = new_value
+                sec["meta"]["updated_at"] = datetime.now().isoformat()
+                modified = True
+                break
+
+        if modified:
+            self._write_sections(sections)
+
     def list_all_metadata(self) -> str:
         """Return all active facts as formatted metadata text for context injection.
 
