@@ -1706,3 +1706,461 @@ def test_conversation_turns_count(bare_agent):
     status = bare_agent.status()
     # 2 user messages = 2 turns (not 6 // 2 = 3)
     assert status["conversation_turns"] == 2
+
+
+# ============================================================
+# v2.9.5: ContinuousRunner inject + priority scheduling
+# ============================================================
+
+
+def test_inject_basic(bare_agent, mock_llm_client):
+    """inject() sends a message, blocks until response, returns correct response."""
+    mock_llm_client.set_responses([make_llm_response("injected response")])
+    runner = ContinuousRunner(bare_agent, [], poll_interval=0.5)
+
+    t = threading.Thread(target=runner.run, daemon=True)
+    t.start()
+    time.sleep(0.05)
+
+    try:
+        response = runner.inject("hello")
+        assert response == "injected response"
+    finally:
+        runner.stop()
+        t.join(timeout=2)
+
+
+def test_inject_immediate_aborts(bare_agent, mock_llm_client):
+    """immediate=True aborts current interruptible task and processes urgent message."""
+    chat_started = threading.Event()
+    chat_blocked = threading.Event()
+
+    original_chat = bare_agent.chat
+
+    call_count = [0]
+
+    def slow_chat(msg):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            # First call: trigger task, simulate slow work
+            chat_started.set()
+            chat_blocked.wait(timeout=3)
+            return "trigger result"
+        # Subsequent calls: immediate inject response
+        return original_chat(msg)
+
+    bare_agent.chat = slow_chat
+
+    class OnceTrigger(Trigger):
+        def __init__(self):
+            self.fired = False
+            self.interruptible = True
+            self.on_interrupt = "discard"
+        def poll(self):
+            if not self.fired:
+                self.fired = True
+                return "trigger task"
+            return None
+
+    trigger = OnceTrigger()
+    runner = ContinuousRunner(bare_agent, [trigger], poll_interval=0.5)
+
+    t = threading.Thread(target=runner.run, daemon=True)
+    t.start()
+
+    # Wait for trigger task to start executing
+    chat_started.wait(timeout=3)
+
+    try:
+        mock_llm_client.set_responses([make_llm_response("urgent response")])
+        # Unblock the slow chat so abort can take effect
+        chat_blocked.set()
+
+        response = runner.inject("urgent!", immediate=True)
+        assert response == "urgent response"
+
+        # Verify abort was triggered (flag was set and cleared)
+        log = runner.get_log()
+        # The trigger task should be logged as interrupted
+        interrupted = [e for e in log if e.status == "interrupted"]
+        assert len(interrupted) >= 1
+    finally:
+        runner.stop()
+        t.join(timeout=2)
+
+
+def test_inject_immediate_non_interruptible(bare_agent, mock_llm_client):
+    """immediate=True does not abort a non-interruptible task."""
+    chat_started = threading.Event()
+    chat_proceed = threading.Event()
+
+    call_count = [0]
+
+    def controlled_chat(msg):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            chat_started.set()
+            chat_proceed.wait(timeout=3)
+            return "trigger done"
+        return "inject done"
+
+    bare_agent.chat = controlled_chat
+
+    class NonInterruptibleTrigger(Trigger):
+        def __init__(self):
+            self.fired = False
+            self.interruptible = False
+            self.on_interrupt = "discard"
+        def poll(self):
+            if not self.fired:
+                self.fired = True
+                return "important task"
+            return None
+
+    runner = ContinuousRunner(bare_agent, [NonInterruptibleTrigger()], poll_interval=0.5)
+
+    t = threading.Thread(target=runner.run, daemon=True)
+    t.start()
+    chat_started.wait(timeout=3)
+
+    try:
+        # inject immediate, but task is non-interruptible so no abort
+        inject_done = threading.Event()
+        inject_result = [None]
+
+        def do_inject():
+            inject_result[0] = runner.inject("urgent!", immediate=True)
+            inject_done.set()
+
+        inject_thread = threading.Thread(target=do_inject, daemon=True)
+        inject_thread.start()
+
+        time.sleep(0.05)
+        # abort should NOT have been called since non-interruptible
+        assert not runner._aborted_by_inject
+
+        # Let the trigger task finish
+        chat_proceed.set()
+
+        inject_done.wait(timeout=3)
+        assert inject_result[0] == "inject done"
+
+        # Task log should show completed (not interrupted)
+        log = runner.get_log()
+        trigger_entries = [e for e in log if e.trigger_type == "NonInterruptibleTrigger"]
+        assert len(trigger_entries) >= 1
+        assert trigger_entries[0].status == "completed"
+    finally:
+        runner.stop()
+        t.join(timeout=2)
+
+
+def test_inject_priority_order(bare_agent, mock_llm_client):
+    """Urgent is processed before triggers, triggers before normal."""
+    execution_order = []
+
+    original_chat = bare_agent.chat
+
+    def tracking_chat(msg):
+        execution_order.append(msg)
+        return original_chat(msg)
+
+    bare_agent.chat = tracking_chat
+
+    class DelayedTrigger(Trigger):
+        """Fires once on second poll (gives time to inject before trigger fires)."""
+        def __init__(self):
+            self.poll_count = 0
+        def poll(self):
+            self.poll_count += 1
+            if self.poll_count == 2:
+                return "trigger_msg"
+            return None
+
+    runner = ContinuousRunner(bare_agent, [DelayedTrigger()], poll_interval=0.01)
+
+    # Pre-fill queues before run() starts
+    urgent_event = threading.Event()
+    urgent_result = [None]
+    runner._urgent_queue.put(("urgent_msg", urgent_event, urgent_result))
+
+    normal_event = threading.Event()
+    normal_result = [None]
+    runner._normal_queue.put(("normal_msg", normal_event, normal_result))
+
+    mock_llm_client.set_responses([
+        make_llm_response("r1"),  # urgent
+        make_llm_response("r2"),  # trigger
+        make_llm_response("r3"),  # normal
+    ])
+
+    t = threading.Thread(target=runner.run, daemon=True)
+    t.start()
+
+    # Wait for all three to complete
+    urgent_event.wait(timeout=3)
+    normal_event.wait(timeout=3)
+    time.sleep(0.1)  # Let trigger task complete
+
+    runner.stop()
+    t.join(timeout=2)
+
+    # urgent must come before trigger, trigger before normal
+    assert "urgent_msg" in execution_order
+    assert "normal_msg" in execution_order
+    urgent_idx = execution_order.index("urgent_msg")
+    normal_idx = execution_order.index("normal_msg")
+    assert urgent_idx < normal_idx
+
+
+def test_inject_wakes_from_sleep(bare_agent, mock_llm_client):
+    """inject() wakes runner from poll_interval sleep immediately."""
+    mock_llm_client.set_responses([make_llm_response("fast response")])
+    # Long poll interval; inject should wake it immediately
+    runner = ContinuousRunner(bare_agent, [], poll_interval=10.0)
+
+    t = threading.Thread(target=runner.run, daemon=True)
+    t.start()
+    time.sleep(0.05)  # Let runner enter sleep
+
+    try:
+        start = time.time()
+        response = runner.inject("wake up")
+        elapsed = time.time() - start
+
+        assert response == "fast response"
+        # Should complete much faster than 10s poll_interval
+        assert elapsed < 3.0
+    finally:
+        runner.stop()
+        t.join(timeout=2)
+
+
+def test_on_interrupt_discard(bare_agent, mock_llm_client):
+    """Interrupted task with on_interrupt=discard is not retried."""
+    chat_started = threading.Event()
+    chat_blocked = threading.Event()
+
+    call_count = [0]
+
+    def controlled_chat(msg):
+        nonlocal call_count
+        call_count[0] += 1
+        if call_count[0] == 1:
+            chat_started.set()
+            chat_blocked.wait(timeout=3)
+            return "trigger result"
+        return "urgent response"
+
+    bare_agent.chat = controlled_chat
+
+    class DiscardTrigger(Trigger):
+        def __init__(self):
+            self.fired = False
+            self.interruptible = True
+            self.on_interrupt = "discard"
+        def poll(self):
+            if not self.fired:
+                self.fired = True
+                return "discard task"
+            return None
+
+    runner = ContinuousRunner(bare_agent, [DiscardTrigger()], poll_interval=0.5)
+
+    t = threading.Thread(target=runner.run, daemon=True)
+    t.start()
+    chat_started.wait(timeout=3)
+
+    try:
+        chat_blocked.set()
+        response = runner.inject("urgent!", immediate=True)
+        assert response == "urgent response"
+
+        time.sleep(0.15)
+
+        # Retry queue should be empty (discard, not retry)
+        assert runner._retry_queue.empty()
+    finally:
+        runner.stop()
+        t.join(timeout=2)
+
+
+def test_on_interrupt_retry(bare_agent, mock_llm_client):
+    """Interrupted task with on_interrupt=retry is re-queued and executed."""
+    chat_started = threading.Event()
+    chat_blocked = threading.Event()
+
+    call_count = [0]
+    messages_received = []
+
+    def controlled_chat(msg):
+        nonlocal call_count
+        call_count[0] += 1
+        messages_received.append(msg)
+        if call_count[0] == 1:
+            chat_started.set()
+            chat_blocked.wait(timeout=3)
+            return "trigger result"
+        return f"response_{call_count[0]}"
+
+    bare_agent.chat = controlled_chat
+
+    class RetryTrigger(Trigger):
+        def __init__(self):
+            self.fired = False
+            self.interruptible = True
+            self.on_interrupt = "retry"
+        def poll(self):
+            if not self.fired:
+                self.fired = True
+                return "retry task"
+            return None
+
+    runner = ContinuousRunner(bare_agent, [RetryTrigger()], poll_interval=0.05)
+
+    t = threading.Thread(target=runner.run, daemon=True)
+    t.start()
+    chat_started.wait(timeout=3)
+
+    try:
+        chat_blocked.set()
+        response = runner.inject("urgent!", immediate=True)
+
+        # Wait for retry to execute
+        time.sleep(0.3)
+
+        # The original task should have been retried
+        assert messages_received.count("retry task") >= 2
+    finally:
+        runner.stop()
+        t.join(timeout=2)
+
+
+def test_stop_releases_callers(bare_agent, mock_llm_client):
+    """stop() wakes all pending inject() callers with 'Runner stopped.'"""
+    # Keep the runner busy with a slow trigger task so inject messages stay queued
+    chat_started = threading.Event()
+
+    def slow_chat(msg):
+        if msg == "slow trigger":
+            chat_started.set()
+            time.sleep(10)
+            return "trigger done"
+        return "should not reach"
+
+    bare_agent.chat = slow_chat
+
+    class SlowTrigger(Trigger):
+        def __init__(self):
+            self.fired = False
+        def poll(self):
+            if not self.fired:
+                self.fired = True
+                return "slow trigger"
+            return None
+
+    runner = ContinuousRunner(bare_agent, [SlowTrigger()], poll_interval=10.0)
+
+    t = threading.Thread(target=runner.run, daemon=True)
+    t.start()
+    chat_started.wait(timeout=3)  # Wait for runner to be busy with trigger task
+
+    results = []
+
+    def inject_and_collect():
+        try:
+            r = runner.inject("waiting message")
+            results.append(r)
+        except RuntimeError as e:
+            results.append(str(e))
+
+    # Inject while runner is busy => messages queue up
+    inject_threads = []
+    for _ in range(3):
+        it = threading.Thread(target=inject_and_collect, daemon=True)
+        inject_threads.append(it)
+        it.start()
+
+    time.sleep(0.1)  # Let inject calls queue up
+    runner.stop()    # This should release all waiting callers
+
+    for it in inject_threads:
+        it.join(timeout=3)
+    t.join(timeout=3)
+
+    # All callers should get "Runner stopped."
+    assert len(results) == 3
+    for r in results:
+        assert r == "Runner stopped."
+
+
+def test_inject_before_run_raises(bare_agent, mock_llm_client):
+    """inject() before run() raises RuntimeError."""
+    runner = ContinuousRunner(bare_agent, [])
+    with pytest.raises(RuntimeError, match="not running"):
+        runner.inject("hello")
+
+
+def test_inject_after_stop_raises(bare_agent, mock_llm_client):
+    """inject() after stop() raises RuntimeError."""
+    runner = ContinuousRunner(bare_agent, [], poll_interval=0.01)
+
+    t = threading.Thread(target=runner.run, daemon=True)
+    t.start()
+    time.sleep(0.05)
+    runner.stop()
+    t.join(timeout=2)
+
+    with pytest.raises(RuntimeError, match="stopped"):
+        runner.inject("hello")
+
+
+def test_normal_yields_to_urgent(bare_agent, mock_llm_client):
+    """When processing normal queue, urgent arrival causes normal to yield."""
+    execution_order = []
+
+    original_chat = bare_agent.chat
+
+    def tracking_chat(msg):
+        execution_order.append(msg)
+        # When processing normal_1, enqueue an urgent message
+        if msg == "normal_1":
+            runner._urgent_queue.put(("urgent_mid", urgent_event, urgent_result))
+            runner._wakeup.set()
+        return original_chat(msg)
+
+    bare_agent.chat = tracking_chat
+
+    runner = ContinuousRunner(bare_agent, [], poll_interval=0.5)
+
+    # Pre-fill normal queue with two items
+    normal1_event = threading.Event()
+    normal1_result = [None]
+    runner._normal_queue.put(("normal_1", normal1_event, normal1_result))
+
+    normal2_event = threading.Event()
+    normal2_result = [None]
+    runner._normal_queue.put(("normal_2", normal2_event, normal2_result))
+
+    urgent_event = threading.Event()
+    urgent_result = [None]
+
+    mock_llm_client.set_responses([
+        make_llm_response("r1"),  # normal_1
+        make_llm_response("r2"),  # urgent_mid (processed after yield)
+        make_llm_response("r3"),  # normal_2 (processed in next cycle)
+    ])
+
+    t = threading.Thread(target=runner.run, daemon=True)
+    t.start()
+
+    normal1_event.wait(timeout=3)
+    urgent_event.wait(timeout=3)
+    normal2_event.wait(timeout=3)
+
+    runner.stop()
+    t.join(timeout=2)
+
+    # urgent_mid should appear between normal_1 and normal_2
+    assert execution_order.index("normal_1") < execution_order.index("urgent_mid")
+    assert execution_order.index("urgent_mid") < execution_order.index("normal_2")
