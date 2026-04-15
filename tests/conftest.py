@@ -225,6 +225,10 @@ def bare_agent(mock_llm_client):
     config.persistence_enabled = False
     config.persistence_auto_restore = True
     config.persistence_dir = None
+    config.tool_result_strategy = "none"
+    config.tool_result_max_chars = 2000
+    config.tool_result_head_lines = 10
+    config.strip_thinking = False
     config.child_agent_runner = "inline"
     config.child_agent_max_children = 20
     config.child_agent_role_models = {}

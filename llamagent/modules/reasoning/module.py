@@ -139,7 +139,12 @@ class PlanReAct(ExecutionStrategy):
             agent._current_task_id = _uuid.uuid4().hex
             owns_task_id = True
         try:
-            return self._execute_complex(query, context, agent, tools_schema)
+            result = self._execute_complex(query, context, agent, tools_schema)
+            return result
+        except Exception:
+            # Clear partial trace from failed steps — don't leak into history
+            agent._react_trace = None
+            raise
         finally:
             if owns_task_id:
                 agent._current_task_id = None
@@ -279,6 +284,7 @@ class PlanReAct(ExecutionStrategy):
 
         # -- 5. Summarize results --
         summary = self._summarize_results(query, steps, agent)
+        agent._react_trace = None  # Multi-step plan: store summary, not last step's trace
 
         # -- 6. Quality evaluation (optional, requires ReflectionEngine and enabled) --
         if self.reflection_engine is None or not self.reflection_write_auto:
@@ -345,6 +351,7 @@ class PlanReAct(ExecutionStrategy):
 
             # Re-summarize
             summary = self._summarize_results(query, steps, agent)
+            agent._react_trace = None  # After re-summarize, clear trace too
 
         return summary
 

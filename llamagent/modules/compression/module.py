@@ -27,6 +27,11 @@ class CompressionModule(Module):
         super().on_attach(agent)
         self._threshold_ratio = agent.config.context_compress_threshold  # 0.7
         self._keep_turns = agent.config.compress_keep_turns  # 3
+        # v2.9.4: tool result compression settings
+        self._tool_result_strategy = getattr(agent.config, "tool_result_strategy", "none")
+        self._tool_result_max_chars = getattr(agent.config, "tool_result_max_chars", 2000)
+        self._tool_result_head_lines = getattr(agent.config, "tool_result_head_lines", 10)
+        self._strip_thinking = getattr(agent.config, "strip_thinking", False)
 
     def on_input(self, user_input: str) -> str:
         """Check context size and compress if needed (side-effect in on_input)."""
@@ -46,16 +51,20 @@ class CompressionModule(Module):
 
     def _compress(self):
         """Generate summary and call agent.compress_conversation()."""
-        keep_messages = self._keep_turns * 2
-        if len(self.agent.history) <= keep_messages:
+        # Find messages to compress (all except recent keep_turns)
+        user_indices = [i for i, m in enumerate(self.agent.history) if m.get("role") == "user"]
+        if len(user_indices) <= self._keep_turns:
             return
 
-        old_messages = self.agent.history[:-keep_messages]
+        cut_at = user_indices[-self._keep_turns]
+        old_messages = self.agent.history[:cut_at]
 
         compress_parts = []
         if self.agent.summary:
             compress_parts.append(f"Previous summary: {self.agent.summary}")
-        old_text = "\n".join(f"{m['role']}: {m['content']}" for m in old_messages)
+        old_text = "\n".join(
+            f"{m['role']}: {m.get('content') or ''}" for m in old_messages
+        )
         compress_parts.append(old_text)
 
         try:
@@ -72,3 +81,65 @@ class CompressionModule(Module):
         if new_summary and not new_summary.startswith("[LLM"):
             self.agent.compress_conversation(new_summary, self._keep_turns)
             logger.info("Conversation compressed via CompressionModule")
+
+    # ----------------------------------------------------------
+    # v2.9.4: trace message pre-processing
+    # ----------------------------------------------------------
+
+    def prepare_trace_message(self, msg: dict) -> dict:
+        """Pre-process a trace message before writing to history.
+
+        Applies configured compression strategies:
+        - Strip thinking from assistant messages (if strip_thinking=True)
+        - Compress tool results (if strategy != 'none' and content > max_chars)
+        """
+        role = msg.get("role")
+
+        # Strip thinking from assistant messages
+        if role == "assistant" and self._strip_thinking:
+            msg.pop("reasoning_content", None)
+            msg.pop("thinking_blocks", None)
+
+        # Compress tool results
+        if role == "tool":
+            msg = self._compress_tool_result(msg)
+
+        return msg
+
+    def _compress_tool_result(self, msg: dict) -> dict:
+        """Apply configured compression strategy to a tool result message."""
+        content = msg.get("content") or ""
+        if len(content) <= self._tool_result_max_chars:
+            return msg  # Under threshold, keep as-is
+
+        strategy = self._tool_result_strategy
+
+        if strategy == "none":
+            return msg
+        elif strategy == "placeholder":
+            msg["content"] = f"[Tool result ({len(content)} chars, trimmed)]"
+        elif strategy == "head":
+            lines = content.split("\n")
+            head = "\n".join(lines[:self._tool_result_head_lines])
+            msg["content"] = f"{head}\n...[trimmed, original {len(content)} chars]"
+        elif strategy == "llm_summary":
+            try:
+                summary = self.llm.ask(
+                    f"Summarize this tool output in 2-3 sentences, preserving key data:\n\n"
+                    f"{content[:3000]}",
+                    temperature=0.2,
+                )
+                if summary and not summary.startswith("[LLM"):
+                    msg["content"] = f"[Summary] {summary}"
+                else:
+                    # Fallback to head
+                    lines = content.split("\n")
+                    msg["content"] = "\n".join(lines[:self._tool_result_head_lines]) + \
+                        f"\n...[trimmed, original {len(content)} chars]"
+            except Exception as e:
+                logger.debug("Tool result summarization failed: %s", e)
+                lines = content.split("\n")
+                msg["content"] = "\n".join(lines[:self._tool_result_head_lines]) + \
+                    f"\n...[trimmed, original {len(content)} chars]"
+
+        return msg
