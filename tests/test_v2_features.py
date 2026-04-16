@@ -1461,6 +1461,7 @@ def test_resilient_retry_success(mock_llm_client):
     resilient._fallback_llm = None
     resilient._max_retries = 3
     resilient._primary_cooldown_until = 0
+    resilient._cooldown_lock = threading.Lock()
     resilient._simple_llm = None
 
     import unittest.mock as um
@@ -1488,6 +1489,7 @@ def test_resilient_failover(mock_llm_client):
     resilient._fallback_llm = fallback
     resilient._max_retries = 1  # Only 1 retry to keep test fast
     resilient._primary_cooldown_until = 0
+    resilient._cooldown_lock = threading.Lock()
     resilient._simple_llm = None
 
     import unittest.mock as um
@@ -1550,6 +1552,7 @@ def _make_resilient_with_fallback(mock_llm_client, fallback_responses, max_retri
     resilient._fallback_llm = fallback
     resilient._max_retries = max_retries
     resilient._primary_cooldown_until = 0
+    resilient._cooldown_lock = threading.Lock()
     resilient._simple_llm = None
     return resilient, fallback
 
@@ -3097,3 +3100,302 @@ def test_improvement_clears_lessons(bare_agent, mock_llm_client, tmp_path):
     # Lessons for other skills should be preserved
     other = reflection_mod.lesson_store.get_lessons_by_skill("other-skill")
     assert len(other) == 1
+
+
+# ============================================================
+# v2.9.9: Comprehensive code audit bugfixes
+# ============================================================
+
+
+def test_shared_tool_pool_no_leak(bare_agent, mock_llm_client):
+    """C1: Shared thread pool is reused across multiple timeout calls (no per-call pool creation)."""
+    # Register a slow tool
+    def slow_tool(x: str = ""):
+        import time as _t
+        _t.sleep(0.01)
+        return f"done: {x}"
+
+    bare_agent.register_tool(
+        name="slow_tool", func=slow_tool,
+        description="A slow tool", parameters={},
+    )
+
+    tool_entry = bare_agent._tools["slow_tool"]
+
+    # Pool should be None initially (lazy creation)
+    assert bare_agent._tool_timeout_pool is None
+
+    # First call creates the pool
+    result1 = bare_agent._execute_with_timeout(tool_entry, {"x": "1"}, timeout=5.0)
+    assert "done: 1" in result1
+    pool_ref = bare_agent._tool_timeout_pool
+    assert pool_ref is not None
+
+    # Second call reuses the same pool
+    result2 = bare_agent._execute_with_timeout(tool_entry, {"x": "2"}, timeout=5.0)
+    assert "done: 2" in result2
+    assert bare_agent._tool_timeout_pool is pool_ref
+
+    # Timeout case also reuses the same pool
+    def blocking_tool(x: str = ""):
+        import time as _t
+        _t.sleep(10)
+        return "never"
+
+    blocking_entry = {"func": blocking_tool, "name": "blocking_tool"}
+    result3 = bare_agent._execute_with_timeout(blocking_entry, {"x": "3"}, timeout=0.05)
+    assert "timed out" in result3
+    assert bare_agent._tool_timeout_pool is pool_ref
+
+
+def test_react_total_timeout(bare_agent, mock_llm_client):
+    """H1: Cumulative timeout triggers even if individual steps are within per-step timeout."""
+    import unittest.mock as um
+
+    # Multiple consecutive tool-call-only responses with varying args to avoid duplicate detection.
+    responses = []
+    for i in range(20):
+        responses.append(make_llm_response("", tool_calls=[make_tool_call("slow_step", {"x": str(i)}, f"call_{i}")]))
+    mock_llm_client.set_responses(responses)
+
+    bare_agent.config.react_total_timeout = 5.0  # 5s total timeout
+    bare_agent.config.max_react_steps = 20
+    bare_agent.config.react_timeout = 999  # Per-step timeout is generous
+
+    # Mock time.time() to simulate elapsed time:
+    # First call (total_start baseline) returns 100.0
+    # Subsequent calls advance by 3s each (step_start and step_end within per-step limit)
+    # The second iteration's total timeout check sees >5s elapsed
+    _call_count = [0]
+    def _fake_time():
+        _call_count[0] += 1
+        # Call 1: total_start = 100.0
+        # Call 2: abort-check time (not used directly)
+        # Call 3: total timeout check: 100+6 = 106 > 105 => timeout fires
+        return 100.0 + (_call_count[0] - 1) * 3.0
+
+    messages = [{"role": "user", "content": "do work"}]
+    tools_schema = [{"type": "function", "function": {"name": "slow_step", "description": "step",
+                     "parameters": {"type": "object", "properties": {"x": {"type": "string"}}}}}]
+
+    with um.patch("llamagent.core.agent.time.time", side_effect=_fake_time):
+        result = bare_agent.run_react(messages, tools_schema, lambda name, args: "step done")
+
+    assert result.status == "timeout"
+    assert result.terminal is True
+
+
+def test_react_total_timeout_zero_means_unlimited(bare_agent, mock_llm_client):
+    """H1: react_total_timeout=0 means no cumulative timeout (backward compatible)."""
+    bare_agent.config.react_total_timeout = 0
+    bare_agent.config.max_react_steps = 2
+
+    mock_llm_client.set_responses([
+        make_llm_response("", tool_calls=[make_tool_call("t", {"x": "1"})]),
+        make_llm_response("done"),
+    ])
+
+    bare_agent.register_tool(name="t", func=lambda x="": "ok", description="t",
+                             parameters={"type": "object", "properties": {"x": {"type": "string"}}})
+    messages = [{"role": "user", "content": "go"}]
+    tools_schema = [{"type": "function", "function": {"name": "t", "description": "t",
+                     "parameters": {"type": "object", "properties": {"x": {"type": "string"}}}}}]
+    result = bare_agent.run_react(messages, tools_schema, lambda n, a: "ok")
+    assert result.status == "completed"
+
+
+def test_cooldown_lock_thread_safe(mock_llm_client):
+    """H7: Concurrent threads reading/writing _primary_cooldown_until don't crash."""
+    resilient = ResilientLLM.__new__(ResilientLLM)
+    resilient.model = "mock-model"
+    resilient.api_retry_count = 0
+    resilient.max_context_tokens = 8192
+    resilient._fallback_llm = None
+    resilient._max_retries = 0
+    resilient._primary_cooldown_until = 0
+    resilient._cooldown_lock = threading.Lock()
+    resilient._simple_llm = None
+
+    errors = []
+
+    def writer():
+        try:
+            for _ in range(100):
+                with resilient._cooldown_lock:
+                    resilient._primary_cooldown_until = time.time() + 60
+                with resilient._cooldown_lock:
+                    resilient._primary_cooldown_until = 0
+        except Exception as e:
+            errors.append(e)
+
+    def reader():
+        try:
+            for _ in range(100):
+                with resilient._cooldown_lock:
+                    _ = resilient._primary_cooldown_until > time.time()
+        except Exception as e:
+            errors.append(e)
+
+    threads = []
+    for _ in range(4):
+        threads.append(threading.Thread(target=writer))
+        threads.append(threading.Thread(target=reader))
+
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert not errors, f"Thread safety errors: {errors}"
+
+
+def test_continuous_child_sandbox_no_parent_scope(bare_agent, mock_llm_client, tmp_path):
+    """H9: Sandbox continuous child does NOT inherit parent scopes."""
+    from llamagent.modules.child_agent.module import ChildAgentModule
+    from llamagent.modules.child_agent.policy import ChildAgentSpec, AgentExecutionPolicy
+    from llamagent.modules.child_agent.budget import Budget
+    from llamagent.core.authorization import ApprovalScope
+
+    bare_agent.mode = "continuous"
+    bare_agent.project_dir = str(tmp_path)
+    bare_agent.playground_dir = str(tmp_path / "llama_playground")
+    os.makedirs(bare_agent.playground_dir, exist_ok=True)
+
+    module = ChildAgentModule()
+    bare_agent.register_module(module)
+
+    # Clear parent tools to avoid deepcopy issues with bound methods holding runner locks
+    bare_agent._tools = {}
+
+    # Add a scope to parent
+    bare_agent._authorization_engine.add_scope(ApprovalScope(
+        scope="session", zone="project", actions=["read", "write"],
+        path_prefixes=[str(tmp_path)],
+    ))
+
+    # Create a continuous child with sandbox workspace_mode
+    sandbox_policy = AgentExecutionPolicy(
+        workspace_mode="sandbox",
+        budget=Budget(max_llm_calls=5, max_time_seconds=60),
+    )
+    spec = ChildAgentSpec(
+        task="sandbox task",
+        role="researcher",
+        policy=sandbox_policy,
+        continuous=True,
+    )
+
+    child = module._create_continuous_child_agent(spec)
+
+    # Sandbox child should NOT have parent scopes
+    exported = child._authorization_engine.export_scopes()
+    parent_paths = [str(tmp_path)]
+    for scope_dict in exported:
+        for prefix in scope_dict.get("path_prefixes", []):
+            assert prefix not in parent_paths, \
+                f"Sandbox child should not inherit parent scope path: {prefix}"
+
+    # Project mode child SHOULD inherit parent scopes
+    project_policy = AgentExecutionPolicy(
+        workspace_mode="project",
+        budget=Budget(max_llm_calls=5, max_time_seconds=60),
+    )
+    spec_project = ChildAgentSpec(
+        task="project task",
+        role="coder",
+        policy=project_policy,
+        continuous=True,
+    )
+    child_project = module._create_continuous_child_agent(spec_project)
+    exported_project = child_project._authorization_engine.export_scopes()
+    # Should have at least the parent scope
+    has_parent_path = any(
+        str(tmp_path) in scope_dict.get("path_prefixes", [])
+        for scope_dict in exported_project
+    )
+    assert has_parent_path, "Project child should inherit parent scopes"
+
+
+def test_commonpath_mixed_paths():
+    """M4: normalize_scopes handles mixed absolute/relative paths without crashing."""
+    from llamagent.core.contract import normalize_scopes
+    from llamagent.core.zone import RequestedScope
+
+    # Mixed absolute and relative paths — would raise ValueError without the fix
+    scopes = [
+        RequestedScope(
+            zone="project",
+            actions=["read"],
+            path_prefixes=["/absolute/path/a", "relative/path/b"],
+        ),
+    ]
+    result = normalize_scopes(scopes)
+    assert len(result) == 1
+    # Should not crash and should keep original paths (no common prefix found)
+    assert len(result[0].path_prefixes) == 2
+
+
+def test_yaml_serialization_special_chars(bare_agent, tmp_path):
+    """M6: Skill update_skill correctly quotes YAML values containing special characters."""
+    from llamagent.modules.skill.module import SkillModule
+    from llamagent.modules.skill.index import SkillMeta
+
+    # Create a skill file with frontmatter containing special chars
+    skill_dir = tmp_path / "skills" / "test-skill"
+    skill_dir.mkdir(parents=True)
+    skill_file = skill_dir / "SKILL.md"
+    original_content = (
+        '---\n'
+        'name: test-skill\n'
+        'description: "A skill with: colon"\n'
+        'tags: [test, demo]\n'
+        'always: false\n'
+        '---\n'
+        '## Original content\n'
+        '1. Do something.\n'
+    )
+    skill_file.write_text(original_content)
+
+    # Set up module with a mock index
+    module = SkillModule()
+    module.agent = bare_agent
+
+    from llamagent.modules.skill.index import SkillIndex
+    module.index = SkillIndex()
+    module.index.scan([(str(tmp_path / "skills"), "test")])
+
+    # Now update with new content where frontmatter has special chars
+    meta = module.index.lookup("test-skill")
+    assert meta is not None
+
+    # Manually set frontmatter values with special characters for the test
+    from llamagent.modules.fs_store.parser import parse_frontmatter
+    with open(meta.content_path, "r", encoding="utf-8") as f:
+        old_fm, _ = parse_frontmatter(f.read())
+
+    # Write a file with problematic frontmatter values
+    problematic_content = (
+        '---\n'
+        'name: test-skill\n'
+        'description: Contains: colon and "quotes"\n'
+        'tags: [test, demo]\n'
+        'always: false\n'
+        '---\n'
+        '## Original\n'
+    )
+    skill_file.write_text(problematic_content)
+    module.index.invalidate_cache("test-skill")
+
+    # Update the skill
+    result = module.update_skill("test-skill", "## New content\n1. Updated step.\n")
+    assert result["success"], f"update_skill failed: {result.get('error')}"
+
+    # Read back and verify the description was properly quoted
+    updated = skill_file.read_text()
+    assert '---' in updated
+
+    # Parse back the frontmatter to verify it's valid
+    fm, body = parse_frontmatter(updated)
+    assert fm is not None
+    assert "colon" in fm.get("description", "")
+    assert "New content" in body

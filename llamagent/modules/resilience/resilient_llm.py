@@ -10,6 +10,7 @@ directly, not self.chat()). Behavior fully consistent with vanilla LLMClient.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 from llamagent.core.llm import LLMClient
@@ -45,6 +46,7 @@ class ResilientLLM(LLMClient):
         self._fallback_llm = fallback_llm
         self._max_retries = max(0, max_retries)
         self._primary_cooldown_until: float = 0  # Turn-scoped: use fallback during cooldown
+        self._cooldown_lock = threading.Lock()  # Protects _primary_cooldown_until across threads
         self._simple_llm = simple_llm
 
     def chat(self, messages, **kwargs):
@@ -84,7 +86,9 @@ class ResilientLLM(LLMClient):
         5. On successful primary call, clear cooldown
         """
         # Turn-scoped: during cooldown, use fallback directly
-        if self._fallback_llm and time.time() < self._primary_cooldown_until:
+        with self._cooldown_lock:
+            in_cooldown = self._fallback_llm and time.time() < self._primary_cooldown_until
+        if in_cooldown:
             logger.info("Primary in cooldown, using fallback model: %s", self._fallback_llm.model)
             try:
                 return self._fallback_llm.chat(messages, **kwargs)
@@ -97,7 +101,8 @@ class ResilientLLM(LLMClient):
         for attempt in range(self._max_retries + 1):
             try:
                 result = super().chat(messages, **kwargs)
-                self._primary_cooldown_until = 0  # Primary recovered, clear cooldown
+                with self._cooldown_lock:
+                    self._primary_cooldown_until = 0  # Primary recovered, clear cooldown
                 return result
             except Exception as e:
                 # Defensive: if classifier itself fails, treat as unknown/retryable
@@ -136,7 +141,8 @@ class ResilientLLM(LLMClient):
                 result = self._fallback_llm.chat(messages, **kwargs)
                 # Successful failover → set primary cooldown
                 cooldown = min(last_error.retry_after, 300) if last_error.retry_after > 0 else 60
-                self._primary_cooldown_until = time.time() + cooldown
+                with self._cooldown_lock:
+                    self._primary_cooldown_until = time.time() + cooldown
                 logger.info("Primary cooldown set for %.0fs", cooldown)
                 return result
             except Exception as fallback_error:

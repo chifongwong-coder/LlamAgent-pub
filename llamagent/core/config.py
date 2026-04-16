@@ -67,6 +67,7 @@ _YAML_MAP = [
     (("agent", "react", "max_steps"), "max_react_steps", int),
     (("agent", "react", "max_duplicate_actions"), "max_duplicate_actions", int),
     (("agent", "react", "timeout"), "react_timeout", float),
+    (("agent", "react", "total_timeout"), "react_total_timeout", float),
     (("agent", "max_observation_tokens"), "max_observation_tokens", int),
     (("agent", "tool_result_persist_threshold"), "tool_result_persist_threshold", int),
     (("retrieval", "persist_dir"), "retrieval_persist_dir", str),
@@ -184,6 +185,7 @@ class Config:
         self.max_react_steps: int = 10
         self.max_duplicate_actions: int = 2
         self.react_timeout: float = 210.0
+        self.react_total_timeout: float = 0  # 0 = unlimited (ContinuousRunner task_timeout handles it)
         self.max_observation_tokens: int = 2000
         self.tool_result_persist_threshold: int = 0  # 0 = follow max_observation_tokens
 

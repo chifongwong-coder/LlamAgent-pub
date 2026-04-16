@@ -381,6 +381,9 @@ class LlamAgent:
         # Register YAML-configured hooks
         self._register_yaml_hooks()
 
+        # v2.9.9: shared thread pool for tool timeout execution (lazy creation)
+        self._tool_timeout_pool = None
+
         # v2.0: abort mechanism
         self._abort = False
         # v2.0: open_questions buffer for prepare phase
@@ -1445,6 +1448,7 @@ class LlamAgent:
         last_action: tuple | None = None  # Previous (name, args_json)
         duplicate_count = 0
         last_text_response = ""  # Record the last successful text response
+        total_start = time.time()  # v2.9.9: cumulative timeout baseline
 
         while self.config.max_react_steps == -1 or steps < self.config.max_react_steps:
             # --- v2.0: abort check (before LLM call) ---
@@ -1452,6 +1456,15 @@ class LlamAgent:
                 self._react_trace = messages[initial_len:] if len(messages) > initial_len else None
                 return ReactResult(text="Operation aborted.", status="aborted",
                                    terminal=True, steps_used=steps)
+
+            # --- v2.9.9: cumulative timeout check ---
+            if self.config.react_total_timeout > 0:
+                total_elapsed = time.time() - total_start
+                if total_elapsed > self.config.react_total_timeout:
+                    logger.warning("ReAct total timeout (%.1fs > %.1fs)", total_elapsed, self.config.react_total_timeout)
+                    text = last_text_response or "Task timed out. Consider breaking it into smaller steps."
+                    self._react_trace = messages[initial_len:] if len(messages) > initial_len else None
+                    return ReactResult(text=text, status="timeout", steps_used=steps, terminal=True)
 
             # --- Timeout protection ---
             step_start = time.time()
@@ -1618,12 +1631,21 @@ class LlamAgent:
             steps = 0
             last_action: tuple | None = None
             duplicate_count = 0
+            total_start = time.time()  # v2.9.9: cumulative timeout baseline
 
             while self.config.max_react_steps == -1 or steps < self.config.max_react_steps:
                 # Abort check
                 if self._abort:
                     yield "\n[Operation aborted]"
                     return
+
+                # v2.9.9: cumulative timeout check
+                if self.config.react_total_timeout > 0:
+                    total_elapsed = time.time() - total_start
+                    if total_elapsed > self.config.react_total_timeout:
+                        logger.warning("ReAct stream total timeout (%.1fs > %.1fs)", total_elapsed, self.config.react_total_timeout)
+                        yield "\n[Total timeout]"
+                        return
 
                 step_start = time.time()
                 self._confirm_wait_time = 0.0
@@ -1790,7 +1812,7 @@ class LlamAgent:
             return None
 
     def _execute_with_timeout(self, tool: dict, args: dict, timeout: float) -> str:
-        """Execute a tool function with a timeout using ThreadPoolExecutor."""
+        """Execute a tool function with a timeout using a shared ThreadPoolExecutor."""
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
         def _run():
@@ -1800,15 +1822,16 @@ class LlamAgent:
                 result = tool["func"](**args)
                 return str(result) if result is not None else ""
 
-        pool = ThreadPoolExecutor(max_workers=1)
-        future = pool.submit(_run)
+        # Lazy-create shared pool on first use (daemon threads die with process)
+        if self._tool_timeout_pool is None:
+            self._tool_timeout_pool = ThreadPoolExecutor(max_workers=2)
+
+        future = self._tool_timeout_pool.submit(_run)
         try:
             result = future.result(timeout=timeout)
-            pool.shutdown(wait=False)
             return result
         except FutureTimeout:
             future.cancel()
-            pool.shutdown(wait=False, cancel_futures=True)
             logger.warning(
                 "Tool '%s' timed out after %.1fs (thread may still be running)",
                 tool["name"], timeout,

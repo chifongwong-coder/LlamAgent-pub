@@ -185,6 +185,7 @@ def bare_agent(mock_llm_client):
     config.max_react_steps = 10
     config.max_duplicate_actions = 2
     config.react_timeout = 210.0
+    config.react_total_timeout = 0
     config.max_observation_tokens = 2000
     config.tool_result_persist_threshold = 0
     config.max_context_tokens = 8192
@@ -271,6 +272,7 @@ def bare_agent(mock_llm_client):
     agent._controller = None
     agent._current_task_id = None
     agent._abort = False
+    agent._tool_timeout_pool = None
     agent._open_questions_buffer = []
     agent._interactive_config = {k: getattr(config, k) for k in LlamAgent._MODE_KEYS}
 

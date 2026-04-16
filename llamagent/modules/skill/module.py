@@ -408,6 +408,10 @@ class SkillModule(Module):
                         fm_lines.append(f"{k}: [{', '.join(str(x) for x in v)}]")
                     elif isinstance(v, bool):
                         fm_lines.append(f"{k}: {'true' if v else 'false'}")
+                    elif isinstance(v, str) and (":" in v or '"' in v or "'" in v or "\n" in v):
+                        # Quote strings with special characters for YAML safety
+                        escaped = v.replace('"', '\\"')
+                        fm_lines.append(f'{k}: "{escaped}"')
                     else:
                         fm_lines.append(f"{k}: {v}")
                 fm_lines.append("---\n")
