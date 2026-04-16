@@ -463,6 +463,30 @@ def create_web_ui() -> "gr.Blocks":
         except Exception as e:
             return f"Search error: {e}"
 
+    def refresh_sessions_click():
+        """Scan persistence directory and return sessions dataframe."""
+        agent = current_agent.get("agent")
+        if not agent:
+            return [], "Build an agent first."
+
+        from llamagent.interfaces.sessions import list_sessions, format_time_ago
+        sessions = list_sessions(agent)
+        if not sessions:
+            return [], "No saved sessions. Enable persistence module."
+
+        rows = []
+        persistence_mod = agent.modules.get("persistence")
+        current_file = getattr(persistence_mod, "_filename", "") if persistence_mod else ""
+        for s in sessions:
+            name = s["persona_id"]
+            if s["filename"] == current_file:
+                name += " (current)"
+            age = format_time_ago(s["last_modified"])
+            preview = s["summary"][:60] or s["preview"][:60] or ""
+            rows.append([name, s["turns"], age, preview])
+
+        return rows, f"{len(sessions)} session(s) found."
+
     # ---- Build the interface ----
 
     persona_choices, _ = _get_persona_choices()
@@ -616,6 +640,17 @@ def create_web_ui() -> "gr.Blocks":
             refresh_memory_btn = gr.Button("Refresh Stats", size="sm")
             search_memory_btn = gr.Button("Search", size="sm")
 
+        # Sessions panel
+        with gr.Accordion("Sessions", open=False):
+            session_table = gr.Dataframe(
+                headers=["Name", "Turns", "Last Active", "Preview"],
+                label="Saved Sessions",
+                interactive=False,
+            )
+            with gr.Row():
+                refresh_sessions_btn = gr.Button("Refresh", size="sm")
+            session_status = gr.Textbox(label="", interactive=False, lines=1)
+
         # ---- Event bindings ----
 
         build_btn.click(
@@ -666,6 +701,12 @@ def create_web_ui() -> "gr.Blocks":
             fn=search_memory_click,
             inputs=[memory_search_input],
             outputs=[memory_results_display],
+        )
+
+        # Sessions panel bindings
+        refresh_sessions_btn.click(
+            fn=refresh_sessions_click,
+            outputs=[session_table, session_status],
         )
 
         from llamagent import __version__

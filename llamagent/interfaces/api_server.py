@@ -11,6 +11,8 @@ Endpoints:
     GET  /status       — Health check
     GET  /modules      — Module list
     POST /upload       — Upload files to knowledge base
+    GET  /sessions     — List saved sessions
+    DELETE /sessions/{persona_id} — Delete a session
     WS   /ws/chat      — WebSocket streaming chat
 
 Usage:
@@ -424,6 +426,8 @@ def create_api_server(
             "- GET /runner/status — Runner status\n"
             "- GET /runner/log — Runner task log\n"
             "- POST /inject — Inject message into running agent\n"
+            "- GET /sessions — List saved sessions\n"
+            "- DELETE /sessions/{persona_id} — Delete a session\n"
             "- WebSocket /ws/chat — Streaming chat\n"
         ),
         version=__version__,
@@ -966,6 +970,48 @@ def create_api_server(
             message=f"Successfully processed {processed}/{len(files)} file(s)",
             files_processed=processed,
         )
+
+    # ---- 9. Session browsing endpoints ----
+
+    @app.get(
+        "/sessions",
+        tags=["Sessions"],
+        summary="List saved sessions",
+        description="Scan persistence directory for saved conversation sessions.",
+    )
+    async def get_sessions(
+        session_id: str | None = None,
+        token: str = Depends(verify_token),
+    ):
+        """List saved sessions."""
+        agent = _get_agent(session_id)
+        from llamagent.interfaces.sessions import list_sessions
+        sessions = list_sessions(agent)
+        return {"sessions": [
+            {"persona_id": s["persona_id"], "turns": s["turns"],
+             "updated_at": s["updated_at"], "preview": s["preview"]}
+            for s in sessions
+        ]}
+
+    @app.delete(
+        "/sessions/{persona_id}",
+        tags=["Sessions"],
+        summary="Delete a session",
+        description="Delete a saved session by persona ID. Cannot delete the active session.",
+    )
+    async def remove_session(
+        persona_id: str,
+        session_id: str | None = None,
+        token: str = Depends(verify_token),
+    ):
+        """Delete a session file."""
+        agent = _get_agent(session_id)
+        from llamagent.interfaces.sessions import delete_session
+        filename = f"{persona_id}.json"
+        success = delete_session(agent, filename)
+        if not success:
+            raise HTTPException(400, "Cannot delete session (active or not found)")
+        return {"deleted": persona_id}
 
     # ---- 6. WebSocket streaming chat ----
 

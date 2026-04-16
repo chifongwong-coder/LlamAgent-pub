@@ -443,6 +443,7 @@ class LlamAgentCLI:
             "/stop": self._cmd_stop,
             "/skills": self._cmd_skills,
             "/memory": self._cmd_memory,
+            "/history": self._cmd_history,
         }
 
         # Tab completion for slash commands (C4)
@@ -615,6 +616,7 @@ class LlamAgentCLI:
             ("/modules", "View loaded modules"),
             ("/skills", "List loaded skills"),
             ("/memory", "Show stored facts and memory usage"),
+            ("/history", "Browse saved conversation sessions"),
             ("/clear", "Start a fresh conversation"),
             ("/quit", "Exit the conversation (also: /exit, /q)"),
             ("Ctrl+C", "Exit current agent, return to setup"),
@@ -902,6 +904,54 @@ class LlamAgentCLI:
                 console.print(f"\n[bold]Memory[/bold]: module loaded, mode={self.agent.config.memory_mode}")
         except Exception:
             console.print(f"\n[bold]Memory[/bold]: module loaded, mode={self.agent.config.memory_mode}")
+
+    def _cmd_history(self):
+        """Browse saved conversation sessions."""
+        from llamagent.interfaces.sessions import list_sessions, format_time_ago, delete_session
+
+        sessions = list_sessions(self.agent)
+        if not sessions:
+            console.print("[dim]No saved sessions found. Enable persistence module to save sessions.[/dim]")
+            return
+
+        # Determine current session
+        persistence_mod = self.agent.modules.get("persistence")
+        current_file = getattr(persistence_mod, "_filename", "") if persistence_mod else ""
+
+        # Display
+        console.print(f"\n  [bold]Saved Sessions ({len(sessions)}):[/bold]\n")
+        for i, s in enumerate(sessions, 1):
+            is_current = s["filename"] == current_file
+            marker = "[cyan]*[/cyan]" if is_current else " "
+            label = "[cyan](current)[/cyan]" if is_current else ""
+            age = format_time_ago(s["last_modified"])
+
+            console.print(f"  {marker} [bold]{i}[/bold]. {s['persona_id']} {label} — {s['turns']} turns, {age}")
+            if s["summary"]:
+                console.print(f"      [dim]Summary: {s['summary']}[/dim]")
+            elif s["preview"]:
+                console.print(f"      [dim]\"{s['preview']}\"[/dim]")
+
+        # Actions
+        console.print(f"\n  [dim]Enter 'd NUM' to delete a session, or press enter to go back[/dim]")
+        choice = _ask("Action", default="")
+
+        if not choice:
+            return
+        if choice.lower().startswith("d "):
+            try:
+                idx = int(choice[2:].strip()) - 1
+                if 0 <= idx < len(sessions):
+                    target = sessions[idx]
+                    if target["filename"] == current_file:
+                        console.print("[yellow]Cannot delete the active session. Use /clear instead.[/yellow]")
+                    elif _ask_confirm(f"Delete session '{target['persona_id']}'?", default=False):
+                        if delete_session(self.agent, target["filename"]):
+                            console.print(f"[green]Session '{target['persona_id']}' deleted[/green]")
+                        else:
+                            console.print("[red]Failed to delete session[/red]")
+            except (ValueError, IndexError):
+                console.print("[red]Invalid selection[/red]")
 
     def _setup_readline(self):
         """Set up tab completion for slash commands. Wrapped in try/except for portability."""
