@@ -545,6 +545,10 @@ class SkillIndex:
     # Utility
     # ------------------------------------------------------------------
 
+    def invalidate_cache(self, name: str) -> None:
+        """Remove cached content for a skill so next load_content reads fresh file."""
+        self._content_cache.pop(name, None)
+
     def all_skills(self) -> list[SkillMeta]:
         """Return all indexed skills."""
         return list(self._skills.values())

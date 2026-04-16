@@ -131,7 +131,7 @@ def _render_section(meta: dict) -> str:
     # Metadata fields in display order
     field_order = [
         "lesson_id", "task", "error_description", "root_cause",
-        "improvement", "tags", "created_at",
+        "improvement", "tags", "related_skill", "created_at",
     ]
     for key in field_order:
         if key in meta:
@@ -174,6 +174,7 @@ class FSLessonStore:
         root_cause: str,
         improvement: str | None = None,
         tags: list[str] | None = None,
+        related_skill: str | None = None,
     ) -> None:
         """Save a lesson to lessons.md.
 
@@ -183,6 +184,7 @@ class FSLessonStore:
             root_cause:        Root cause
             improvement:       Improvement strategy (None means no effective improvement)
             tags:              Tag list
+            related_skill:     Name of the skill that was active when the lesson was learned
         """
         # Generate unique ID
         lesson_id = hashlib.md5(
@@ -202,6 +204,8 @@ class FSLessonStore:
             "tags": json.dumps(tags or [], ensure_ascii=False),
             "created_at": datetime.now().isoformat(),
         }
+        if related_skill:
+            meta["related_skill"] = related_skill
 
         section_text = _render_section(meta)
 
@@ -399,6 +403,60 @@ class FSLessonStore:
 
         self._write_sections(sections)
         return True
+
+    # ============================================================
+    # Skill-related queries
+    # ============================================================
+
+    def get_lessons_by_skill(self, skill_name: str) -> list[dict]:
+        """Return all lessons related to a specific skill.
+
+        Args:
+            skill_name: Name of the skill to filter by.
+
+        Returns:
+            List of lesson dicts with the same fields as search_lessons().
+        """
+        sections = self._read_sections()
+        results = []
+        for sec in sections:
+            meta = sec["meta"]
+            if meta.get("related_skill") != skill_name:
+                continue
+
+            try:
+                tags = json.loads(meta.get("tags", "[]"))
+            except (json.JSONDecodeError, TypeError):
+                tags = []
+
+            results.append({
+                "lesson_id": meta.get("lesson_id", ""),
+                "task": meta.get("task", ""),
+                "error_description": meta.get("error_description", ""),
+                "root_cause": meta.get("root_cause", ""),
+                "improvement": meta.get("improvement", ""),
+                "tags": tags,
+                "related_skill": meta.get("related_skill", ""),
+                "created_at": meta.get("created_at", ""),
+            })
+
+        return results
+
+    def delete_lessons_by_skill(self, skill_name: str) -> int:
+        """Delete all lessons related to a specific skill.
+
+        Returns count of lessons deleted.
+        """
+        sections = self._read_sections()
+        original_count = len(sections)
+        sections = [
+            sec for sec in sections
+            if sec["meta"].get("related_skill") != skill_name
+        ]
+        deleted = original_count - len(sections)
+        if deleted > 0:
+            self._write_sections(sections)
+        return deleted
 
     # ============================================================
     # Management
