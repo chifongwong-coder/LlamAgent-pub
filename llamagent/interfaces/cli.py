@@ -88,7 +88,10 @@ def _ask_choice(prompt: str, choices: list[str], default: str = "1") -> str:
 def _ask_confirm(prompt: str, default: bool = True) -> bool:
     """Prompt for yes/no confirmation."""
     suffix = "[Y/n]" if default else "[y/N]"
-    val = input(f"{prompt} {suffix}: ").strip().lower()
+    try:
+        val = input(f"{prompt} {suffix}: ").strip().lower()
+    except EOFError:
+        return default
     if not val:
         return default
     return val in ("y", "yes")
@@ -108,8 +111,8 @@ BANNER = """
  |_____|_|\\__,_|_| |_| |_/_/   \\_\\__, |\\___|_| |_|\\__|
                                   |___/
 [/bold cyan]
-[bold white]  LlamAgent v{version} — Your AI Assistant[/bold white]
-[dim]  Type /help for help | Ctrl+C to exit agent[/dim]
+[bold white]  LlamAgent v{version} — Modular AI Agent Framework[/bold white]
+[dim]  Type /help for commands | Ctrl+C to return to setup[/dim]
 """.format(version=VERSION)
 
 
@@ -117,31 +120,13 @@ BANNER = """
 # Available modules for interactive setup
 # ============================================================
 
-MODULE_GROUPS = {
-    "Core": [
-        ("safety", "Input filtering + output sanitization"),
-        ("tools", "Four-tier tool system + built-in tools"),
-        ("sandbox", "Isolated execution for high-risk tools"),
-    ],
-    "Intelligence": [
-        ("planning", "PlanReAct task decomposition"),
-        ("reflection", "Quality evaluation + lesson learning"),
-    ],
-    "Knowledge": [
-        ("retrieval", "Knowledge retrieval over documents"),
-        ("memory", "Persistent memory with semantic recall"),
-    ],
-    "Collaboration": [
-        ("child_agent", "Spawn constrained sub-agents"),
-        ("mcp", "Model Context Protocol bridge"),
-    ],
-}
+from llamagent.interfaces.presets import MODULE_DESCRIPTIONS, MODULE_GROUPS, apply_presets
 
 # Preset configurations
 PRESETS = {
-    "full": "All modules (recommended for first time)",
-    "minimal": "Safety + Tools only",
-    "chat": "No modules (pure conversation)",
+    "full": "All modules — full capabilities (recommended for new users)",
+    "minimal": "Safety + Tools — lightweight, no AI planning or memory",
+    "chat": "No modules — direct LLM chat, no tools or features",
     "custom": "Choose modules manually",
 }
 
@@ -230,7 +215,7 @@ def interactive_setup() -> dict:
         # Step 2: Persona role
         console.print("\n[bold]Step 2:[/bold] Choose persona role\n")
         console.print("  [cyan]*[/cyan] [bold]1[/bold]. user — Standard access")
-        console.print("    [bold]2[/bold]. admin — Full access (includes execute_command)")
+        console.print("    [bold]2[/bold]. admin — Full access (can run system commands)")
         console.print()
 
         role_choice = _ask_choice("Select role", ["1", "2"], default="1")
@@ -262,10 +247,11 @@ def _pick_modules() -> list[str]:
     selected = []
     console.print()
 
-    for group_name, modules in MODULE_GROUPS.items():
+    for group_name, mod_names in MODULE_GROUPS.items():
         console.print(f"\n  [bold cyan]{group_name}[/bold cyan]")
-        for mod_name, mod_desc in modules:
-            yes = _ask_confirm(f"    Load {mod_name} ({mod_desc})?")
+        for mod_name in mod_names:
+            desc = MODULE_DESCRIPTIONS.get(mod_name, mod_name)
+            yes = _ask_confirm(f"    Load {desc}?")
             if yes:
                 selected.append(mod_name)
 
@@ -304,12 +290,15 @@ def build_agent(setup: dict):
         except Exception as e:
             console.print(f"[yellow]Failed to save persona: {e}[/yellow]")
 
-    agent = LlamAgent(config, persona=persona)
-
     # Load modules
     module_names = setup["modules"]
     if module_names is None:
         module_names = list(AVAILABLE_MODULES.keys())
+
+    # Apply smart defaults for selected modules before building agent
+    apply_presets(config, module_names)
+
+    agent = LlamAgent(config, persona=persona)
 
     if module_names:
         console.print(f"\n[dim]Loading modules...[/dim]")
@@ -323,6 +312,30 @@ def build_agent(setup: dict):
 
     console.print(f"\n[green]Agent ready![/green] Model: {config.model} | "
                   f"Role: {persona.role} | Modules: {len(agent.modules)}\n")
+
+    # Capability summary (C5)
+    capabilities = []
+    if agent.has_module("memory"):
+        capabilities.append("remember facts across conversations")
+    if agent.has_module("tools"):
+        capabilities.append("use tools")
+    if agent.has_module("planning"):
+        capabilities.append("plan complex tasks")
+    if agent.has_module("skill"):
+        skill_mod = agent.get_module("skill")
+        try:
+            count = len(skill_mod.list_skills()) if skill_mod else 0
+        except Exception:
+            count = 0
+        if count:
+            capabilities.append(f"follow {count} skill guides")
+    if capabilities:
+        console.print(f"[dim]Capabilities: {', '.join(capabilities)}. Type /help for commands.[/dim]")
+
+    # Conversation restore hint (C5)
+    turns = sum(1 for m in agent.history if m.get("role") == "user")
+    if turns:
+        console.print(f"[dim]Restored {turns} turns from previous session. Type /clear to start fresh.[/dim]")
 
     return agent
 
@@ -365,6 +378,25 @@ class LlamAgentCLI:
 
         self.agent.confirm_handler = _cli_confirm_handler
 
+        # Set up interaction_handler for ask_user tool (C1)
+        from llamagent.modules.tools.interaction import UserInteractionHandler
+
+        class _CLIInteractionHandler(UserInteractionHandler):
+            def ask(self, question, choices=None):
+                console.print(f"\n[yellow]Agent asks:[/yellow] {question}")
+                if choices:
+                    for i, c in enumerate(choices, 1):
+                        console.print(f"  [bold]{i}[/bold]. {c}")
+                    val = _ask("Select", default="1")
+                    try:
+                        idx = int(val) - 1
+                        return choices[idx] if 0 <= idx < len(choices) else val
+                    except (ValueError, IndexError):
+                        return val
+                return _ask("Your answer")
+
+        self.agent.interaction_handler = _CLIInteractionHandler()
+
         # Slash command mapping (commands with args handled separately)
         self._slash_commands = {
             "/quit": self._cmd_quit,
@@ -375,7 +407,13 @@ class LlamAgentCLI:
             "/modules": self._cmd_modules,
             "/clear": self._cmd_clear,
             "/abort": self._cmd_abort,
+            "/stop": self._cmd_stop,
+            "/skills": self._cmd_skills,
+            "/memory": self._cmd_memory,
         }
+
+        # Tab completion for slash commands (C4)
+        self._setup_readline()
 
     # ============================================================
     # Interactive chat mode (main loop)
@@ -426,7 +464,7 @@ class LlamAgentCLI:
 
             except KeyboardInterrupt:
                 # Ctrl+C: exit current agent, return to setup
-                console.print("\n\n[dim]Exiting current agent...[/dim]")
+                console.print("\n\n[dim]Leaving current agent. Returning to setup...[/dim]")
                 return "restart"
             except EOFError:
                 return "quit"
@@ -514,6 +552,20 @@ class LlamAgentCLI:
 
     def _cmd_help(self):
         """Display help information."""
+        commands = [
+            ("/help", "Show this help message"),
+            ("/mode [name]", "Show/switch mode (interactive, task, continuous)"),
+            ("/abort", "Cancel the current task"),
+            ("/stop", "Stop the background runner"),
+            ("/status", "View Agent runtime status"),
+            ("/modules", "View loaded modules"),
+            ("/skills", "List loaded skills"),
+            ("/memory", "Show stored facts and memory usage"),
+            ("/clear", "Start a fresh conversation"),
+            ("/quit", "Exit the conversation (also: /exit, /q)"),
+            ("Ctrl+C", "Exit current agent, return to setup"),
+        ]
+
         if HAS_RICH:
             help_table = Table(
                 title="Available Commands",
@@ -523,33 +575,16 @@ class LlamAgentCLI:
             help_table.add_column("Command", style="cyan", width=20)
             help_table.add_column("Description", style="white")
 
-            commands = [
-                ("/help", "Show this help message"),
-                ("/mode [name]", "Show/switch mode (interactive, task, continuous)"),
-                ("/abort", "Abort the current task"),
-                ("/status", "View Agent runtime status"),
-                ("/modules", "View loaded modules"),
-                ("/clear", "Clear conversation history"),
-                ("/quit", "Exit the conversation (also: /exit, /q)"),
-                ("Ctrl+C", "Exit current agent, return to setup"),
-            ]
             for cmd, desc in commands:
                 help_table.add_row(cmd, desc)
 
             console.print()
             console.print(help_table)
         else:
-            print(
-                "\nAvailable Commands:\n"
-                "  /help          Show help\n"
-                "  /mode [name]   Show/switch mode (interactive, task, continuous)\n"
-                "  /abort         Abort the current task\n"
-                "  /status        View Agent status\n"
-                "  /modules       View loaded modules\n"
-                "  /clear         Clear conversation history\n"
-                "  /quit          Exit\n"
-                "  Ctrl+C         Exit current agent, return to setup\n"
-            )
+            print("\nAvailable Commands:")
+            for cmd, desc in commands:
+                print(f"  {cmd:<16} {desc}")
+            print()
 
     def _cmd_status(self):
         """Display Agent status."""
@@ -623,20 +658,27 @@ class LlamAgentCLI:
     def _cmd_abort(self):
         """Abort the current task."""
         self.agent.abort()
-        console.print("[yellow]Abort signal sent[/yellow]")
+        console.print("[yellow]Abort requested. The current task will stop shortly.[/yellow]")
 
     def _cmd_mode(self, arg: str):
-        """Switch or display agent mode."""
+        """Switch or display agent mode. Selection-based when no argument given."""
         if not arg:
-            # Display current mode and config
-            mode = self.agent.mode
-            config = self.agent.config
-            console.print(f"\n[bold]Current mode:[/bold] [cyan]{mode}[/cyan]")
-            console.print(f"  max_react_steps:      {config.max_react_steps}")
-            console.print(f"  max_duplicate_actions: {config.max_duplicate_actions}")
-            console.print(f"  react_timeout:        {config.react_timeout}")
-            console.print(f"  max_observation_tokens: {config.max_observation_tokens}")
-            return
+            console.print(f"\n  Current mode: [cyan]{self.agent.mode}[/cyan]\n")
+            modes = ["interactive", "task", "continuous"]
+            descs = {
+                "interactive": "Normal back-and-forth chat",
+                "task": "Plan first, confirm, then execute",
+                "continuous": "Automated triggers with optional manual input",
+            }
+            for i, m in enumerate(modes, 1):
+                marker = "[cyan]*[/cyan]" if m == self.agent.mode else " "
+                console.print(f"  {marker} [bold]{i}[/bold]. {m} -- {descs[m]}")
+            console.print()
+            choice = _ask_choice("Select mode", ["1", "2", "3"], default="1")
+            arg = modes[int(choice) - 1]
+            if arg == self.agent.mode:
+                console.print(f"[dim]Already in {arg} mode[/dim]")
+                return
 
         target = arg.strip().lower()
         if target not in ("interactive", "task", "continuous"):
@@ -653,18 +695,20 @@ class LlamAgentCLI:
             console.print(f"[red]Cannot switch mode: {e}[/red]")
 
     def _start_continuous(self):
-        """Configure triggers and run ContinuousRunner (blocks until Ctrl+C)."""
+        """Configure triggers and run ContinuousRunner with background monitor + inject loop."""
         from llamagent.core.runner import ContinuousRunner, TimerTrigger, FileTrigger
+        import threading
 
+        # Selection-based trigger configuration
         console.print("\n[bold]Continuous Mode Setup[/bold]\n")
-        console.print("  [bold]1[/bold]. Timer — run a fixed task at regular intervals")
-        console.print("  [bold]2[/bold]. File  — watch a directory for new files")
-        trigger_choice = _ask_choice("Select trigger type", ["1", "2"], default="1")
+        console.print("  [bold]1[/bold]. Timer -- Run a task on a schedule (e.g., every 60 seconds)")
+        console.print("  [bold]2[/bold]. File  -- Trigger when new files appear in a directory")
+        trigger_choice = _ask_choice("Select trigger", ["1", "2"], default="1")
 
         triggers = []
         if trigger_choice == "1":
-            interval = _ask("Interval in seconds", default="60")
-            message = _ask("Task message", default="check system status")
+            interval = _ask("Interval seconds", default="60")
+            message = _ask("What should the agent do each time?", default="check status")
             try:
                 triggers.append(TimerTrigger(interval=float(interval), message=message))
             except ValueError:
@@ -680,24 +724,143 @@ class LlamAgentCLI:
             console.print(f"[red]Cannot switch mode: {e}[/red]")
             return
 
+        # Auto-approve during continuous mode to avoid stdin conflict
+        from llamagent.core.zone import ConfirmResponse
+        saved_handler = self.agent.confirm_handler
+        self.agent.confirm_handler = lambda req: ConfirmResponse(allow=True)
+
         runner = ContinuousRunner(self.agent, triggers, poll_interval=1.0)
         self._runner = runner
 
-        console.print(f"\n[green]Continuous mode started. Press Ctrl+C to stop.[/green]\n")
-        try:
-            runner.run()
-        except KeyboardInterrupt:
-            runner.stop()
-            console.print("\n[yellow]Continuous mode stopped[/yellow]")
-        finally:
-            self._runner = None
+        # Runner background thread
+        runner_thread = threading.Thread(target=runner.run, daemon=True)
+        runner_thread.start()
+
+        # Monitor thread: outputs background task results
+        seen_count = [0]
+        def _monitor():
+            while not runner._stopped.is_set():
+                log = runner.get_log()
+                for entry in log[seen_count[0]:]:
+                    status_mark = "[green]OK[/green]" if entry.status == "completed" else f"[red]{entry.status}[/red]"
+                    console.print(f"\n  [dim][{entry.trigger_type}][/dim] {entry.input[:60]} -> {status_mark} ({entry.duration:.1f}s)")
+                seen_count[0] = len(log)
+                runner._stopped.wait(2)
+
+        monitor_thread = threading.Thread(target=_monitor, daemon=True)
+        monitor_thread.start()
+
+        console.print(f"\n[green]Continuous mode active. You can still type messages. Use /stop to end.[/green]\n")
+
+        # Main thread: accept inject input
+        while True:
             try:
-                self.agent.set_mode("interactive")
-                console.print("[green]Switched back to interactive mode[/green]")
-            except Exception:
-                pass
+                user_input = input("\nYou: ").strip()
+                if not user_input:
+                    continue
+                if user_input == "/stop":
+                    break
+                try:
+                    response = runner.inject(user_input)
+                    self._display_response(response)
+                except RuntimeError as e:
+                    console.print(f"[red]{e}[/red]")
+                    break
+            except (KeyboardInterrupt, EOFError):
+                break
+
+        # Cleanup
+        runner.stop()
+        runner_thread.join(timeout=5)
+        self._runner = None
+        self.agent.confirm_handler = saved_handler
+        try:
+            self.agent.set_mode("interactive")
+            console.print("[green]Switched back to interactive mode[/green]")
+        except Exception:
+            pass
 
         return "continuous_done"
+
+    def _cmd_stop(self):
+        """Stop the continuous mode runner."""
+        if self._runner:
+            self._runner.stop()
+            console.print("[yellow]Stop signal sent to continuous runner[/yellow]")
+        else:
+            console.print("[dim]No active continuous runner[/dim]")
+
+    def _cmd_skills(self):
+        """List loaded skills."""
+        if not self.agent.has_module("skill"):
+            console.print("[dim]Skill module is not loaded[/dim]")
+            return
+
+        skill_mod = self.agent.get_module("skill")
+        skills = skill_mod.list_skills() if skill_mod else []
+        if not skills:
+            console.print("[dim]No skills available[/dim]")
+            return
+
+        if HAS_RICH:
+            table = Table(
+                title="Available Skills",
+                show_header=True,
+                header_style="bold cyan",
+            )
+            table.add_column("#", style="dim", width=4)
+            table.add_column("Skill", style="cyan")
+            table.add_column("Description", style="white")
+
+            for i, s in enumerate(skills, 1):
+                name = s.get("name", "unnamed") if isinstance(s, dict) else str(s)
+                desc = s.get("description", "") if isinstance(s, dict) else ""
+                table.add_row(str(i), name, desc)
+
+            console.print()
+            console.print(table)
+        else:
+            print("\nAvailable Skills:")
+            for s in skills:
+                name = s.get("name", "unnamed") if isinstance(s, dict) else str(s)
+                print(f"  - {name}")
+            print()
+
+    def _cmd_memory(self):
+        """Show memory statistics."""
+        if not self.agent.has_module("memory"):
+            console.print("[dim]Memory module is not loaded[/dim]")
+            return
+
+        memory_mod = self.agent.get_module("memory")
+        if not memory_mod:
+            console.print("[dim]Memory module is not available[/dim]")
+            return
+
+        # Try to get stats from the memory store
+        try:
+            store = getattr(memory_mod, "store", None)
+            if store and hasattr(store, "count"):
+                count = store.count()
+                console.print(f"\n[bold]Memory Statistics[/bold]")
+                console.print(f"  Stored facts: {count}")
+            else:
+                console.print(f"\n[bold]Memory[/bold]: module loaded, mode={self.agent.config.memory_mode}")
+        except Exception:
+            console.print(f"\n[bold]Memory[/bold]: module loaded, mode={self.agent.config.memory_mode}")
+
+    def _setup_readline(self):
+        """Set up tab completion for slash commands. Wrapped in try/except for portability."""
+        try:
+            import readline
+            commands = list(self._slash_commands.keys()) + ["/mode"]
+            def completer(text, state):
+                matches = [c for c in commands if c.startswith(text)]
+                return matches[state] if state < len(matches) else None
+            readline.set_completer(completer)
+            readline.parse_and_bind("tab: complete")
+        except (ImportError, Exception):
+            pass  # readline not available on all platforms
 
 
 # ============================================================

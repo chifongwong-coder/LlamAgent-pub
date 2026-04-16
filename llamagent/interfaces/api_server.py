@@ -22,6 +22,7 @@ import os
 import time
 import asyncio
 import logging
+import threading
 from collections import OrderedDict
 
 # FastAPI and related dependencies: optional install
@@ -65,6 +66,9 @@ MAX_SESSIONS = 100
 # Session storage and rate limit counters
 agent_sessions: OrderedDict = OrderedDict()
 rate_limit_store: dict[str, list[float]] = {}
+
+# Active ContinuousRunner instances per session
+runner_sessions: dict[str, tuple] = {}  # sid -> (ContinuousRunner, threading.Thread)
 
 # Auth token (configured via environment variable, empty string = dev mode, no auth)
 API_AUTH_TOKEN = os.getenv("API_AUTH_TOKEN", "")
@@ -151,10 +155,77 @@ if HAS_FASTAPI:
         success: bool = Field(description="Whether abort signal was sent")
         message: str = Field(description="Status message")
 
+    class RunnerStartRequest(BaseModel):
+        """Runner start request"""
+        trigger_type: str = Field(
+            default="timer",
+            description="Trigger type: 'timer' or 'file'",
+            examples=["timer"],
+        )
+        interval: float = Field(
+            default=60,
+            description="Timer interval in seconds (used when trigger_type='timer')",
+        )
+        message: str = Field(
+            default="check status",
+            description="Task message for timer trigger",
+        )
+        watch_dir: str = Field(
+            default=".",
+            description="Directory to watch (used when trigger_type='file')",
+        )
+        session_id: Optional[str] = Field(
+            default=None,
+            description="Session ID. If omitted, the default session is used",
+        )
+
+    class RunnerStatusResponse(BaseModel):
+        """Runner status response"""
+        active: bool = Field(description="Whether a runner is active")
+        tasks_completed: int = Field(description="Number of tasks completed")
+        session_id: str = Field(description="Session ID")
+
+    class InjectRequest(BaseModel):
+        """Inject message request"""
+        message: str = Field(
+            ...,
+            min_length=1,
+            max_length=10000,
+            description="Message to inject into the running agent",
+        )
+        session_id: Optional[str] = Field(
+            default=None,
+            description="Session ID. If omitted, the default session is used",
+        )
+
+    class InjectResponse(BaseModel):
+        """Inject response"""
+        reply: str = Field(description="Agent's reply to the injected message")
+        session_id: str = Field(description="Session ID")
+
+    class RunnerLogEntry(BaseModel):
+        """Single runner log entry"""
+        input: str = Field(description="Task input")
+        output: str = Field(description="Task output")
+        status: str = Field(description="Task status: completed or error")
+        duration: float = Field(description="Task duration in seconds")
+
+    class RunnerLogResponse(BaseModel):
+        """Runner log response"""
+        entries: list[RunnerLogEntry] = Field(description="Log entries")
+        session_id: str = Field(description="Session ID")
+
 
 # ============================================================
 # Helper functions
 # ============================================================
+
+def _make_trigger(request):
+    """Create a trigger from a RunnerStartRequest."""
+    from llamagent.core.runner import TimerTrigger, FileTrigger
+    if request.trigger_type == "file":
+        return FileTrigger(request.watch_dir)
+    return TimerTrigger(interval=request.interval, message=request.message)
 
 def _get_agent(session_id: str | None = None):
     """
@@ -184,7 +255,20 @@ def _get_agent(session_id: str | None = None):
 
     # Evict the oldest session
     while len(agent_sessions) > MAX_SESSIONS:
-        evicted_sid, _ = agent_sessions.popitem(last=False)
+        evicted_sid, evicted_agent = agent_sessions.popitem(last=False)
+        # Stop runner if active for the evicted session
+        evicted_entry = runner_sessions.pop(evicted_sid, None)
+        if evicted_entry:
+            evicted_runner, _ = evicted_entry
+            try:
+                evicted_runner.stop()
+            except Exception as e:
+                logger.error("Failed to stop runner for evicted session=%s: %s", evicted_sid, e)
+        # Shutdown agent (fires on_shutdown hooks: persistence save, cleanup, etc.)
+        try:
+            evicted_agent.shutdown()
+        except Exception as e:
+            logger.error("Failed to shutdown evicted agent session=%s: %s", evicted_sid, e)
         logger.info("LRU evicted expired session: session=%s", evicted_sid)
 
     return new_agent
@@ -217,12 +301,43 @@ def create_api_server(
             "Then try again."
         )
 
-    from llamagent.main import create_agent, AVAILABLE_MODULES
+    from llamagent.core import LlamAgent, Config
+    from llamagent.main import load_module, AVAILABLE_MODULES
     from llamagent.core.zone import ConfirmResponse
+    from llamagent.interfaces.presets import apply_presets
 
     # Set the Agent factory function for _get_agent() to use when creating new sessions
     def _factory():
-        agent = create_agent(module_names, persona_name=persona_name)
+        config = Config()
+
+        # Determine modules to load
+        names = module_names if module_names is not None else list(AVAILABLE_MODULES.keys())
+
+        # Apply presets BEFORE module registration (modules read config in on_attach)
+        apply_presets(config, names)
+
+        # Load persona if specified
+        persona = None
+        if persona_name:
+            from llamagent.core import PersonaManager
+            try:
+                manager = PersonaManager(config.persona_file)
+                persona = manager.get(persona_name)
+                if not persona:
+                    for p in manager.list():
+                        if p.name == persona_name:
+                            persona = p
+                            break
+            except Exception:
+                pass
+
+        agent = LlamAgent(config, persona=persona)
+
+        for name in names:
+            mod = load_module(name)
+            if mod:
+                agent.register_module(mod)
+
         # Auto-approve for API server (callers manage authorization via contract flow)
         agent.confirm_handler = lambda req: ConfirmResponse(allow=True)
         return agent
@@ -252,6 +367,16 @@ def create_api_server(
 
         # Shutdown phase
         logger.info("LlamAgent API server shutting down...")
+
+        # Stop all active runners first (runners call agent.chat, so stop before agent shutdown)
+        for sid, (runner, thread) in list(runner_sessions.items()):
+            try:
+                runner.stop()
+                thread.join(timeout=5)
+            except Exception as e:
+                logger.error("Failed to stop runner for session=%s: %s", sid, e)
+        runner_sessions.clear()
+
         for sid, agent in agent_sessions.items():
             try:
                 agent.shutdown()
@@ -278,6 +403,11 @@ def create_api_server(
             "- POST /mode — Switch agent mode\n"
             "- GET /mode — Get current mode\n"
             "- POST /abort — Abort current task\n"
+            "- POST /runner/start — Start continuous mode runner\n"
+            "- POST /runner/stop — Stop continuous mode runner\n"
+            "- GET /runner/status — Runner status\n"
+            "- GET /runner/log — Runner task log\n"
+            "- POST /inject — Inject message into running agent\n"
             "- WebSocket /ws/chat — Streaming chat\n"
         ),
         version=__version__,
@@ -494,7 +624,7 @@ def create_api_server(
         response_model=ModeResponse,
         tags=["Mode"],
         summary="Switch agent mode",
-        description="Switch the agent's authorization mode. Supported: interactive, task. Continuous mode is not supported via API (use ContinuousRunner directly).",
+        description="Switch the agent's authorization mode. Supported: interactive, task, continuous. For continuous mode, use POST /runner/start instead.",
     )
     async def set_mode(
         request: ModeRequest,
@@ -503,10 +633,10 @@ def create_api_server(
         """Switch agent mode."""
         if request.mode == "continuous":
             raise HTTPException(
-                status_code=501,
+                status_code=400,
                 detail={
-                    "error": "not_implemented",
-                    "message": "Continuous mode is not supported via API. Use ContinuousRunner directly.",
+                    "error": "use_runner_endpoint",
+                    "message": "For continuous mode, use POST /runner/start which handles mode switching and trigger setup automatically.",
                 }
             )
 
@@ -569,7 +699,175 @@ def create_api_server(
         agent.abort()
         return AbortResponse(success=True, message="Abort signal sent")
 
-    # ---- 7. File upload endpoint ----
+    # ---- 7. Runner endpoints (continuous mode) ----
+
+    @app.post(
+        "/runner/start",
+        tags=["Continuous"],
+        summary="Start continuous mode runner",
+        description="Switch to continuous mode and start a runner with the specified trigger. Auto-approves authorization prompts.",
+    )
+    async def start_runner(
+        request: RunnerStartRequest,
+        token: str = Depends(verify_token),
+    ):
+        """Start a ContinuousRunner with a trigger."""
+        from llamagent.core.runner import ContinuousRunner
+
+        sid = request.session_id or "default"
+        agent = _get_agent(sid)
+
+        if sid in runner_sessions:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "runner_already_active", "message": "Runner already active for this session. Stop it first."},
+            )
+
+        # Switch to continuous mode
+        try:
+            await asyncio.to_thread(agent.set_mode, "continuous")
+        except (ValueError, RuntimeError) as e:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "mode_switch_failed", "message": str(e)},
+            )
+
+        trigger = _make_trigger(request)
+        runner = ContinuousRunner(agent, [trigger], poll_interval=1.0)
+
+        runner_thread = threading.Thread(target=runner.run, daemon=True)
+        runner_thread.start()
+
+        runner_sessions[sid] = (runner, runner_thread)
+        return {"status": "started", "session_id": sid}
+
+    @app.post(
+        "/runner/stop",
+        tags=["Continuous"],
+        summary="Stop continuous mode runner",
+        description="Stop the active runner and switch back to interactive mode.",
+    )
+    async def stop_runner(
+        session_id: str | None = None,
+        token: str = Depends(verify_token),
+    ):
+        """Stop the ContinuousRunner for a session."""
+        sid = session_id or "default"
+        entry = runner_sessions.pop(sid, None)
+        if not entry:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "no_active_runner", "message": "No active runner for this session"},
+            )
+
+        runner, thread = entry
+        runner.stop()
+        thread.join(timeout=5)
+
+        tasks_completed = len(runner.get_log())
+
+        # Switch back to interactive mode
+        agent = _get_agent(sid)
+        try:
+            await asyncio.to_thread(agent.set_mode, "interactive")
+        except Exception:
+            pass  # Best effort
+
+        return {"status": "stopped", "tasks_completed": tasks_completed, "session_id": sid}
+
+    @app.post(
+        "/inject",
+        response_model=InjectResponse,
+        tags=["Continuous"],
+        summary="Inject a message into running agent",
+        description="Send a message to the agent while a continuous runner is active. The runner pauses to handle the injected message.",
+    )
+    async def inject_message(
+        request: InjectRequest,
+        token: str = Depends(verify_token),
+    ):
+        """Inject a message into the active runner."""
+        sid = request.session_id or "default"
+        entry = runner_sessions.get(sid)
+        if not entry:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "no_active_runner", "message": "No active runner for this session"},
+            )
+
+        runner, _ = entry
+        try:
+            reply = await asyncio.to_thread(runner.inject, request.message)
+        except RuntimeError as e:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "inject_failed", "message": str(e)},
+            )
+
+        return InjectResponse(reply=reply, session_id=sid)
+
+    @app.get(
+        "/runner/status",
+        response_model=RunnerStatusResponse,
+        tags=["Continuous"],
+        summary="Get runner status",
+        description="Check whether a continuous runner is active and how many tasks have been completed.",
+    )
+    async def get_runner_status(
+        session_id: str | None = None,
+        token: str = Depends(verify_token),
+    ):
+        """Get the status of the runner for a session."""
+        sid = session_id or "default"
+        entry = runner_sessions.get(sid)
+        if entry:
+            runner, _ = entry
+            return RunnerStatusResponse(
+                active=True,
+                tasks_completed=len(runner.get_log()),
+                session_id=sid,
+            )
+        return RunnerStatusResponse(
+            active=False,
+            tasks_completed=0,
+            session_id=sid,
+        )
+
+    @app.get(
+        "/runner/log",
+        response_model=RunnerLogResponse,
+        tags=["Continuous"],
+        summary="Get runner task log",
+        description="Get the last N task log entries from the active runner.",
+    )
+    async def get_runner_log(
+        session_id: str | None = None,
+        limit: int = 50,
+        token: str = Depends(verify_token),
+    ):
+        """Get task log entries from the runner."""
+        sid = session_id or "default"
+        entry = runner_sessions.get(sid)
+        if not entry:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "no_active_runner", "message": "No active runner for this session"},
+            )
+
+        runner, _ = entry
+        log = runner.get_log()[-limit:]
+        entries = [
+            RunnerLogEntry(
+                input=e.input,
+                output=e.output,
+                status=e.status,
+                duration=round(e.duration, 2),
+            )
+            for e in log
+        ]
+        return RunnerLogResponse(entries=entries, session_id=sid)
+
+    # ---- 8. File upload endpoint ----
 
     @app.post(
         "/upload",
