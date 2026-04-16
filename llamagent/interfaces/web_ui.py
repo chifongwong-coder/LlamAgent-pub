@@ -21,19 +21,15 @@ except ImportError:
 
 
 # ============================================================
-# Module definitions for config panel
+# Module definitions for config panel (from shared presets)
 # ============================================================
 
+from llamagent.interfaces.presets import MODULE_DESCRIPTIONS, MODULE_GROUPS, apply_presets
+
 MODULE_OPTIONS = [
-    ("safety", "Safety — Input filtering + output sanitization"),
-    ("tools", "Tools — Four-tier tool system + built-ins"),
-    ("sandbox", "Sandbox — Isolated execution for high-risk tools"),
-    ("planning", "Planning — PlanReAct task decomposition"),
-    ("reflection", "Reflection — Quality evaluation + lessons"),
-    ("retrieval", "Retrieval — Knowledge retrieval over documents"),
-    ("memory", "Memory — Persistent memory with recall"),
-    ("child_agent", "Child Agent — Constrained sub-agents"),
-    ("mcp", "MCP — Model Context Protocol bridge"),
+    (name, MODULE_DESCRIPTIONS.get(name, name))
+    for group in MODULE_GROUPS.values()
+    for name in group
 ]
 
 DEFAULT_MODULES = [m[0] for m in MODULE_OPTIONS]
@@ -94,6 +90,10 @@ def _build_agent(modules_list, role, persona_name, persona_desc, mode="interacti
     from llamagent.main import load_module
 
     config = Config()
+
+    # Apply smart defaults for selected modules before building agent
+    apply_presets(config, modules_list)
+
     persona = Persona(name=persona_name, role_description=persona_desc, role=role)
     agent = LlamAgent(config, persona=persona)
 
@@ -197,8 +197,8 @@ def create_web_ui() -> "gr.Blocks":
 
             # Show continuous panel only for continuous mode
             show_continuous = mode == "continuous"
-            # In continuous mode, disable chat input (runner drives chat)
-            chat_interactive = mode != "continuous"
+            # Chat input is always enabled: in continuous mode, input routes to inject
+            chat_interactive = True
 
             return (
                 gr.update(interactive=chat_interactive),
@@ -216,7 +216,7 @@ def create_web_ui() -> "gr.Blocks":
             )
 
     def chat_respond(message, history):
-        """Handle chat messages with streaming support."""
+        """Handle chat messages with streaming support. Routes to inject in continuous mode."""
         if not message.strip():
             yield history or [], ""
             return
@@ -225,6 +225,19 @@ def create_web_ui() -> "gr.Blocks":
         if agent is None:
             history = history or []
             history.append({"role": "assistant", "content": "Please build an agent first using the configuration panel above."})
+            yield history, ""
+            return
+
+        # W1: Continuous mode -- route to runner.inject()
+        runner = runner_state.get("runner")
+        if runner and not runner._stopped.is_set():
+            try:
+                response = runner.inject(message)
+            except Exception as e:
+                response = f"Error: {e}"
+            history = history or []
+            history.append({"role": "user", "content": message})
+            history.append({"role": "assistant", "content": response})
             yield history, ""
             return
 

@@ -219,10 +219,14 @@ def create_api_server(
 
     from llamagent.main import create_agent, AVAILABLE_MODULES
     from llamagent.core.zone import ConfirmResponse
+    from llamagent.interfaces.presets import apply_presets
 
     # Set the Agent factory function for _get_agent() to use when creating new sessions
     def _factory():
         agent = create_agent(module_names, persona_name=persona_name)
+        # Apply smart defaults for loaded modules
+        loaded = list(agent.modules.keys())
+        apply_presets(agent.config, loaded)
         # Auto-approve for API server (callers manage authorization via contract flow)
         agent.confirm_handler = lambda req: ConfirmResponse(allow=True)
         return agent
