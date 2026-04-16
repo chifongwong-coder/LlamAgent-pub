@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 
 # Rich library: makes terminal output beautiful (colors, tables, panels, progress bars)
@@ -146,7 +147,28 @@ def _load_saved_personas() -> list:
         return []
 
 
-def interactive_setup() -> dict:
+def _check_environment() -> list[str]:
+    """Check environment before setup. Returns list of warnings."""
+    warnings = []
+
+    from llamagent.core.config import Config
+    config = Config()
+
+    # Skip API key check for Ollama models (they don't need API keys)
+    if not config.model.startswith("ollama"):
+        key_vars = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OLLAMA_HOST"]
+        has_key = any(os.environ.get(v) for v in key_vars)
+        if not has_key:
+            warnings.append(
+                "No LLM API key detected. Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, "
+                "or configure OLLAMA_HOST for local models.\n"
+                "  Example: export OPENAI_API_KEY=sk-..."
+            )
+
+    return warnings
+
+
+def interactive_setup() -> dict | None:
     """
     Interactive configuration menu. Returns a dict with:
         modules: list[str] | None
@@ -154,7 +176,18 @@ def interactive_setup() -> dict:
         persona_role: str ("admin" | "user")
         persona_desc: str
         save_persona: bool
+
+    Returns None if the user decides not to continue after environment warnings.
     """
+    # Environment check
+    warnings = _check_environment()
+    if warnings:
+        console.print("\n[yellow]Environment warnings:[/yellow]")
+        for w in warnings:
+            console.print(f"  [yellow]! {w}[/yellow]")
+        if not _ask_confirm("\nContinue anyway?"):
+            return None
+
     console.print("\n[bold cyan]--- Agent Setup ---[/bold cyan]\n")
 
     # Step 0: Check for saved personas
@@ -511,7 +544,12 @@ class LlamAgentCLI:
 
         except Exception as e:
             console.print(f"\n[red]Error: {e}[/red]")
-            console.print("[dim]Please try again, or type /help for assistance[/dim]")
+            error_msg = str(e).lower()
+            hint = self._get_error_hint(e, error_msg)
+            if hint:
+                console.print(f"[yellow]Hint: {hint}[/yellow]")
+            else:
+                console.print("[dim]Try again, or type /help for available commands.[/dim]")
 
     def _display_response(self, response: str):
         """Render Agent response with Rich Panel + Markdown, or plain text."""
@@ -540,6 +578,22 @@ class LlamAgentCLI:
                 print(f"{'=' * 50}\n")
             else:
                 print(f"\nLlamAgent: {response}\n")
+
+    def _get_error_hint(self, error: Exception, error_msg: str) -> str | None:
+        """Return a user-friendly recovery hint based on error type."""
+        if "api key" in error_msg or "authentication" in error_msg or "401" in error_msg:
+            return "Your API key may be invalid or expired. Check your OPENAI_API_KEY or ANTHROPIC_API_KEY environment variable."
+        if "rate limit" in error_msg or "429" in error_msg:
+            return "You've hit a rate limit. Wait a moment and try again, or switch to a different model."
+        if "context" in error_msg and ("length" in error_msg or "window" in error_msg):
+            return "The conversation is too long. Try /clear to start fresh, or enable the compression module."
+        if "timeout" in error_msg:
+            return "The request timed out. Try a simpler question, or increase react_timeout in config."
+        if "connection" in error_msg or "network" in error_msg:
+            return "Network error. Check your internet connection and try again."
+        if "model" in error_msg and ("not found" in error_msg or "does not exist" in error_msg):
+            return "The configured model was not found. Check your model name in config.yaml (e.g., 'openai/gpt-4o')."
+        return None
 
     # ============================================================
     # Slash command implementations
@@ -895,6 +949,11 @@ Examples:
     subparsers.add_parser("chat", help="Enter interactive chat mode")
     ask_parser = subparsers.add_parser("ask", help="Ask a single question")
     ask_parser.add_argument("question", help="The question to ask")
+    ask_parser.add_argument(
+        "--format", type=str, choices=["text", "json"], default="text",
+        dest="output_format",
+        help="Output format (default: text)",
+    )
 
     return parser
 
@@ -929,7 +988,12 @@ def main():
 
         try:
             if args.command == "ask":
-                cli.ask(args.question)
+                if getattr(args, 'output_format', 'text') == 'json':
+                    import json
+                    response = agent.chat(args.question)
+                    print(json.dumps({"reply": response, "model": agent.config.model}))
+                else:
+                    cli.ask(args.question)
             else:
                 cli.chat_mode()
         finally:
@@ -945,9 +1009,14 @@ def main():
             "persona_desc": "A helpful AI assistant",
         }
         agent = build_agent(setup)
-        cli = LlamAgentCLI(agent)
         try:
-            cli.ask(args.question)
+            if getattr(args, 'output_format', 'text') == 'json':
+                import json
+                response = agent.chat(args.question)
+                print(json.dumps({"reply": response, "model": agent.config.model}))
+            else:
+                cli = LlamAgentCLI(agent)
+                cli.ask(args.question)
         finally:
             agent.shutdown()
         return
@@ -961,6 +1030,9 @@ def main():
         except KeyboardInterrupt:
             console.print("\n\n[bold cyan]Goodbye![/bold cyan]")
             break
+
+        if setup is None:
+            continue
 
         try:
             agent = build_agent(setup)
