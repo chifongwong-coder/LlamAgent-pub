@@ -90,6 +90,7 @@ _YAML_MAP = [
     (("reflection", "write_mode"), "reflection_write_mode", str),
     (("reflection", "read_mode"), "reflection_read_mode", str),
     (("reflection", "score_threshold"), "reflection_score_threshold", float),
+    (("reflection", "skill_improve_threshold"), "skill_improve_threshold", int),
     (("reflection_backend",), "reflection_backend", str),
     (("reflection_fs_dir",), "reflection_fs_dir", str),
     (("safety", "permission_level"), "permission_level", int),
@@ -222,6 +223,7 @@ class Config:
         self.reflection_backend: str = "rag"
         self.reflection_fs_dir: str | None = None
         self.reflection_score_threshold: float = 7.0
+        self.skill_improve_threshold: int = 3
 
         # Safety
         self.permission_level: int = 1

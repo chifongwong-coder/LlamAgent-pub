@@ -217,6 +217,7 @@ class LessonStore:
         root_cause: str,
         improvement: str | None = None,
         tags: list[str] | None = None,
+        related_skill: str | None = None,
     ) -> None:
         """
         Save a lesson.
@@ -227,6 +228,7 @@ class LessonStore:
             root_cause:        Root cause
             improvement:       Improvement strategy (empty means no effective improvement available)
             tags:              Tag list
+            related_skill:     Name of the skill that was active when the lesson was learned
         """
         if not self._available:
             logger.debug("Lesson store unavailable, skipping save")
@@ -251,6 +253,8 @@ class LessonStore:
             "tags": json.dumps(tags or [], ensure_ascii=False),
             "created_at": datetime.now().isoformat(),
         }
+        if related_skill:
+            metadata["related_skill"] = related_skill
 
         try:
             self._pipeline.save(lesson_id, lesson_text, metadata)
@@ -392,3 +396,54 @@ class LessonStore:
         except Exception as e:
             logger.warning("Failed to delete lesson '%s': %s", lesson_id, e)
             return False
+
+    def get_lessons_by_skill(self, skill_name: str) -> list[dict]:
+        """Return all lessons related to a specific skill.
+
+        Searches by the related_skill metadata field. Returns lessons in the
+        same format as search_lessons().
+        """
+        if not self._available:
+            return []
+
+        try:
+            # Use get_all with metadata filter for reliable retrieval
+            results = self._pipeline.vector.get_all(where={"related_skill": skill_name})
+        except Exception as e:
+            logger.warning("Failed to get lessons for skill '%s': %s", skill_name, e)
+            return []
+
+        lessons = []
+        for r in results:
+            metadata = r.get("metadata", {})
+
+            try:
+                tags = json.loads(metadata.get("tags", "[]"))
+            except (json.JSONDecodeError, TypeError):
+                tags = []
+
+            lessons.append({
+                "lesson_id": r.get("id", ""),
+                "task": metadata.get("task", ""),
+                "error_description": metadata.get("error_description", ""),
+                "root_cause": metadata.get("root_cause", ""),
+                "improvement": metadata.get("improvement", ""),
+                "tags": tags,
+                "related_skill": metadata.get("related_skill", ""),
+                "created_at": metadata.get("created_at", ""),
+            })
+
+        return lessons
+
+    def delete_lessons_by_skill(self, skill_name: str) -> int:
+        """Delete all lessons related to a specific skill.
+
+        Returns count of lessons deleted.
+        """
+        lessons = self.get_lessons_by_skill(skill_name)
+        count = 0
+        for lesson in lessons:
+            lesson_id = lesson.get("lesson_id", "")
+            if lesson_id and self.delete_lesson(lesson_id):
+                count += 1
+        return count

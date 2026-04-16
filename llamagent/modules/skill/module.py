@@ -28,6 +28,16 @@ logger = logging.getLogger(__name__)
 
 _SKILL_CMD_RE = re.compile(r"^/skill\s+(\S+)\s*(.*)", re.DOTALL)
 
+# Prompt injection detection patterns for security scan
+# Note: "act as" removed — too broad, triggers on legitimate skill content
+_INJECTION_PATTERNS = [
+    re.compile(r"ignore\s+(all\s+)?previous\s+instructions", re.IGNORECASE),
+    re.compile(r"ignore\s+(all\s+)?prior\s+instructions", re.IGNORECASE),
+    re.compile(r"you\s+are\s+now\s+a\s+different", re.IGNORECASE),
+    re.compile(r"^system\s*:", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"<\s*system\s*>", re.IGNORECASE),
+]
+
 
 class SkillModule(Module):
     """
@@ -44,6 +54,7 @@ class SkillModule(Module):
     def __init__(self):
         self.index: SkillIndex | None = None
         self._forced_skill: str | None = None
+        self._current_activated: list = []
 
     # ============================================================
     # Lifecycle Callbacks
@@ -128,6 +139,8 @@ class SkillModule(Module):
         Sets _forced_skill for on_context to consume. Strips the command
         prefix and returns the remaining text (or a default activation message).
         """
+        self._current_activated = []
+
         m = _SKILL_CMD_RE.match(user_input)
         if m:
             self._forced_skill = m.group(1)
@@ -200,6 +213,9 @@ class SkillModule(Module):
         # Merge: always skills + L1/L2 activated
         activated = always_skills + activated
         activated_names = {s.name for s in activated}
+
+        # Record activated skills for cross-module queries (e.g. ReflectionModule)
+        self._current_activated = activated
 
         # --- Inject activated skill content + activate tool packs ---
         blocks: list[str] = []
@@ -357,3 +373,130 @@ class SkillModule(Module):
         paths = self._build_scan_paths(self.agent)
         self.index.scan(paths)
         return len(self.index)
+
+    def get_active_skills(self) -> list:
+        """Return skills activated in the current turn (set during on_context)."""
+        return list(self._current_activated)
+
+    def update_skill(self, name: str, new_content: str) -> dict:
+        """Update a skill's content with safety mechanisms.
+
+        Flow: security scan -> backup -> write -> validate -> rollback on failure.
+
+        Returns:
+            {"success": True/False, "error": "..." if failed}
+        """
+        meta = self.index.lookup(name)
+        if meta is None:
+            return {"success": False, "error": f"Skill '{name}' not found"}
+
+        content_path = meta.content_path
+        if not os.path.isfile(content_path):
+            return {"success": False, "error": f"Skill file not found: {content_path}"}
+
+        # 1. Prepare final content (prepend frontmatter for format B/C)
+        final_content = new_content
+        if meta.source_format in ("frontmatter", "plain_md"):
+            from llamagent.modules.fs_store.parser import parse_frontmatter
+            with open(content_path, "r", encoding="utf-8") as f:
+                old_fm, _ = parse_frontmatter(f.read())
+            if old_fm:
+                fm_lines = ["---"]
+                for k, v in old_fm.items():
+                    if isinstance(v, list):
+                        # Serialize lists as YAML-compatible format: [item1, item2]
+                        fm_lines.append(f"{k}: [{', '.join(str(x) for x in v)}]")
+                    elif isinstance(v, bool):
+                        fm_lines.append(f"{k}: {'true' if v else 'false'}")
+                    else:
+                        fm_lines.append(f"{k}: {v}")
+                fm_lines.append("---\n")
+                final_content = "\n".join(fm_lines) + new_content
+
+        # 2. Security scan BEFORE writing (fail fast)
+        scan_error = self._security_scan(final_content)
+        if scan_error:
+            return {"success": False, "error": f"Security scan failed: {scan_error}"}
+
+        # 3. Backup current version
+        backup_path = self._create_backup(content_path)
+
+        # 4. Write new content
+        try:
+            with open(content_path, "w", encoding="utf-8") as f:
+                f.write(final_content)
+        except OSError as e:
+            return {"success": False, "error": f"Write failed: {e}"}
+
+        # 5. Post-write validation (format check)
+        validation_error = self._validate_skill(content_path, meta)
+        if validation_error:
+            self._rollback(content_path, backup_path)
+            return {"success": False, "error": f"Validation failed: {validation_error}"}
+
+        # 6. Reload skill index to pick up changes
+        self.index.invalidate_cache(name)
+
+        logger.info("Skill '%s' updated successfully (backup: %s)", name, backup_path)
+        return {"success": True}
+
+    def _create_backup(self, content_path: str) -> str:
+        """Create a versioned backup of the skill file."""
+        import shutil
+
+        directory = os.path.dirname(content_path)
+        basename = os.path.basename(content_path)
+
+        # Find next version number
+        version = 1
+        while os.path.exists(os.path.join(directory, f"{basename}.v{version}")):
+            version += 1
+
+        backup_path = os.path.join(directory, f"{basename}.v{version}")
+        shutil.copy2(content_path, backup_path)
+        return backup_path
+
+    def _validate_skill(self, content_path: str, meta) -> str | None:
+        """Validate skill file format. Returns error string or None if valid."""
+        try:
+            with open(content_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except OSError as e:
+            return f"Cannot read file: {e}"
+
+        if not content.strip():
+            return "Skill content is empty"
+
+        # For format A: no frontmatter validation needed (config.yaml handles metadata)
+        if meta.source_format == "config":
+            return None
+
+        # For format B/C: validate frontmatter if present
+        from llamagent.modules.fs_store.parser import parse_frontmatter
+        fm, body = parse_frontmatter(content)
+        if fm:
+            if not fm.get("name") and not fm.get("description"):
+                return "Frontmatter missing both 'name' and 'description'"
+
+        if not body.strip():
+            return "Skill body content is empty (only frontmatter)"
+
+        return None
+
+    def _security_scan(self, content: str) -> str | None:
+        """Scan content for prompt injection patterns. Returns error or None."""
+        for pattern in _INJECTION_PATTERNS:
+            match = pattern.search(content)
+            if match:
+                return f"Potential prompt injection detected: '{match.group()}'"
+        return None
+
+    def _rollback(self, content_path: str, backup_path: str):
+        """Restore skill file from backup."""
+        import shutil
+
+        try:
+            shutil.copy2(backup_path, content_path)
+            logger.info("Rolled back skill to backup: %s", backup_path)
+        except OSError as e:
+            logger.error("Rollback failed: %s", e)

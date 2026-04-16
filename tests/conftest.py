@@ -210,6 +210,7 @@ def bare_agent(mock_llm_client):
     config.reflection_backend = "rag"
     config.reflection_fs_dir = None
     config.reflection_score_threshold = 7.0
+    config.skill_improve_threshold = 3
     config.max_plan_adjustments = 7
     config.permission_level = 1
     config.output_dir = "/tmp/llamagent_test_output"

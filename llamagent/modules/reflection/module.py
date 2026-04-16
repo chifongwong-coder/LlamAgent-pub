@@ -95,6 +95,7 @@ class ReflectionModule(Module):
         self._read_mode: str = "off"
         self._backend: str = "rag"
         self._available: bool = False
+        self._pending_skill_check: str | None = None
 
     def on_attach(self, agent: "LlamAgent"):
         """Initialize reflection engine, lesson store, and register tools."""
@@ -307,7 +308,16 @@ class ReflectionModule(Module):
     # ============================================================
 
     def on_input(self, user_input: str) -> str:
-        """Record current query and reset reflection state."""
+        """Record current query, reset reflection state, and check pending skill improvement."""
+        # Check for pending skill improvement (delayed from previous turn's on_output)
+        if self._pending_skill_check:
+            try:
+                self._check_skill_improvement(self._pending_skill_check)
+            except Exception as e:
+                logger.warning("[Reflection] Skill improvement check failed: %s", e)
+            finally:
+                self._pending_skill_check = None
+
         self.current_query = user_input
         if self.engine is not None:
             self.engine.reset()
@@ -376,6 +386,14 @@ class ReflectionModule(Module):
             logger.warning("Root cause analysis failed: %s", e)
             return response
 
+        # Determine related skill (if SkillModule is loaded and has active skills)
+        related_skill = None
+        skill_mod = self.agent.modules.get("skill")
+        if skill_mod and hasattr(skill_mod, "get_active_skills"):
+            active = skill_mod.get_active_skills()
+            if active:
+                related_skill = active[0].name
+
         # Save lesson
         if self.lesson_store is not None:
             try:
@@ -387,12 +405,118 @@ class ReflectionModule(Module):
                     root_cause=reflection.get("root_cause", "Unknown cause"),
                     improvement=reflection.get("improvement_strategy"),
                     tags=[reflection.get("failure_type", "unknown")],
+                    related_skill=related_skill,
                 )
+                # Schedule skill improvement check for next turn
+                if related_skill:
+                    self._pending_skill_check = related_skill
             except Exception as e:
                 logger.warning("Failed to save lesson: %s", e)
 
         # No retry, return as-is
         return response
+
+    # ----------------------------------------------------------
+    # Skill improvement (v2.9.8)
+    # ----------------------------------------------------------
+
+    def _check_skill_improvement(self, skill_name: str):
+        """Check if a skill has accumulated enough lessons to warrant improvement."""
+        if not self.agent.interaction_handler:
+            return
+        if self.lesson_store is None:
+            return
+
+        skill_mod = self.agent.modules.get("skill")
+        if not skill_mod:
+            return
+
+        threshold = getattr(self.agent.config, "skill_improve_threshold", 3)
+        if threshold <= 0:
+            return  # Disabled
+
+        # Count lessons related to this skill
+        lessons = self.lesson_store.get_lessons_by_skill(skill_name)
+        if len(lessons) < threshold:
+            return
+
+        # Look up skill metadata
+        skill_meta = skill_mod.get_skill(skill_name)
+        if not skill_meta:
+            return
+
+        self._propose_skill_improvement(skill_meta, lessons)
+
+    def _propose_skill_improvement(self, skill_meta, lessons):
+        """Generate improvement proposal and ask user for confirmation."""
+        # Load current skill content
+        skill_mod = self.agent.modules.get("skill")
+        if not skill_mod:
+            return
+        current_content = skill_mod.activate(skill_meta.name)
+        if not current_content:
+            return
+
+        # Format lessons (flat fields: root_cause, improvement)
+        lesson_text = "\n".join(
+            f"- {l.get('improvement', 'N/A')} (cause: {l.get('root_cause', '?')})"
+            for l in lessons
+        )
+
+        # LLM generates improved skill (uses module.llm, supports per-module model)
+        prompt = (
+            f"You are improving a skill based on accumulated lessons learned.\n\n"
+            f"Current skill content:\n```\n{current_content}\n```\n\n"
+            f"Lessons learned ({len(lessons)} issues found):\n{lesson_text}\n\n"
+            f"Generate an improved version of the skill that addresses these lessons.\n"
+            f"Keep the same structure and format. Only modify parts that need improvement.\n"
+            f"Do not include YAML frontmatter (---). Return only the skill body content."
+        )
+
+        try:
+            improved = self.llm.ask(prompt, temperature=0.3)
+        except Exception as e:
+            logger.warning("[Reflection] Skill improvement LLM call failed: %s", e)
+            return
+
+        if not improved or improved.startswith("[LLM"):
+            return
+
+        # Ask user for confirmation via interaction_handler
+        self._confirm_and_apply(skill_meta, current_content, improved, lessons)
+
+    def _confirm_and_apply(self, skill_meta, current_content, improved_content, lessons):
+        """Ask user to confirm skill improvement via ask_user."""
+        if not self.agent.interaction_handler:
+            logger.info("[Reflection] No interaction handler, skipping skill improvement confirmation")
+            return
+
+        # Build confirmation message (use flat lesson fields)
+        message = (
+            f"Based on {len(lessons)} lesson(s), I suggest improving the '{skill_meta.name}' skill.\n\n"
+            f"Key improvements:\n"
+        )
+        for l in lessons[:3]:  # Show top 3
+            improvement = l.get("improvement", "")
+            if improvement:
+                message += f"- {improvement}\n"
+        message += f"\nApprove this update? (yes/no)"
+
+        try:
+            response = self.agent.interaction_handler.ask(message)
+            if isinstance(response, str) and response.strip().lower() in ("yes", "y", "ok", "approve"):
+                skill_mod = self.agent.modules.get("skill")
+                if skill_mod:
+                    result = skill_mod.update_skill(skill_meta.name, improved_content)
+                    if result.get("success"):
+                        logger.info("[Reflection] Skill '%s' improved successfully", skill_meta.name)
+                        # Clear related lessons after successful improvement
+                        if self.lesson_store is not None:
+                            self.lesson_store.delete_lessons_by_skill(skill_meta.name)
+                    else:
+                        logger.warning("[Reflection] Skill update failed: %s", result.get("error"))
+        except Exception as e:
+            logger.warning("[Reflection] Skill improvement confirmation failed: %s", e)
 
     # ----------------------------------------------------------
     # Internal methods
