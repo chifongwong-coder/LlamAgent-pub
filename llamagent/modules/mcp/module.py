@@ -5,7 +5,6 @@ Capabilities:
 - Connect to MCP Servers, auto-discover and register external tools
 - Support both stdio and SSE transport modes
 - Transparently bridge MCP tools as locally available Agent tools
-- Lazy connection support (avoids async context conflicts)
 
 Tool registration method:
 - Registered via agent.register_tool() (tier=default), independent of the tools module
@@ -35,7 +34,6 @@ class MCPModule(Module):
     def __init__(self):
         self.client = None
         self._connected: bool = False
-        self._lazy_connect: bool = False
 
     def on_attach(self, agent):
         """
@@ -46,7 +44,6 @@ class MCPModule(Module):
         2. Read MCP server configuration from environment variables
         3. Create MCPClient and attempt connection
         4. Bridge tools to tool registry after successful connection
-        5. If a running event loop is detected, defer connection (lazy connection)
         """
         super().on_attach(agent)
 
@@ -81,9 +78,20 @@ class MCPModule(Module):
                 loop = None
 
             if loop and loop.is_running():
-                # Already in async environment, defer connection to avoid event loop conflict
-                print("[MCP] Async environment detected, MCP connection will be established on first use")
-                self._lazy_connect = True
+                # Async environment: run connect_all() in a separate thread to avoid
+                # event loop conflict. The 30s blocking is acceptable for one-time
+                # startup during on_attach (not called in hot path).
+                from concurrent.futures import ThreadPoolExecutor
+                try:
+                    with ThreadPoolExecutor(max_workers=1) as pool:
+                        results = pool.submit(lambda: asyncio.run(self.client.connect_all())).result(timeout=30)
+                    self._connected = any(results.values())
+                    if self._connected:
+                        self._bridge_tools()
+                    else:
+                        print("[MCP] All server connections failed, please check configuration")
+                except Exception as e:
+                    print(f"[MCP] Async environment connection failed: {e}")
             else:
                 # Synchronous environment, connect immediately
                 results = asyncio.run(self.client.connect_all())
@@ -138,30 +146,6 @@ class MCPModule(Module):
         tool_count = len(bridged)
         if tool_count > 0:
             print(f"[MCP] Bridged {tool_count} tools to registry")
-
-    def _ensure_connected(self) -> bool:
-        """
-        Ensure MCP client is connected (handles lazy connection).
-
-        Returns:
-            Whether successfully connected
-        """
-        if self._connected:
-            return True
-
-        if self._lazy_connect and self.client:
-            try:
-                results = asyncio.run(self.client.connect_all())
-                self._connected = any(results.values())
-                if self._connected:
-                    self._bridge_tools()
-                    self._lazy_connect = False
-                return self._connected
-            except Exception as e:
-                print(f"[MCP] Lazy connection failed: {e}")
-                return False
-
-        return False
 
     # ============================================================
     # Lifecycle

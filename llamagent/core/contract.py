@@ -105,7 +105,11 @@ def normalize_scopes(scopes: list[RequestedScope]) -> list[RequestedScope]:
 
         # Try to find common prefix
         if len(unique_paths) > 1:
-            prefix = os.path.commonpath(unique_paths) if unique_paths else ""
+            try:
+                prefix = os.path.commonpath(unique_paths) if unique_paths else ""
+            except ValueError:
+                # Mixed absolute/relative paths — fall back to no common prefix
+                prefix = ""
             if prefix and prefix != unique_paths[0]:
                 unique_paths = [prefix + "/"]
 

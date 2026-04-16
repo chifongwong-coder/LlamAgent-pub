@@ -552,7 +552,7 @@ class ChildAgentModule(Module):
             f"trigger={trigger_type}. Use send_message to communicate with it."
         )
 
-    def on_context(self, messages: list[dict], context: str) -> str:
+    def on_context(self, query: str, context: str) -> str:
         """Inject parallel child agent guide when runner is async (thread/process)."""
         if self._runner_name in ("thread", "process"):
             if context:
@@ -933,10 +933,11 @@ class ChildAgentModule(Module):
         config.max_observation_tokens = 1500
         config.context_window_size = 20
 
-        # 7. Import parent scopes (layered on top of default scope)
-        parent_scopes = parent._authorization_engine.export_scopes()
-        if parent_scopes:
-            child._authorization_engine.import_scopes(parent_scopes)
+        # 7. Import parent scopes (project mode only, consistent with short child)
+        if workspace_mode == "project":
+            parent_scopes = parent._authorization_engine.export_scopes()
+            if parent_scopes:
+                child._authorization_engine.import_scopes(parent_scopes)
 
         # 8. Inject task into system_prompt
         config.system_prompt = (
