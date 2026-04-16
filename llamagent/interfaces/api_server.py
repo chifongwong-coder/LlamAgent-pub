@@ -6,11 +6,12 @@ FastAPI is an optional dependency; importing this module without it installed
 will raise an ImportError with installation instructions.
 
 Endpoints:
-    POST /chat       — Chat
-    GET  /status     — Health check
-    GET  /modules    — Module list
-    POST /upload     — Upload files to knowledge base
-    WS   /ws/chat    — WebSocket streaming chat
+    POST /chat         — Chat
+    POST /chat/stream  — Streaming chat via SSE
+    GET  /status       — Health check
+    GET  /modules      — Module list
+    POST /upload       — Upload files to knowledge base
+    WS   /ws/chat      — WebSocket streaming chat
 
 Usage:
     python -m llamagent --mode api
@@ -18,6 +19,7 @@ Usage:
     API docs: http://localhost:8000/docs (Swagger UI)
 """
 
+import json
 import os
 import time
 import asyncio
@@ -33,7 +35,7 @@ try:
     )
     from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import JSONResponse
+    from fastapi.responses import JSONResponse, StreamingResponse
     from pydantic import BaseModel, Field
     from typing import Optional
     from contextlib import asynccontextmanager
@@ -93,6 +95,19 @@ if HAS_FASTAPI:
             max_length=10000,
             description="User message content",
             examples=["Help me check the weather in Beijing today"],
+        )
+        session_id: Optional[str] = Field(
+            default=None,
+            description="Session ID for maintaining context. If omitted, the default session is used",
+        )
+
+    class ChatStreamRequest(BaseModel):
+        """Streaming chat request"""
+        message: str = Field(
+            ...,
+            min_length=1,
+            max_length=10000,
+            description="User message content",
         )
         session_id: Optional[str] = Field(
             default=None,
@@ -397,6 +412,7 @@ def create_api_server(
             "and reasoning & planning capabilities.\n\n"
             "## Endpoints\n"
             "- POST /chat — Chat\n"
+            "- POST /chat/stream — Streaming chat via SSE\n"
             "- GET /status — Agent status\n"
             "- GET /modules — Module list\n"
             "- POST /upload — Upload files to knowledge base\n"
@@ -542,6 +558,35 @@ def create_api_server(
                     "message": f"Error processing chat: {e}",
                 }
             )
+
+    # ---- 1b. Streaming chat endpoint (SSE) ----
+
+    @app.post(
+        "/chat/stream",
+        tags=["Chat"],
+        summary="Streaming chat via SSE",
+        description="Send a message and receive the response as a Server-Sent Events stream.",
+    )
+    async def chat_stream(
+        request: ChatStreamRequest,
+        token: str = Depends(verify_token),
+    ):
+        """Handle streaming chat requests via SSE."""
+        agent = _get_agent(request.session_id)
+
+        def event_generator():
+            try:
+                for chunk in agent.chat_stream(request.message):
+                    yield f"data: {json.dumps({'content': chunk})}\n\n"
+                yield f"data: {json.dumps({'done': True})}\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     # ---- 2. Status endpoint (no auth required) ----
 
