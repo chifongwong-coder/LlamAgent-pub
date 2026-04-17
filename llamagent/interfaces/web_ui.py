@@ -635,13 +635,12 @@ def create_web_ui() -> "gr.Blocks":
                 )
                 gr.Markdown(
                     "*interactive: per-turn chat | task: prepare/confirm/execute | continuous: trigger-driven*",
-                    scale=3,
                 )
 
             # Build button + status
             with gr.Row():
                 build_btn = gr.Button("Build Agent", variant="primary", scale=1)
-                status_display = gr.Markdown("*Configure and click Build Agent to start*", scale=3)
+                status_display = gr.Markdown("*Configure and click Build Agent to start*")
 
         # ============================================
         # Chat Area

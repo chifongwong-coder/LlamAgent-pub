@@ -5,7 +5,7 @@ Priority chain: Environment variables > YAML file > Code defaults.
 
 All LlamAgent runtime parameters are managed centrally in the Config class.
 Modules access config via flat attributes (config.xxx) regardless of the source.
-Model auto-detection priority: MODEL_NAME env var > API Key detection (DeepSeek > OpenAI > Anthropic) > Ollama fallback.
+Default model: local Ollama. Set MODEL_NAME env var to use cloud providers (e.g., MODEL_NAME=openai/gpt-4o-mini).
 """
 
 import logging
@@ -598,20 +598,18 @@ class Config:
 
     def _detect_model(self) -> str:
         """
-        Auto-detect available models.
+        Default model selection. Prefers local Ollama to avoid unintended cloud spend.
 
-        Priority: DEEPSEEK_API_KEY -> OPENAI_API_KEY -> ANTHROPIC_API_KEY -> Ollama fallback.
+        To use a cloud provider, set MODEL_NAME explicitly, e.g.:
+            MODEL_NAME=openai/gpt-4o-mini
+            MODEL_NAME=deepseek/deepseek-chat
+            MODEL_NAME=anthropic/claude-3-5-sonnet-latest
+
+        Presence of cloud API keys (OPENAI_API_KEY / DEEPSEEK_API_KEY / ANTHROPIC_API_KEY)
+        does NOT change the default — only MODEL_NAME does. This keeps the public default
+        predictable and free of unexpected cloud calls.
         """
-        if os.getenv("DEEPSEEK_API_KEY"):
-            logger.info("Detected DEEPSEEK_API_KEY, using DeepSeek model")
-            return "deepseek/deepseek-chat"
-        if os.getenv("OPENAI_API_KEY"):
-            logger.info("Detected OPENAI_API_KEY, using OpenAI model")
-            return "openai/gpt-4o-mini"
-        if os.getenv("ANTHROPIC_API_KEY"):
-            logger.info("Detected ANTHROPIC_API_KEY, using Anthropic model")
-            return "anthropic/claude-sonnet-4-20250514"
-        logger.info("No API Key detected, falling back to Ollama local model")
+        logger.info("Using default Ollama local model (set MODEL_NAME env var to use a cloud provider)")
         return "ollama_chat/qwen3.5:latest"
 
     def _detect_max_context_tokens(self) -> int:
