@@ -11,6 +11,7 @@ Usage:
     Then open your browser to http://localhost:7860
 """
 
+import html
 import os
 
 try:
@@ -18,6 +19,72 @@ try:
     HAS_GRADIO = True
 except ImportError:
     HAS_GRADIO = False
+
+
+# ------------------------------------------------------------
+# Structured-event rendering helpers (v3.0.3)
+# ------------------------------------------------------------
+
+def _render_segments(segments: list[dict]) -> str:
+    """Render a list of segments to Markdown/HTML suitable for gr.Chatbot."""
+    parts = []
+    for seg in segments:
+        kind = seg["type"]
+        if kind == "text":
+            parts.append(seg["text"])
+        elif kind == "tool":
+            name = html.escape(seg["name"])
+            if seg.get("closed"):
+                if seg.get("success"):
+                    icon = "✅"
+                    suffix = f" · {seg['duration_ms']}ms" if seg.get("duration_ms") is not None else ""
+                else:
+                    icon = "❌"
+                    err = seg.get("error") or "failed"
+                    suffix = f" — {html.escape(str(err))}"
+                parts.append(
+                    f"\n<details><summary>{icon} <code>{name}</code>{suffix}</summary></details>\n"
+                )
+            else:
+                parts.append(
+                    f"\n<details open><summary>⏳ Calling <code>{name}</code>...</summary></details>\n"
+                )
+        elif kind == "status":
+            parts.append(f"\n> _{html.escape(seg['message'])}_\n")
+        elif kind == "error":
+            parts.append(f"\n> **❌ Error:** {html.escape(seg['message'])}\n")
+    return "".join(parts).strip() or "(empty response)"
+
+
+def _apply_event(segments: list[dict], index: dict, event: dict) -> None:
+    """Mutate `segments` / `index` in place according to a single event."""
+    etype = event["type"]
+    if etype == "content":
+        if segments and segments[-1]["type"] == "text":
+            segments[-1]["text"] += event["text"]
+        else:
+            segments.append({"type": "text", "text": event["text"]})
+    elif etype == "tool_call_start":
+        segments.append({
+            "type": "tool",
+            "call_id": event["call_id"],
+            "name": event["name"],
+            "closed": False,
+        })
+        index[event["call_id"]] = len(segments) - 1
+    elif etype == "tool_call_end":
+        pos = index.get(event["call_id"])
+        if pos is not None:
+            seg = segments[pos]
+            seg["closed"] = True
+            seg["success"] = event["success"]
+            seg["duration_ms"] = event.get("duration_ms")
+            seg["error"] = event.get("error")
+    elif etype == "status":
+        segments.append({"type": "status", "message": event["message"]})
+    elif etype == "error":
+        segments.append({"type": "error", "message": event["message"]})
+    # "done" triggers no visual change
 
 
 # ============================================================
@@ -255,12 +322,17 @@ def create_web_ui() -> "gr.Blocks":
         history.append({"role": "user", "content": message})
 
         if hasattr(agent, 'chat_stream') and agent.mode == "interactive":
-            # Streaming mode
-            partial = ""
-            for chunk in agent.chat_stream(message):
-                partial += chunk
-                yield history + [{"role": "assistant", "content": partial}], ""
-            if not partial:
+            # Streaming mode with structured-event rendering (v3.0.3)
+            from llamagent.interfaces.stream_adapter import adapt_stream
+
+            segments: list[dict] = []
+            tool_index: dict[str, int] = {}
+            any_event = False
+            for event in adapt_stream(agent.chat_stream(message)):
+                any_event = True
+                _apply_event(segments, tool_index, event)
+                yield history + [{"role": "assistant", "content": _render_segments(segments)}], ""
+            if not any_event or not segments:
                 yield history + [{"role": "assistant", "content": "(empty response)"}], ""
         else:
             # Non-streaming fallback

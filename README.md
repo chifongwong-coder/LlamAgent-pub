@@ -31,40 +31,50 @@ agent.register_module(PlanningModule())   # DAG-based task decomposition
 
 ## Why LlamAgent?
 
-**Truly modular** — 12 independent modules, zero coupling between them. Load only what your task needs. A chatbot, a code assistant, a research agent — same framework, different module sets.
+**Truly modular** — 15 independent modules, zero coupling between them. Load only what your task needs. A chatbot, a code assistant, a research agent — same framework, different module sets.
 
 **Any LLM, zero lock-in** — OpenAI, Anthropic, DeepSeek, Ollama, or any [LiteLLM](https://github.com/BerriAI/litellm)-supported backend. Auto-detects available API keys. No key? Falls back to local Ollama.
+
+**Smart defaults** — Pick capabilities, not config values. Select "Memory" and the framework auto-configures the best settings. Advanced users can still override everything via YAML.
+
+**Resilient LLM calls** — Five-level error classification, exponential backoff retry, model failover with turn-scoped cooldown, and smart routing (simple queries to cheap models). Your agent doesn't crash on a 429.
 
 **Smart tool exposure** — Not all tools need to be visible all the time. The pack system dynamically shows the right tools at the right moment — triggered by task context, skills, or runtime state. Small models see a clean 12-tool surface, not a wall of 40 schemas.
 
 **Workspace-first safety** — The agent works in an isolated workspace. Project modifications go through explicit sync channels with full changeset tracking and one-click revert. Three-zone protection (playground / project / external) prevents accidental damage without blocking productivity.
 
-**Memory that actually works** — Not text blobs in a vector DB. LlamAgent extracts structured facts from conversations, deduplicates them, resolves conflicts when information changes, and auto-recalls relevant memories each turn. Read and write modes are independently configurable.
+**Memory that actually works** — Not text blobs in a vector DB. LlamAgent extracts structured facts from conversations, deduplicates them, resolves conflicts when information changes, and auto-recalls relevant memories each turn. Periodic consolidation cleans up outdated or redundant facts automatically.
 
-**Retrieval done right** — Hybrid search combines vector similarity with keyword matching (BM25), then reranks results with an LLM. Structure-aware document chunking understands Markdown headers, code functions, and paragraph boundaries. The entire retrieval layer is backend-agnostic — swap embedding models or vector databases without touching module code.
+**Full execution trace** — Tool calls, tool results, and LLM reasoning are persisted in conversation history. The LLM knows what happened in previous turns. Configurable compression strategies (head/placeholder/summary) keep token costs under control.
 
-**Skills, not just prompts** — Separate *what the agent can do* (tools) from *how it should do it* (skills). Skills are natural-language playbooks that activate on demand through tag matching, and they can dynamically unlock additional tool packs when needed.
+**Skills, not just prompts** — Separate *what the agent can do* (tools) from *how it should do it* (skills). Four-layer matching (command, tags, LLM index, always-on) with support for external skill formats (YAML frontmatter, plain .md). Skills improve over time through lesson-driven reflection.
 
 **Plan, execute, adapt** — Simple questions get fast single-loop answers. Complex tasks are automatically decomposed into dependency-aware step plans. If a step fails, the planner restructures. If quality is low, reflection triggers replanning. The agent doesn't spin — it adapts.
+
+**Continuous mode with inject** — Run background triggers (timer, file watch) while still accepting user messages. Three-level priority scheduling (urgent > triggers > normal). Non-interruptible tasks stay protected.
+
+**Three interfaces** — Interactive CLI with tab completion, Gradio Web UI with real-time panels, FastAPI server with REST + SSE streaming + WebSocket. All share the same smart module presets.
 
 ## Modules
 
 | Module | What it does |
 |--------|-------------|
-| **Tools** | Read, write, search files. Workspace isolation with project sync and changeset tracking. |
-| **Memory** | Structured fact memory — extract, deduplicate, resolve conflicts, auto-recall. Read/write decoupling. |
-| **Retrieval** | Load documents (code, markdown, text), hybrid search (vector + BM25), LLM reranking. |
-| **Job** | Run shell commands (sync/async) via sandbox. Inspect, wait, cancel running jobs. |
-| **Skill** | Task-level playbook injection. Tag matching, LLM fallback, dynamic tool pack activation. |
-| **Reasoning** | SimpleReAct for quick tasks. PlanReAct with DAG decomposition for complex multi-step work. |
-| **Reflection** | Score results, extract lessons from failures, trigger replanning when quality is low. |
+| **Resilience** | LLM call protection — error classification, retry, model failover, smart routing, turn-scoped cooldown. |
 | **Safety** | Input filtering, output sanitization, three-zone path protection. |
+| **Compression** | Context management — tool result compression (4 strategies), thinking stripping, LLM summarization. |
+| **Persistence** | Save and restore conversation history across restarts. |
 | **Sandbox** | Isolated execution backends for high-risk tools. Secure by default — no sandbox, no shell. |
-| **Child Agent** | Spawn constrained sub-agents with budgets, tool allowlists, and independent workspaces. |
-| **Multi-Agent** | Role-based delegation — writer, coder, analyst, researcher. |
+| **Tools** | Read, write, search files. Workspace isolation with project sync and changeset tracking. |
+| **Job** | Run shell commands (sync/async) via sandbox. Inspect, wait, cancel running jobs. |
+| **Retrieval** | Load documents (code, markdown, text), hybrid search (vector + BM25), LLM reranking. |
+| **Memory** | Structured fact memory — extract, deduplicate, resolve conflicts, auto-recall. Periodic consolidation. |
+| **Skill** | Four-layer matching (command/tag/index/always). Supports external formats. Lesson-driven self-improvement. |
+| **Reflection** | Score results, extract lessons from failures, trigger replanning. Drives skill improvement. |
+| **Planning** | SimpleReAct for quick tasks. PlanReAct with DAG decomposition for complex multi-step work. |
 | **MCP** | Connect to external Model Context Protocol servers. |
+| **Child Agent** | Spawn constrained sub-agents with budgets, tool allowlists, and independent workspaces. |
 
-Modules share a **retrieval layer** with swappable embedding models and vector backends — no module-level lock-in.
+Modules share a **retrieval layer** with swappable embedding models and vector backends — no module-level lock-in. A zero-dependency **FS backend** (markdown files) works out of the box.
 
 ## Quick Start
 
@@ -97,11 +107,11 @@ cp llamagent.yaml.example llamagent.yaml
 ### Run
 
 ```bash
-python -m llamagent                          # Interactive CLI
+python -m llamagent                          # Interactive CLI (smart defaults)
 python -m llamagent --modules tools,retrieval # Specific modules only
 python -m llamagent --mode web               # Gradio Web UI
-python -m llamagent --mode api               # FastAPI server
-python -m llamagent --config prod.yaml       # Custom config file
+python -m llamagent --mode api               # FastAPI server (REST + SSE + WS)
+python -m llamagent ask "question" --format json  # Single question, JSON output
 ```
 
 ### Use as a library
@@ -128,10 +138,10 @@ reply = agent.chat("Analyze the codebase and write a summary report")
 User Input
     |
     v
-on_input()           Safety filtering, pack state reset
+on_input()           Safety filtering, memory consolidation check
     |
     v
-on_context()         Memory recall, knowledge retrieval, skill injection
+on_context()         Memory recall, knowledge retrieval, skill injection (4-layer)
     |
     v
 execute()            ReAct loop or PlanReAct (think -> act -> observe)
@@ -142,7 +152,10 @@ execute()            ReAct loop or PlanReAct (think -> act -> observe)
     |   -> POST_TOOL_USE hook
     |
     v
-on_output()          Output masking, reflection scoring
+on_output()          Output masking, reflection scoring, skill improvement check
+    |
+    v
+History              Full execution trace (assistant + tool_calls + tool results)
     |
     v
 Response
@@ -168,7 +181,7 @@ hooks:
 |------|----------|
 | `interactive` | Every side-effect operation asks for confirmation (default) |
 | `task` | Execute a task with project access, auto-clean scopes on completion. Configure seed scopes to skip the planning phase, or let the agent plan first and confirm once. |
-| `continuous` | Run unattended with project access until manually stopped. Configure seed scopes to narrow boundaries. |
+| `continuous` | Run unattended with background triggers + user inject support. Three-level priority scheduling. |
 
 Set the mode in YAML — the agent applies it on startup:
 
@@ -201,24 +214,27 @@ See [`examples/`](examples/) for runnable tutorials:
 
 ```
 llamagent/
-├── core/              Agent, Config, LLM, Persona, Hooks, Authorization
+├── core/              Agent, Config, LLM, Persona, Hooks, Authorization, Runner
 ├── modules/
+│   ├── resilience/    LLM call protection (retry, failover, routing)
+│   ├── compression/   Context compression (tool result strategies, thinking strip)
+│   ├── persistence/   Conversation history save/restore
 │   ├── rag/           RAG backend (embedding, vector, lexical, chunker, retriever)
+│   ├── fs_store/      FS backend (markdown parser, atomic file store)
 │   ├── tools/         Workspace tools + project sync + pack system
-│   ├── memory/        Structured fact memory
-│   ├── retrieval/     Knowledge retrieval module (uses RAG backend)
+│   ├── memory/        Structured fact memory + consolidation
+│   ├── retrieval/     Knowledge retrieval module (uses RAG/FS backend)
 │   ├── job/           Command execution lifecycle
-│   ├── skill/         Playbook injection + pack triggering
+│   ├── skill/         4-layer playbook matching + self-improvement
 │   ├── reasoning/     ReAct + PlanReAct strategies
-│   ├── reflection/    Quality evaluation + lesson learning
+│   ├── reflection/    Quality evaluation + lesson learning + skill reflection
 │   ├── safety/        Input/output guards + zone system
 │   ├── sandbox/       Execution isolation backends
-│   ├── child_agent/   Sub-agent control with budgets
-│   ├── multi_agent/   Role-based delegation
+│   ├── child_agent/   Sub-agent control with budgets + inject + priority
 │   └── mcp/           Model Context Protocol
-├── interfaces/        CLI, Web UI, API server
+├── interfaces/        CLI, Web UI, API server, Module Presets
 ├── examples/          Tutorial scripts
-└── tests/             520+ tests
+└── tests/             820+ tests
 ```
 
 ## License

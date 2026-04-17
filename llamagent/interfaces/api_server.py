@@ -7,7 +7,8 @@ will raise an ImportError with installation instructions.
 
 Endpoints:
     POST /chat         — Chat
-    POST /chat/stream  — Streaming chat via SSE
+    POST /chat/stream  — Streaming chat via SSE (text chunks)
+    POST /chat/stream/events — Streaming chat via SSE (structured events)
     GET  /status       — Health check
     GET  /modules      — Module list
     POST /upload       — Upload files to knowledge base
@@ -414,7 +415,8 @@ def create_api_server(
             "and reasoning & planning capabilities.\n\n"
             "## Endpoints\n"
             "- POST /chat — Chat\n"
-            "- POST /chat/stream — Streaming chat via SSE\n"
+            "- POST /chat/stream — Streaming chat via SSE (text chunks)\n"
+            "- POST /chat/stream/events — Streaming chat via SSE (structured events)\n"
             "- GET /status — Agent status\n"
             "- GET /modules — Module list\n"
             "- POST /upload — Upload files to knowledge base\n"
@@ -585,6 +587,42 @@ def create_api_server(
                 yield f"data: {json.dumps({'done': True})}\n\n"
             except Exception as e:
                 yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # ---- 1c. Structured-event streaming endpoint (SSE, v3.0.3) ----
+
+    @app.post(
+        "/chat/stream/events",
+        tags=["Chat"],
+        summary="Streaming chat with structured events",
+        description=(
+            "Send a message and receive a Server-Sent Events stream of structured "
+            "events: content / tool_call_start / tool_call_end / status / error / done. "
+            "See interfaces/stream_protocol.py for the event schema."
+        ),
+    )
+    async def chat_stream_events(
+        request: ChatStreamRequest,
+        token: str = Depends(verify_token),
+    ):
+        """Handle streaming chat requests and yield structured events via SSE."""
+        agent = _get_agent(request.session_id)
+
+        from llamagent.interfaces.stream_adapter import adapt_stream
+
+        def event_generator():
+            try:
+                for event in adapt_stream(agent.chat_stream(request.message)):
+                    yield f"data: {json.dumps(event)}\n\n"
+            except Exception as e:
+                logger.error("Structured stream error: %s", e)
+                yield f"data: {json.dumps({'type': 'error', 'seq': -1, 'message': str(e)})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'seq': -1})}\n\n"
 
         return StreamingResponse(
             event_generator(),
