@@ -89,7 +89,14 @@ class LLMClient:
             max_tokens: Maximum output tokens
             response_format: Force output format, e.g. {"type": "json_object"}
             tools: Tool schema list in OpenAI format
-            tool_choice: Tool selection strategy ("auto", "none", "required")
+            tool_choice: Tool selection strategy ("auto", "none", "required", or
+                {"type": "function", "function": {"name": "X"}}). Provider support
+                is uneven — Ollama silently ignores "required" on current
+                qwen3.5 / qwen3 builds (observed empirically). Cloud backends
+                (OpenAI / Anthropic / DeepSeek) honor it reliably. If strict
+                tool-calling behavior is required, do not rely on this parameter
+                with Ollama; consider falling back to prompt engineering or a
+                cloud backend.
             timeout: Request timeout in seconds; None means no timeout
 
         Returns:
