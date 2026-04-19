@@ -1,14 +1,23 @@
 """
 FactCompiler: uses an LLM to extract structured MemoryFacts from conversation text.
 
-Two modes of operation:
-- compile(text): Extract facts from arbitrary text (used by save_memory tool).
-- compile_hybrid(query, response): Combined "should_store" decision + fact extraction
-  in a single LLM call (used by hybrid mode on_output).
+Compile modes:
+- compile(text): Extract JSON atomic facts (kind/subject/attribute/value) — used
+  when memory_compile_mode='structured' (natural for RAG/DB backends).
+- compile_raw_text(text, category): Produce a single subject+body entry using
+  <subject>/<body> tags — used when memory_compile_mode='raw_text' (natural for
+  the FS backend where retrieval is full-dump + LLM attention).
+- compile_hybrid(query, response): Combined "should_store" decision + fact
+  extraction in a single LLM call (used by hybrid mode on_output).
+
+Dedup helpers:
+- judge_duplicate(new_subject, new_body, existing): LLM-based judgement for the
+  raw_text path when count-threshold triggers dedup.
 """
 
 import hashlib
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -255,3 +264,192 @@ class FactCompiler:
             strength=1.0,
             status="active",
         )
+
+    # ==================================================================
+    # Raw-text compile path (for FS backend / weak-model friendly)
+    # ==================================================================
+
+    def compile_raw_text(
+        self, text: str, category: str = "episode"
+    ) -> MemoryFact | None:
+        """Produce a single subject+body memory entry.
+
+        A single LLM call; the model returns ``<subject>...</subject>`` and
+        ``<body>...</body>`` tags. Parsing is lenient: if the tags are absent
+        or malformed, the whole reply becomes the body and subject is empty.
+
+        The returned MemoryFact uses attribute="note" as a placeholder to keep
+        the schema stable; the FS backend renders it as a markdown section.
+
+        Args:
+            text: The text to remember (as given to save_memory).
+            category: User-supplied label, mapped to MemoryFact.kind; invalid
+                values fall back to "episode" per VALID_KINDS.
+
+        Returns:
+            A MemoryFact with subject/body populated, or None on LLM failure.
+        """
+        try:
+            reply = self._llm.ask(
+                prompt=RAW_TEXT_COMPILE_PROMPT + text,
+                system=(
+                    "You produce short memory entries. Always respond with "
+                    "<subject>...</subject> and <body>...</body> tags."
+                ),
+            )
+        except Exception as e:
+            logger.warning("[Memory] Raw-text compile LLM call failed: %s", e)
+            return None
+
+        subject, body = _parse_raw_text_tags(reply, fallback_body=text)
+        if not body:
+            body = text
+
+        kind = (category or "").strip().lower()
+        if kind not in VALID_KINDS:
+            kind = "episode"
+
+        ts = datetime.now().isoformat()
+        id_source = f"{kind}:raw_text:{subject}:{body}:{ts}"
+        fact_id = hashlib.md5(id_source.encode()).hexdigest()
+
+        return MemoryFact(
+            fact_id=fact_id,
+            kind=kind,
+            subject=subject or "entry",
+            attribute="note",
+            value=body,
+            confidence=1.0,
+            source_text=text,
+            created_at=ts,
+            updated_at=ts,
+            strength=1.0,
+            status="active",
+        )
+
+    def judge_duplicate(
+        self,
+        new_subject: str,
+        new_body: str,
+        existing: list[dict],
+    ) -> str | None:
+        """LLM-based duplicate judgement for raw-text entries.
+
+        Only invoked when ``memory_dedup_threshold`` triggers. The LLM is
+        shown the new entry alongside existing subjects and asked whether the
+        new content is semantically equivalent to any existing one. Returns
+        the matched fact_id, or None if the model says no match / the call
+        fails / the reply cannot be parsed.
+
+        Args:
+            new_subject: Subject of the new entry.
+            new_body: Body of the new entry.
+            existing: List of metadata dicts (each with fact_id + subject).
+
+        Returns:
+            Matched fact_id or None.
+        """
+        if not existing:
+            return None
+
+        lines = [
+            f"- id={meta.get('fact_id', '')} subject={meta.get('subject', '')}"
+            for meta in existing
+        ]
+        existing_listing = "\n".join(lines)
+
+        prompt = (
+            "New memory entry:\n"
+            f"  subject: {new_subject}\n"
+            f"  body: {new_body}\n\n"
+            "Existing entries:\n"
+            f"{existing_listing}\n\n"
+            "Does the new entry describe the same thing as one of the existing "
+            "entries? If yes, reply with exactly that entry's id surrounded by "
+            "<match>...</match> tags. If no existing entry matches, reply with "
+            "<match>none</match>."
+        )
+
+        try:
+            reply = self._llm.ask(
+                prompt=prompt,
+                system=(
+                    "You judge whether two memory entries describe the same "
+                    "thing. Respond with a single <match>...</match> tag."
+                ),
+            )
+        except Exception as e:
+            logger.warning("[Memory] Dedup judgement LLM call failed: %s", e)
+            return None
+
+        match = re.search(r"<match>\s*(.*?)\s*</match>", reply, flags=re.DOTALL)
+        if not match:
+            return None
+
+        candidate = match.group(1).strip()
+        if not candidate or candidate.lower() == "none":
+            return None
+
+        valid_ids = {meta.get("fact_id", "") for meta in existing}
+        if candidate not in valid_ids:
+            return None
+
+        return candidate
+
+
+# ======================================================================
+# Raw-text compile prompt and tag parser
+# ======================================================================
+
+RAW_TEXT_COMPILE_PROMPT = """\
+Summarize the following text as one short memory entry.
+
+Respond with exactly two tagged fields:
+<subject>A brief title (3-10 words) capturing what this memory is about</subject>
+<body>The content to remember, preserving the important details</body>
+
+If you cannot produce a meaningful subject, emit <subject></subject> and place
+the full content in <body>.
+
+Text:
+"""
+
+
+def _parse_raw_text_tags(reply: str, fallback_body: str = "") -> tuple[str, str]:
+    """Parse ``<subject>...</subject>`` and ``<body>...</body>`` tags.
+
+    Lenient: accepts missing / mismatched tags. If ``<body>`` is absent, the
+    whole reply (minus any ``<subject>`` match) is treated as the body. If
+    the body ends up empty, ``fallback_body`` is used.
+
+    Returns:
+        (subject, body) — subject may be empty; body is guaranteed non-empty
+        if either the reply or fallback_body had content.
+    """
+    if not reply:
+        return "", fallback_body
+
+    subject_match = re.search(
+        r"<subject>\s*(.*?)\s*</subject>", reply, flags=re.DOTALL | re.IGNORECASE
+    )
+    body_match = re.search(
+        r"<body>\s*(.*?)\s*</body>", reply, flags=re.DOTALL | re.IGNORECASE
+    )
+
+    subject = subject_match.group(1).strip() if subject_match else ""
+
+    if body_match:
+        body = body_match.group(1).strip()
+    else:
+        # Strip any <subject>...</subject> segment and use the remainder
+        body = re.sub(
+            r"<subject>.*?</subject>",
+            "",
+            reply,
+            flags=re.DOTALL | re.IGNORECASE,
+        ).strip()
+
+    if not body:
+        body = fallback_body
+
+    return subject, body
