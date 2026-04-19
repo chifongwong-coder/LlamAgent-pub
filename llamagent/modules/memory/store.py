@@ -212,6 +212,24 @@ class MemoryStore:
             logger.warning("[Memory] list_all_active_facts failed: %s", e)
             return []
 
+    def get_oldest_active_fact_id(self) -> str | None:
+        """Return the fact_id of the oldest active entry (LRU).
+
+        Ordering: least-recently-accessed first, using ``last_accessed_at``;
+        when that field is missing or empty, fall back to ``created_at``.
+        Returns None when no active facts exist. Used by the cap-mode dedup
+        path to evict on overflow.
+        """
+        actives = self.list_all_active_facts()
+        if not actives:
+            return None
+
+        def _order_key(meta: dict) -> str:
+            return (meta.get("last_accessed_at") or meta.get("created_at") or "")
+
+        oldest = min(actives, key=_order_key)
+        return oldest.get("fact_id") or None
+
     def update_fact_value(self, fact_id: str, new_value: str) -> None:
         """Update a fact's value and updated_at timestamp.
 

@@ -32,6 +32,15 @@ from llamagent.modules.memory.store import MemoryStore
 
 logger = logging.getLogger(__name__)
 
+
+def _preview(text: str, limit: int = 80) -> str:
+    """Short single-line preview for tool-return messages."""
+    if not text:
+        return ""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
 # Memory usage guide injected into context
 MEMORY_GUIDE = """\
 [Memory] You have long-term memory and can remember information across conversations.
@@ -399,7 +408,12 @@ class MemoryModule(Module):
     # ============================================================
 
     def _tool_save_memory(self, content: str, category: str = "general") -> str:
-        """Save memory tool: compile text into facts, then merge each into the store."""
+        """Save memory tool: compile text into facts, then merge into the store.
+
+        Routes to either the structured compile path (FactCompiler + merger)
+        or the raw-text compile path (subject + body, threshold-gated dedup)
+        based on ``config.memory_compile_mode``.
+        """
         if not self._available or self.store is None:
             return "Memory storage is currently unavailable. Information was not saved."
 
@@ -407,6 +421,12 @@ class MemoryModule(Module):
             # No compiler available: fall back to plain text save
             return self._save_fallback(content, category)
 
+        mode = self._resolve_compile_mode()
+
+        if mode == "raw_text":
+            return self._save_memory_raw_text(content, category)
+
+        # structured path (default for RAG)
         try:
             result = self.compiler.compile(content)
         except Exception as e:
@@ -417,6 +437,109 @@ class MemoryModule(Module):
             return self._handle_compile_failure(result, content, category)
 
         return self._process_facts(result.facts)
+
+    def _resolve_compile_mode(self) -> str:
+        """Resolve effective compile mode, handling ``auto`` by backend."""
+        configured = getattr(self.agent.config, "memory_compile_mode", "auto")
+        if configured in ("structured", "raw_text"):
+            return configured
+        # auto: FS backend defaults to raw_text; everything else to structured
+        backend = getattr(self.agent.config, "memory_backend", "rag")
+        return "raw_text" if backend == "fs" else "structured"
+
+    def _save_memory_raw_text(self, content: str, category: str) -> str:
+        """Raw-text save path: compile subject+body, threshold-gated dedup."""
+        try:
+            fact = self.compiler.compile_raw_text(content, category=category)
+        except Exception as e:
+            logger.warning("[Memory] Raw-text compile failed: %s", e)
+            return self._save_fallback(content, category)
+
+        if fact is None:
+            return self._save_fallback(content, category)
+
+        threshold = int(
+            getattr(self.agent.config, "memory_dedup_threshold", 0) or 0
+        )
+        existing: list[dict] = []
+        if threshold > 0:
+            try:
+                existing = self.store.list_all_active_facts()
+            except Exception as e:
+                logger.warning("[Memory] list_all_active_facts failed: %s", e)
+                existing = []
+
+        if threshold > 0 and len(existing) >= threshold:
+            try:
+                matched_id = self.compiler.judge_duplicate(
+                    new_subject=fact.subject,
+                    new_body=fact.value,
+                    existing=existing,
+                )
+            except Exception as e:
+                logger.warning("[Memory] Dedup judgement failed: %s", e)
+                matched_id = None
+
+            if matched_id:
+                try:
+                    self.store.update_fact_status(matched_id, "superseded")
+                except Exception as e:
+                    logger.warning(
+                        "[Memory] Failed to supersede matched fact %s: %s",
+                        matched_id,
+                        e,
+                    )
+                try:
+                    self.store.save_fact(fact)
+                except Exception as e:
+                    logger.warning("[Memory] Failed to save raw-text fact: %s", e)
+                    return self._save_fallback(content, category)
+                return (
+                    f"Updated existing memory (subject: {fact.subject}). "
+                    f"Saved new entry: {_preview(fact.value)}"
+                )
+
+            # No match — in cap mode, evict the oldest active to keep count
+            # bounded. In trigger mode (default), fall through to plain insert.
+            dedup_mode = getattr(self.agent.config, "memory_dedup_mode", "trigger")
+            if dedup_mode == "cap":
+                evicted_id = None
+                try:
+                    evicted_id = self.store.get_oldest_active_fact_id()
+                except Exception as e:
+                    logger.warning(
+                        "[Memory] Oldest-fact lookup failed: %s", e
+                    )
+                if evicted_id:
+                    try:
+                        self.store.update_fact_status(evicted_id, "superseded")
+                    except Exception as e:
+                        logger.warning(
+                            "[Memory] Failed to evict oldest fact %s: %s",
+                            evicted_id,
+                            e,
+                        )
+                    try:
+                        self.store.save_fact(fact)
+                    except Exception as e:
+                        logger.warning(
+                            "[Memory] Failed to save raw-text fact: %s", e
+                        )
+                        return self._save_fallback(content, category)
+                    return (
+                        f"Evicted oldest memory ({evicted_id}) to make room. "
+                        f"Saved new entry (subject: {fact.subject}): "
+                        f"{_preview(fact.value)}"
+                    )
+
+        # Plain insert
+        try:
+            self.store.save_fact(fact)
+        except Exception as e:
+            logger.warning("[Memory] Failed to save raw-text fact: %s", e)
+            return self._save_fallback(content, category)
+
+        return f"Saved memory (subject: {fact.subject}): {_preview(fact.value)}"
 
     def _tool_recall_memory(self, query: str) -> str:
         """Recall memory tool: search facts with scoring bonuses."""
@@ -458,24 +581,18 @@ class MemoryModule(Module):
         return "\n".join(lines)
 
     def _tool_list_memories(self, query: str = "") -> str:
-        """List all active memories with metadata (FS backend)."""
+        """List all active memories with metadata (FS backend).
+
+        FS backend has no index — full dump; the LLM filters via its own
+        attention. The ``query`` parameter is kept for interface stability
+        but intentionally not used for filtering (see docs/design note).
+        """
         if not self._available or self.store is None:
             return "Memory storage is currently unavailable."
 
         metadata_text = self.store.list_all_metadata()
         if not metadata_text:
             return "No memories stored yet."
-
-        if query:
-            # Simple keyword filter on the metadata text
-            query_lower = query.lower()
-            filtered_lines = [
-                line for line in metadata_text.splitlines()
-                if query_lower in line.lower()
-            ]
-            if not filtered_lines:
-                return f"No memories matching '{query}' found."
-            return "\n".join(filtered_lines)
 
         return metadata_text
 

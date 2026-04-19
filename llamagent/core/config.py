@@ -81,6 +81,9 @@ _YAML_MAP = [
     (("memory", "auto_recall", "threshold"), "memory_auto_recall_threshold", float),
     (("memory", "consolidation_interval"), "memory_consolidation_interval", int),
     (("memory", "consolidation_min_count"), "memory_consolidation_min_count", int),
+    (("memory", "compile_mode"), "memory_compile_mode", str),
+    (("memory", "dedup_threshold"), "memory_dedup_threshold", int),
+    (("memory", "dedup_mode"), "memory_dedup_mode", str),
     (("rag", "top_k"), "rag_top_k", int),
     (("rag", "chunk_size"), "chunk_size", int),
     (("rag", "retrieval_mode"), "rag_retrieval_mode", str),
@@ -203,6 +206,19 @@ class Config:
         self.memory_auto_recall_threshold: float = 0.35
         self.memory_consolidation_interval: int = 24
         self.memory_consolidation_min_count: int = 20
+        # Compile mode: "auto" picks based on memory_backend (rag->structured, fs->raw_text);
+        # "structured" forces FactCompiler (JSON atomic facts + triple-key merger);
+        # "raw_text" forces subject+body single-entry compile.
+        self.memory_compile_mode: str = "auto"
+        # Raw-text dedup: 0 disables; when positive, trigger an LLM-based dedup
+        # judgement on save once stored entry count >= threshold.
+        self.memory_dedup_threshold: int = 0
+        # Dedup mode — only consulted when memory_dedup_threshold > 0:
+        #   "trigger": run dedup judge; count can grow past threshold on no-match.
+        #   "cap":     threshold is a hard ceiling — on no-match, evict the
+        #              oldest active entry (LRU by last_accessed_at, fallback
+        #              created_at) to keep count bounded.
+        self.memory_dedup_mode: str = "trigger"
 
         # RAG
         self.rag_top_k: int = 3
@@ -539,6 +555,27 @@ class Config:
                 self.memory_recall_mode,
             )
             self.memory_recall_mode = "tool"
+
+        if self.memory_compile_mode not in ("auto", "structured", "raw_text"):
+            logger.warning(
+                "memory_compile_mode='%s' is invalid, falling back to 'auto'",
+                self.memory_compile_mode,
+            )
+            self.memory_compile_mode = "auto"
+
+        if self.memory_dedup_threshold < 0:
+            logger.warning(
+                "memory_dedup_threshold=%d is negative, clamping to 0 (disabled)",
+                self.memory_dedup_threshold,
+            )
+            self.memory_dedup_threshold = 0
+
+        if self.memory_dedup_mode not in ("trigger", "cap"):
+            logger.warning(
+                "memory_dedup_mode='%s' is invalid, falling back to 'trigger'",
+                self.memory_dedup_mode,
+            )
+            self.memory_dedup_mode = "trigger"
 
         if self.retrieval_backend not in ("rag", "fs"):
             logger.warning(

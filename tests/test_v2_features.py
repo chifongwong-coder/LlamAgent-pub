@@ -483,6 +483,47 @@ def test_fs_memory_auto_inject(bare_agent, mock_llm_client, tmp_path):
     assert "blue" in ctx
 
 
+def test_memory_raw_text_compile_mode_inserts_subject_body(bare_agent, mock_llm_client, tmp_path):
+    """Raw-text compile mode: save_memory produces one subject+body entry.
+
+    Covers the routing + compile path in a single flow test: FS backend +
+    memory_compile_mode='raw_text' + dedup disabled. The LLM (mocked) returns
+    <subject>/<body> tags; the tool should parse them, build a MemoryFact,
+    and persist it to the FS store.
+    """
+    from llamagent.modules.memory.module import MemoryModule
+
+    bare_agent.config.memory_backend = "fs"
+    bare_agent.config.memory_mode = "autonomous"
+    bare_agent.config.memory_recall_mode = "tool"
+    bare_agent.config.memory_fs_dir = str(tmp_path / "memory")
+    bare_agent.config.memory_compile_mode = "raw_text"
+    bare_agent.config.memory_dedup_threshold = 0
+
+    mod = MemoryModule()
+    bare_agent.register_module(mod)
+
+    assert mod._resolve_compile_mode() == "raw_text"
+
+    mock_llm_client.set_responses([
+        make_llm_response(
+            "<subject>favorite language</subject>"
+            "<body>User prefers Rust.</body>"
+        )
+    ])
+
+    msg = mod._tool_save_memory(
+        "Please remember: I love Rust.", category="preference"
+    )
+
+    assert "Saved memory" in msg
+    facts = mod.store.list_all_active_facts()
+    assert len(facts) == 1
+    assert facts[0]["subject"] == "favorite language"
+    assert "Rust" in facts[0]["value"]
+    assert facts[0]["kind"] == "preference"
+
+
 # ============================================================
 # v2.3: Reflection — FSLessonStore
 # ============================================================
