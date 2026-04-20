@@ -11,6 +11,11 @@ MODULE_PRESETS = {
         "reflection_read_mode": "auto",
         "reflection_backend": "fs",
     },
+    "retrieval": {
+        # Default to the FS knowledge backend — zero-dep, works without chromadb,
+        # and is consistent with memory / reflection interface defaults.
+        "retrieval_backend": "fs",
+    },
     "child_agent": {
         "child_agent_runner": "thread",
     },
