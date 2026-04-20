@@ -347,18 +347,15 @@ class MemoryModule(Module):
                 name="list_memories",
                 func=self._tool_list_memories,
                 description=(
-                    "List all available memories with their metadata. "
+                    "List all stored memories with their metadata. "
                     "Returns a summary of each memory including fact_id, kind, subject, "
                     "attribute, and value. Use this to browse what memories are available."
                 ),
+                # No parameters — FS has no index; full metadata is always
+                # returned and the LLM filters via its own attention.
                 parameters={
                     "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Optional keyword filter (empty string for all)",
-                        },
-                    },
+                    "properties": {},
                     "required": [],
                 },
                 tier="default",

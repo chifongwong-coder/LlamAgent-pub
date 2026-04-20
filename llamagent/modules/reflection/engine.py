@@ -447,3 +447,34 @@ class LessonStore:
             if lesson_id and self.delete_lesson(lesson_id):
                 count += 1
         return count
+
+    def get_stats(self) -> dict:
+        """Return lesson statistics."""
+        if not self._available:
+            return {"available": False, "count": 0}
+        try:
+            count = self._pipeline.vector.count()
+            return {"available": True, "count": count}
+        except Exception as e:
+            return {"available": False, "count": 0, "error": str(e)}
+
+    def get_oldest_lesson_id(self) -> str | None:
+        """Return the lesson_id of the oldest stored lesson (FIFO by created_at).
+
+        Returns None when empty or the pipeline is unavailable. Used by
+        the cap-enforcement path to evict before saving a new lesson.
+        """
+        if not self._available:
+            return None
+        try:
+            results = self._pipeline.vector.get_all()
+        except Exception as e:
+            logger.warning("Failed to enumerate lessons for eviction: %s", e)
+            return None
+        if not results:
+            return None
+        oldest = min(
+            results,
+            key=lambda r: (r.get("metadata", {}) or {}).get("created_at", ""),
+        )
+        return oldest.get("id") or None
