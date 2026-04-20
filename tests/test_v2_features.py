@@ -411,9 +411,10 @@ def test_retrieval_fs_backend(bare_agent, mock_llm_client, tmp_path):
     # Should register 3 FS tools
     assert "list_knowledge" in bare_agent._tools
     assert "list_entries" in bare_agent._tools
-    assert "read_entry" in bare_agent._tools
-    # Should NOT register RAG tool
+    assert "read_document" in bare_agent._tools
+    # Should NOT register RAG tool or the retired read_entry name
     assert "search_knowledge" not in bare_agent._tools
+    assert "read_entry" not in bare_agent._tools
 
     # on_context should inject FS guide
     ctx = mod.on_context("some query", "existing context")
@@ -437,13 +438,23 @@ def test_retrieval_fs_backend(bare_agent, mock_llm_client, tmp_path):
     assert "notes.md" in result
     assert "Some content about testing" in result
 
-    # list_entries should find the section
-    result = mod._tool_list_entries("guide.md")
+    # list_entries (now batch-capable) should find the section across docs
+    result = mod._tool_list_entries(["guide.md"])
     assert "Intro" in result
 
-    # read_entry should return content
-    result = mod._tool_read_entry("guide.md", "Intro")
+    # Multi-doc batch: one call surfaces structure for both files
+    result = mod._tool_list_entries(["guide.md", "notes.md"])
+    assert "Intro" in result
+    assert "First Section" in result
+
+    # read_document with entry returns the specific section
+    result = mod._tool_read_document("guide.md", entry="Intro")
     assert "Hello" in result
+
+    # read_document without entry returns the full body
+    result = mod._tool_read_document("guide.md")
+    assert "Hello" in result
+    assert "Intro" in result
 
 
 def test_fs_memory_auto_inject(bare_agent, mock_llm_client, tmp_path):
