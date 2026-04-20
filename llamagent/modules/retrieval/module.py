@@ -29,8 +29,8 @@ RAG_GUIDE = """\
 FS_RETRIEVE_GUIDE = """\
 [Knowledge Base] You can browse documents in the local knowledge base.
 - Use list_knowledge to see all available documents and their descriptions.
-- Use list_entries to see the sections within a specific document.
-- Use read_entry to read the full content of a specific section.
+- Use list_entries to see the section headings within one or more documents.
+- Use read_document to read a document (full body, or a specific section).
 - Browse step by step: documents -> entries -> content."""
 
 
@@ -153,7 +153,7 @@ class RetrievalModule(Module):
         )
 
     def _register_fs_tools(self):
-        """Register FS backend tools: list_knowledge, list_entries, read_entry."""
+        """Register FS backend tools: list_knowledge, list_entries, read_document."""
         self.agent.register_tool(
             name="list_knowledge",
             func=self._tool_list_knowledge,
@@ -173,42 +173,42 @@ class RetrievalModule(Module):
             name="list_entries",
             func=self._tool_list_entries,
             description=(
-                "List all section headings (## entries) within a specific document. "
-                "Use this after list_knowledge to explore a document's structure."
+                "List section headings (## entries) from one or more documents. "
+                "Use this after list_knowledge to explore document structure."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "document": {
-                        "type": "string",
-                        "description": "Document filename (e.g. 'python_best_practices.md')",
+                    "documents": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Document filenames to inspect (e.g. ['guide.md']).",
                     },
                 },
-                "required": ["document"],
+                "required": ["documents"],
             },
             tier="default",
             safety_level=1,
         )
         self.agent.register_tool(
-            name="read_entry",
-            func=self._tool_read_entry,
+            name="read_document",
+            func=self._tool_read_document,
             description=(
-                "Read the full content of a specific section within a document. "
-                "Use this after list_entries to read a particular section."
+                "Read a document's full body, or a specific section by passing its heading."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "document": {
                         "type": "string",
-                        "description": "Document filename (e.g. 'python_best_practices.md')",
+                        "description": "Document filename (e.g. 'guide.md').",
                     },
                     "entry": {
                         "type": "string",
-                        "description": "Section title to read (e.g. 'Error Handling')",
+                        "description": "Optional section heading. Omit to read the whole document.",
                     },
                 },
-                "required": ["document", "entry"],
+                "required": ["document"],
             },
             tier="default",
             safety_level=1,
@@ -281,8 +281,67 @@ class RetrievalModule(Module):
 
         return "\n".join(lines)
 
-    def _tool_list_entries(self, document: str) -> str:
-        """List all section headings within a specific document."""
+    def _tool_list_entries(self, documents: list[str]) -> str:
+        """List section headings across one or more documents.
+
+        The model passes a list of filenames; the tool returns a per-document
+        block showing available headings (or a not-found / no-sections
+        message for that doc). Batching lets the model survey several
+        candidates in a single round-trip.
+        """
+        from llamagent.modules.fs_store.parser import parse_frontmatter, parse_sections
+
+        if self._fs_store is None:
+            return "Knowledge base has not been initialized."
+
+        # Defensive: tolerate a string passed instead of a list (some
+        # providers occasionally unwrap single-element arrays).
+        if isinstance(documents, str):
+            documents = [documents]
+
+        if not documents:
+            return "No documents requested. Pass at least one filename."
+
+        blocks: list[str] = []
+        for document in documents:
+            content = self._fs_store.read_file(document)
+            if content is None:
+                blocks.append(
+                    f"Document '{document}' not found in the knowledge base."
+                )
+                continue
+
+            metadata, body = parse_frontmatter(content)
+            sections = parse_sections(body)
+
+            if not sections:
+                blocks.append(
+                    f"No sections (## headings) found in '{document}'."
+                )
+                continue
+
+            title = metadata.get("title", document)
+            lines = [f"Sections in '{title}' ({document}):"]
+            for i, sec in enumerate(sections, 1):
+                lines.append(f"  {i}. {sec['title']}")
+            blocks.append("\n".join(lines))
+
+        return "\n\n".join(blocks)
+
+    def _tool_read_document(self, document: str, entry: str = "") -> str:
+        """Read a document — full body by default, or a specific section
+        when ``entry`` is supplied.
+
+        Matching strategy (FS backend — LLM-does-the-filtering philosophy):
+        - If ``entry`` is empty: return the full document body.
+        - If ``entry`` is provided: try exact match (case-insensitive,
+          whitespace-stripped). On miss, fall back to the full body so
+          the model can locate the relevant part with its own attention.
+          Partial/substring matching is intentionally absent to avoid
+          silently returning the wrong section on topic-vs-heading
+          mismatches (e.g. query "US-Iran hostilities" against sections
+          titled "Week 1" / "Week 2").
+        """
         from llamagent.modules.fs_store.parser import parse_frontmatter, parse_sections
 
         if self._fs_store is None:
@@ -293,47 +352,27 @@ class RetrievalModule(Module):
             return f"Document '{document}' not found in the knowledge base."
 
         metadata, body = parse_frontmatter(content)
+
+        # No entry requested → full body
+        if not entry or not entry.strip():
+            title = metadata.get("title", document)
+            return f"# {title} ({document})\n\n{body.strip()}"
+
         sections = parse_sections(body)
 
-        if not sections:
-            return f"No sections (## headings) found in '{document}'."
-
-        title = metadata.get("title", document)
-        lines = [f"Sections in '{title}' ({document}):"]
-        for i, sec in enumerate(sections, 1):
-            lines.append(f"  {i}. {sec['title']}")
-
-        return "\n".join(lines)
-
-    def _tool_read_entry(self, document: str, entry: str) -> str:
-        """Read the full content of a specific section within a document."""
-        from llamagent.modules.fs_store.parser import parse_frontmatter, parse_sections
-
-        if self._fs_store is None:
-            return "Knowledge base has not been initialized."
-
-        content = self._fs_store.read_file(document)
-        if content is None:
-            return f"Document '{document}' not found in the knowledge base."
-
-        _, body = parse_frontmatter(content)
-        sections = parse_sections(body)
-
-        # Find matching section (case-insensitive)
+        # Exact-match shortcut
         entry_lower = entry.lower().strip()
         for sec in sections:
             if sec["title"].lower().strip() == entry_lower:
                 return f"## {sec['title']}\n\n{sec['content']}"
 
-        # Partial match fallback
-        for sec in sections:
-            if entry_lower in sec["title"].lower():
-                return f"## {sec['title']}\n\n{sec['content']}"
-
-        available = ", ".join(sec["title"] for sec in sections)
+        # Last-resort dump
+        available = ", ".join(sec["title"] for sec in sections) or "(no sections)"
         return (
-            f"Section '{entry}' not found in '{document}'. "
-            f"Available sections: {available}"
+            f"Section '{entry}' not found as a heading in '{document}'. "
+            f"Available section headings: {available}. "
+            f"Full document body follows — locate the relevant part below:\n\n"
+            f"{body.strip()}"
         )
 
     # ============================================================
