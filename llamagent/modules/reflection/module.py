@@ -174,15 +174,21 @@ class ReflectionModule(Module):
 
     def _register_tools(self):
         """Register lesson management tools based on mode configuration."""
-        # list_lessons: always registered when read_mode != off
-        self.agent.register_tool(
-            name="list_lessons",
-            func=self._tool_list_lessons,
-            description=(
-                "Search lessons from past experiences by keyword. "
-                "Returns matching lessons with their metadata."
-            ),
-            parameters={
+        # list_lessons: always registered when read_mode != off.
+        # Schema differs by backend — FS has no index (full metadata dump,
+        # no query), while RAG does semantic search keyed by query.
+        if self._backend == "fs":
+            list_params = {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            }
+            list_desc = (
+                "List all stored lessons with their metadata. Use this to "
+                "browse past experiences."
+            )
+        else:
+            list_params = {
                 "type": "object",
                 "properties": {
                     "query": {
@@ -191,7 +197,17 @@ class ReflectionModule(Module):
                     },
                 },
                 "required": ["query"],
-            },
+            }
+            list_desc = (
+                "Search lessons from past experiences by keyword. "
+                "Returns matching lessons with their metadata."
+            )
+
+        self.agent.register_tool(
+            name="list_lessons",
+            func=self._tool_list_lessons,
+            description=list_desc,
+            parameters=list_params,
             tier="default",
             safety_level=1,
         )
@@ -244,12 +260,29 @@ class ReflectionModule(Module):
     # Tool implementations
     # ============================================================
 
-    def _tool_list_lessons(self, query: str) -> str:
-        """Search lessons by keyword."""
+    def _tool_list_lessons(self, query: str = "") -> str:
+        """List stored lessons.
+
+        Backend-dependent behavior:
+        - FS backend: full dump via list_all_metadata(). The ``query``
+          parameter is kept for interface stability but NOT used for
+          filtering — FS has no index, and the LLM's attention is the
+          retrieval mechanism. Substring-keyword filtering on store text
+          was dropping semantically-relevant lessons on simple synonym /
+          morphology mismatches (e.g. query "mistakes" vs. lessons using
+          "error" / "confused").
+        - RAG backend: semantic search via search_lessons_formatted(query)
+          — vector similarity handles synonyms naturally.
+        """
         if self.lesson_store is None:
             return "Lesson store is currently unavailable."
 
         try:
+            if self._backend == "fs" and hasattr(self.lesson_store, "list_all_metadata"):
+                dump = self.lesson_store.list_all_metadata()
+                if not dump:
+                    return "No lessons stored yet."
+                return dump
             formatted = self.lesson_store.search_lessons_formatted(query)
         except Exception as e:
             return f"Failed to search lessons: {e}"
@@ -394,9 +427,10 @@ class ReflectionModule(Module):
             if active:
                 related_skill = active[0].name
 
-        # Save lesson
+        # Save lesson (with optional FIFO cap eviction)
         if self.lesson_store is not None:
             try:
+                self._evict_oldest_if_capped()
                 self.lesson_store.save_lesson(
                     task=self.current_query,
                     error_description=", ".join(
@@ -415,6 +449,41 @@ class ReflectionModule(Module):
 
         # No retry, return as-is
         return response
+
+    # ----------------------------------------------------------
+    # Cap-mode eviction
+    # ----------------------------------------------------------
+
+    def _evict_oldest_if_capped(self) -> None:
+        """Enforce reflection_max_lessons as a hard ceiling.
+
+        If the configured cap is positive and the store already holds at
+        least ``cap`` lessons, evict the oldest one (FIFO by created_at)
+        so the incoming lesson can be saved without exceeding the cap.
+        No-op when cap <= 0 or the store lacks the eviction helper.
+        """
+        cap = int(getattr(self.agent.config, "reflection_max_lessons", 0) or 0)
+        if cap <= 0 or self.lesson_store is None:
+            return
+        stats = getattr(self.lesson_store, "get_stats", lambda: {"count": 0})() or {}
+        count = int(stats.get("count", 0) or 0)
+        if count < cap:
+            return
+        get_oldest = getattr(self.lesson_store, "get_oldest_lesson_id", None)
+        if get_oldest is None:
+            return
+        oldest_id = get_oldest()
+        if not oldest_id:
+            return
+        try:
+            self.lesson_store.delete_lesson(oldest_id)
+            logger.info(
+                "[Reflection] Evicted oldest lesson %s to honor cap=%d",
+                oldest_id,
+                cap,
+            )
+        except Exception as e:
+            logger.warning("[Reflection] Eviction failed for %s: %s", oldest_id, e)
 
     # ----------------------------------------------------------
     # Skill improvement (v2.9.8)

@@ -471,6 +471,23 @@ class FSLessonStore:
         sections = self._read_sections()
         return {"available": True, "count": len(sections)}
 
+    def get_oldest_lesson_id(self) -> str | None:
+        """Return the lesson_id of the oldest stored lesson (FIFO).
+
+        Ordering: ``created_at`` ascending. Returns None when the store
+        is empty. Used by the cap-enforcement path to evict the oldest
+        lesson before saving a new one once the count reaches the cap.
+        """
+        sections = self._read_sections()
+        if not sections:
+            return None
+
+        def _order_key(sec: dict) -> str:
+            return sec.get("meta", {}).get("created_at", "")
+
+        oldest = min(sections, key=_order_key)
+        return oldest.get("meta", {}).get("lesson_id") or None
+
     # ============================================================
     # Internal helpers
     # ============================================================

@@ -94,6 +94,7 @@ _YAML_MAP = [
     (("reflection", "write_mode"), "reflection_write_mode", str),
     (("reflection", "read_mode"), "reflection_read_mode", str),
     (("reflection", "score_threshold"), "reflection_score_threshold", float),
+    (("reflection", "max_lessons"), "reflection_max_lessons", int),
     (("reflection", "skill_improve_threshold"), "skill_improve_threshold", int),
     (("reflection_backend",), "reflection_backend", str),
     (("reflection_fs_dir",), "reflection_fs_dir", str),
@@ -242,6 +243,12 @@ class Config:
         self.reflection_fs_dir: str | None = None
         self.reflection_score_threshold: float = 7.0
         self.skill_improve_threshold: int = 3
+        # Hard cap on stored lessons. 0 disables. When positive, the oldest
+        # active lesson (FIFO by created_at) is evicted on save once the
+        # count reaches the cap. Reflection data is lower-stakes than memory
+        # (the agent re-learns any evicted lesson next time the pattern
+        # recurs), so a cheap FIFO cap is enough — no consolidation loop.
+        self.reflection_max_lessons: int = 0
 
         # Safety
         self.permission_level: int = 1
@@ -604,6 +611,13 @@ class Config:
                 self.reflection_read_mode,
             )
             self.reflection_read_mode = "off"
+
+        if self.reflection_max_lessons < 0:
+            logger.warning(
+                "reflection_max_lessons=%d is negative, clamping to 0 (disabled)",
+                self.reflection_max_lessons,
+            )
+            self.reflection_max_lessons = 0
 
         if self.reflection_backend not in ("rag", "fs"):
             logger.warning(

@@ -607,6 +607,82 @@ def test_fs_lesson_save_and_search(tmp_path):
 # ============================================================
 
 
+def test_reflection_list_lessons_schema_by_backend(bare_agent, tmp_path):
+    """FS backend registers list_lessons without a query parameter
+    (no index — LLM filters the full dump). RAG backend registers it
+    WITH a required query parameter (semantic search needs a query)."""
+    from llamagent.modules.reflection import ReflectionModule
+    from unittest.mock import patch, MagicMock
+
+    bare_agent.config.reflection_write_mode = "off"
+    bare_agent.config.reflection_read_mode = "tool"
+    bare_agent.config.reflection_backend = "fs"
+    bare_agent.config.reflection_fs_dir = str(tmp_path / "fs")
+    mod_fs = ReflectionModule()
+    bare_agent.register_module(mod_fs)
+
+    fs_tool = bare_agent._tools["list_lessons"]
+    fs_props = fs_tool["parameters"]["properties"]
+    fs_required = fs_tool["parameters"]["required"]
+    assert "query" not in fs_props, (
+        "FS backend's list_lessons schema should not expose a query "
+        f"parameter (FS has no index to filter against). Got: {fs_props}"
+    )
+    assert fs_required == [], (
+        f"FS backend's list_lessons should require no parameters. "
+        f"Got required={fs_required}"
+    )
+
+    # Swap to RAG backend and re-check
+    bare_agent.modules.pop("reflection", None)
+    bare_agent._tools.pop("list_lessons", None)
+    bare_agent._tools.pop("read_lesson", None)
+
+    bare_agent.config.reflection_backend = "rag"
+    mod_rag = ReflectionModule()
+    with patch.object(mod_rag, "_init_rag_backend"):
+        mod_rag.lesson_store = MagicMock()
+        bare_agent.register_module(mod_rag)
+
+    rag_tool = bare_agent._tools["list_lessons"]
+    rag_props = rag_tool["parameters"]["properties"]
+    rag_required = rag_tool["parameters"]["required"]
+    assert "query" in rag_props, (
+        "RAG backend's list_lessons schema MUST expose a query parameter "
+        "for semantic search to be triggered."
+    )
+    assert "query" in rag_required, (
+        f"RAG backend's list_lessons should require query. "
+        f"Got required={rag_required}"
+    )
+
+
+def test_memory_list_memories_schema_has_no_query(bare_agent, tmp_path):
+    """FS backend registers list_memories with no parameters (FS dumps
+    all metadata regardless of any query — the param was misleading)."""
+    from llamagent.modules.memory.module import MemoryModule
+
+    bare_agent.config.memory_mode = "autonomous"
+    bare_agent.config.memory_recall_mode = "tool"
+    bare_agent.config.memory_backend = "fs"
+    bare_agent.config.memory_fs_dir = str(tmp_path / "memory")
+
+    mod = MemoryModule()
+    bare_agent.register_module(mod)
+
+    tool = bare_agent._tools["list_memories"]
+    props = tool["parameters"]["properties"]
+    required = tool["parameters"]["required"]
+    assert "query" not in props, (
+        f"FS backend's list_memories schema should not expose a query "
+        f"parameter. Got: {props}"
+    )
+    assert required == [], (
+        f"FS backend's list_memories should require no parameters. "
+        f"Got required={required}"
+    )
+
+
 def test_reflection_tool_registration(bare_agent, tmp_path):
     """ReflectionModule: different mode combinations produce different tool sets."""
     from llamagent.modules.reflection import ReflectionModule
