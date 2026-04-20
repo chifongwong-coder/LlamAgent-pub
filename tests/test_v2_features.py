@@ -457,6 +457,41 @@ def test_retrieval_fs_backend(bare_agent, mock_llm_client, tmp_path):
     assert "Intro" in result
 
 
+def test_interface_presets_default_backends_to_fs():
+    """apply_presets() gives CLI / Web / API sane FS defaults for memory,
+    retrieval, and reflection.
+
+    Scope note: apply_presets uses the "value == Config default" heuristic
+    to detect "user hasn't set this". That means if a user explicitly sets
+    the Config-default value in config.yaml, it will still be overridden
+    by the preset — a known limitation of the heuristic, not this test's
+    concern.
+    """
+    from llamagent.core.config import Config
+    from llamagent.interfaces.presets import apply_presets, MODULE_PRESETS
+
+    # All three knowledge-bearing modules should default to fs via presets
+    assert MODULE_PRESETS["memory"]["memory_backend"] == "fs"
+    assert MODULE_PRESETS["retrieval"]["retrieval_backend"] == "fs"
+    assert MODULE_PRESETS["reflection"]["reflection_backend"] == "fs"
+
+    # Fresh config (all defaults) + enabling all three modules → all flip to fs
+    cfg = Config.__new__(Config)
+    cfg.__init__()
+    apply_presets(cfg, ["memory", "retrieval", "reflection"])
+    assert cfg.memory_backend == "fs"
+    assert cfg.retrieval_backend == "fs"
+    assert cfg.reflection_backend == "fs"
+
+    # Modules not enabled should NOT have their backends touched.
+    cfg_partial = Config.__new__(Config)
+    cfg_partial.__init__()
+    apply_presets(cfg_partial, ["memory"])  # retrieval not enabled
+    assert cfg_partial.memory_backend == "fs"
+    # retrieval_backend untouched — still whatever Config() default is
+    assert cfg_partial.retrieval_backend == Config().retrieval_backend
+
+
 def test_fs_memory_auto_inject(bare_agent, mock_llm_client, tmp_path):
     """MemoryModule FS backend + auto read mode injects metadata in on_context."""
     from llamagent.modules.memory.module import MemoryModule, MEMORY_GUIDE_FS_AUTO
