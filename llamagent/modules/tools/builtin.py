@@ -130,8 +130,12 @@ def web_fetch(url: str) -> str:
         else:
             text = resp.text
 
-        # Truncate overly long content
-        max_len = 5000
+        # Truncate overly long content. 20k chars comfortably covers a
+        # typical GitHub repo page, blog post, or doc page after bs4
+        # cleaning — the old 5k cap was cutting off the license section
+        # of GitHub repo pages (the About/License sidebar renders near
+        # the end of the HTML flow, past 5k chars of README content).
+        max_len = 20000
         if len(text) > max_len:
             text = text[:max_len] + f"\n...(content truncated, total {len(resp.text)} characters)"
 

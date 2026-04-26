@@ -107,6 +107,7 @@ _YAML_MAP = [
     (("output", "dir"), "output_dir", str),
     (("web", "search_provider"), "web_search_provider", str),
     (("web", "search_num_results"), "web_search_num_results", int),
+    (("web", "search_api_key"), "web_search_api_key", str),
     (("authorization", "mode"), "authorization_mode", str),
     (("authorization", "approval_mode"), "approval_mode", str),
     (("authorization", "auto_approve"), "auto_approve", bool),
@@ -190,7 +191,12 @@ class Config:
         self.max_duplicate_actions: int = 2
         self.react_timeout: float = 210.0
         self.react_total_timeout: float = 0  # 0 = unlimited (ContinuousRunner task_timeout handles it)
-        self.max_observation_tokens: int = 2000
+        # 32k covers typical web pages, long tool outputs, and most
+        # file reads comfortably. When exceeded, the framework persists
+        # the full result to a file under the workspace and tells the
+        # model to use read_files+ranges for specific sections
+        # (see agent.py _truncate_observation + _persist_tool_result).
+        self.max_observation_tokens: int = 32000
         self.tool_result_persist_threshold: int = 0  # 0 = follow max_observation_tokens
 
         # Retrieval (shared)
@@ -305,6 +311,11 @@ class Config:
         # Web
         self.web_search_provider: str = ""  # "" = auto-detect
         self.web_search_num_results: int = 5
+        # API key for the selected provider (Tavily, SerpAPI, etc.). Empty
+        # string → fall back to the provider's traditional env var
+        # (TAVILY_API_KEY, SERPAPI_KEY). Intended for users who prefer
+        # config.yaml over env vars.
+        self.web_search_api_key: str = ""
 
         # Hooks (parsed from YAML, not a flat field)
         self.hooks_config: dict | None = None
@@ -523,6 +534,10 @@ class Config:
         if env_web_provider:
             self.web_search_provider = env_web_provider
         self.web_search_num_results = _safe_int("WEB_SEARCH_NUM_RESULTS", self.web_search_num_results)
+        # Generic provider API key: WEB_SEARCH_API_KEY overrides config.yaml if set.
+        env_web_key = os.getenv("WEB_SEARCH_API_KEY")
+        if env_web_key:
+            self.web_search_api_key = env_web_key
 
         # Authorization
         env_auth_mode = os.getenv("AUTHORIZATION_MODE")
