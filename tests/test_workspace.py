@@ -573,6 +573,59 @@ class TestChangesetLRU:
         ev2 = engine._evaluate_command({"cmd": "rm node_modules"})
         assert ev2.overall_verdict == ZoneVerdict.ALLOW
 
+    def test_snapshot_taken_before_first_project_write(self, bare_agent, tmp_path):
+        """v3.3 D7: enabling snapshot causes the first write to capture
+        the write_root tree before mutating it."""
+        _make_agent_with_tools(bare_agent, tmp_path)
+        bare_agent.config.snapshot_enabled = True
+        # Seed an existing project file we'll modify.
+        original_path = os.path.join(bare_agent.project_dir, "main.py")
+        with open(original_path, "w") as f:
+            f.write("v1\n")
+
+        # First write triggers snapshot.
+        _call_tool_json(bare_agent, "write_files",
+            files={"main.py": "v2\n"})
+
+        snap_dir = bare_agent._snapshot_service._snapshot_dir
+        assert snap_dir is not None and os.path.isdir(snap_dir)
+        # Manifest exists with write_root recorded.
+        manifest_path = os.path.join(snap_dir, "MANIFEST.json")
+        assert os.path.isfile(manifest_path)
+        manifest = json.loads(open(manifest_path).read())
+        assert manifest["write_root"] == os.path.realpath(bare_agent.project_dir)
+        # Tree captured the original content.
+        snap_main = os.path.join(snap_dir, "tree", "main.py")
+        assert os.path.isfile(snap_main)
+        assert open(snap_main).read() == "v1\n"
+
+    def test_snapshot_disabled_by_default(self, bare_agent, tmp_path):
+        """In interactive mode (auto_approve=False, snapshot_enabled=False),
+        no snapshot is captured."""
+        _make_agent_with_tools(bare_agent, tmp_path)
+        # Default state — neither flag set.
+        bare_agent.config.snapshot_enabled = False
+        bare_agent.config.auto_approve = False
+
+        _call_tool_json(bare_agent, "write_files",
+            files={"x.txt": "1"})
+
+        # ensure_snapshot was called but is_enabled returned False.
+        assert getattr(bare_agent, "_snapshot_service", None) is None or \
+            bare_agent._snapshot_service._snapshot_dir is None
+
+    def test_snapshot_force_enabled_under_auto_approve(self, bare_agent, tmp_path):
+        """auto_approve=True force-enables snapshot even if user
+        didn't set snapshot_enabled."""
+        _make_agent_with_tools(bare_agent, tmp_path)
+        bare_agent.config.auto_approve = True
+        bare_agent.config.snapshot_enabled = False
+
+        _call_tool_json(bare_agent, "write_files",
+            files={"y.txt": "2"})
+
+        assert bare_agent._snapshot_service._snapshot_dir is not None
+
     def test_revert_evicted_path_surfaces_precise_error(self, bare_agent, tmp_path):
         bare_agent.config.changeset_max_count = 2
         bare_agent.config.changeset_max_total_bytes = 0

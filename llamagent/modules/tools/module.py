@@ -571,6 +571,9 @@ class ToolsModule(Module):
                         # so revert at least removes whatever we wrote.
                         had_prior = True
                         pre_image = None
+                # v3.3 D7: take a snapshot before the first project-zone write.
+                if track_changeset:
+                    self.agent.ensure_snapshot()
                 try:
                     os.makedirs(os.path.dirname(resolved), exist_ok=True)
                     if mode == "binary":
@@ -752,6 +755,9 @@ class ToolsModule(Module):
                 resolved = _resolve_within(target, base=base, allow_absolute=allow_abs)
             except ValueError as e:
                 return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
+            # v3.3 D7: snapshot before the first project-zone patch.
+            if zone != "playground" and not preview:
+                self.agent.ensure_snapshot()
             # Playground patches skip the changeset journal (ephemeral).
             if preview:
                 result = ps.preview_patch(resolved, edits)

@@ -492,6 +492,21 @@ class LlamAgent:
             self._write_root_project_dir = self.project_dir
         return self._write_root
 
+    def ensure_snapshot(self) -> str | None:
+        """v3.3 D7: capture a one-shot snapshot of write_root before any
+        state-changing operation (write_files, apply_patch, command).
+        Idempotent. No-op when snapshot is disabled (default in interactive
+        mode). Auto-enabled when ``config.auto_approve == True``.
+
+        Returns the snapshot directory path on success, None otherwise.
+        """
+        # Lazy-init the service so we don't pay the import cost when
+        # snapshot is disabled.
+        if not hasattr(self, "_snapshot_service"):
+            from llamagent.modules.tools.snapshot import SnapshotService
+            self._snapshot_service = SnapshotService(self)
+        return self._snapshot_service.ensure_taken()
+
     # ============================================================
     # Module management
     # ============================================================

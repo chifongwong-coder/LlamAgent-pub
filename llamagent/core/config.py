@@ -72,6 +72,10 @@ _YAML_MAP = [
     (("agent", "tool_result_persist_threshold"), "tool_result_persist_threshold", int),
     (("changeset", "max_count"), "changeset_max_count", int),
     (("changeset", "max_total_bytes"), "changeset_max_total_bytes", int),
+    (("snapshot", "enabled"), "snapshot_enabled", bool),
+    (("snapshot", "ignore_gitignore"), "snapshot_ignore_gitignore", bool),
+    (("snapshot", "max_size_mb"), "snapshot_max_size_mb", int),
+    (("snapshot", "retention_count"), "snapshot_retention_count", int),
     (("retrieval", "persist_dir"), "retrieval_persist_dir", str),
     (("retrieval", "embedding", "provider"), "embedding_provider", str),
     (("retrieval", "embedding", "model"), "embedding_model", str),
@@ -210,6 +214,17 @@ class Config:
         # revert_changes can give a precise error.
         self.changeset_max_count: int = 200
         self.changeset_max_total_bytes: int = 50 * 1024 * 1024  # 50 MB
+
+        # v3.3: Snapshot (D7) — coarse-grained safety net for CI / auto_approve.
+        # Lazy: a single tar-free directory copy of agent.write_root captured
+        # before the first project-zone write or command invocation.
+        self.snapshot_enabled: bool = False
+        self.snapshot_ignore_gitignore: bool = True   # skip .git/.gitignore'd files
+        self.snapshot_max_size_mb: int = 500           # refuse if write_root exceeds
+        self.snapshot_retention_count: int = 5         # keep last N session snapshots
+        # When auto_approve=True, snapshot is force-enabled (CI safety net),
+        # regardless of the explicit setting above. Set explicitly here only
+        # to opt INTO snapshot in interactive mode.
 
         # Retrieval (shared)
         self.embedding_provider: str = "chromadb"
