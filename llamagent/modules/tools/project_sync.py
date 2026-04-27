@@ -156,24 +156,24 @@ class ProjectSyncService:
             over_bytes = max_bytes > 0 and _total_bytes() > max_bytes
             return over_count or over_bytes
 
-        # Pass 1: drop reverted (tombstone) changesets oldest-first.
+        # Pass 1: drop reverted (tombstone) changesets oldest-first,
+        # one at a time, re-checking _over() after each drop. Without
+        # the per-drop re-check we'd over-evict tombstones whenever the
+        # backlog has many of them.
         if _over():
-            keep: list[Changeset] = []
-            dropped = 0
-            for cs in self._changesets:
-                if cs.reverted and _over():
+            i = 0
+            while i < len(self._changesets) and _over():
+                cs = self._changesets[i]
+                if cs.reverted:
                     self._evicted_paths.add(cs.target_path)
                     logger.info(
                         "changeset evicted (reverted/tombstone): %s",
                         cs.target_path,
                     )
-                    dropped += 1
-                    # Pretend it's gone for the over-check via a temporary
-                    # rebuild after the loop.
+                    self._changesets.pop(i)
+                    # Don't advance i — popped index now points at next.
                 else:
-                    keep.append(cs)
-            if dropped:
-                self._changesets = keep
+                    i += 1
 
         # Pass 2: drop oldest unreverted as needed.
         while _over() and self._changesets:

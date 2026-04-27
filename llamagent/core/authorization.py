@@ -810,9 +810,17 @@ class AuthorizationEngine:
         return True
 
     def _command_pattern_allowed(self, normalized: str) -> bool:
-        """Check whether any active ApprovalScope.command_patterns matches."""
+        """Check whether any active ApprovalScope.command_patterns matches.
+
+        Scopes whose ``tool_names`` does not include "command" are
+        skipped — a scope created for a different tool MUST NOT
+        accidentally pre-approve a command pattern.
+        """
         scopes = self._active_command_scopes()
         for sc in scopes:
+            tool_names = sc.tool_names or []
+            if "command" not in tool_names:
+                continue
             for pattern in (sc.command_patterns or []):
                 if fnmatch.fnmatchcase(normalized, pattern):
                     return True

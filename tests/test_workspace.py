@@ -663,6 +663,100 @@ class TestChangesetLRU:
 
         assert bare_agent._snapshot_service._snapshot_dir is not None
 
+    def test_byte_cap_evicts_when_pre_image_total_too_large(self, bare_agent, tmp_path):
+        """v3.3 §五: changeset_max_total_bytes triggers eviction even
+        when count cap is loose. Verifies the byte-cap branch (was
+        untested pre-fixup #4)."""
+        # Disable count cap; cap pre_image bytes at 200.
+        bare_agent.config.changeset_max_count = 0
+        bare_agent.config.changeset_max_total_bytes = 200
+        _make_agent_with_tools(bare_agent, tmp_path)
+
+        # Each patch keeps a pre_image of ~80 bytes. After 3 patches we
+        # should be over the 200-byte cap and the oldest changesets get
+        # evicted.
+        for i in range(4):
+            target = os.path.join(bare_agent.project_dir, f"big{i}.txt")
+            with open(target, "w") as f:
+                f.write(f"v{i} " + "x" * 70 + "\n")
+            _call_tool_json(bare_agent, "apply_patch", target=f"big{i}.txt",
+                edits=[{"match": f"v{i}", "replace": "Y"}])
+
+        ps = bare_agent.modules["tools"].project_sync_service
+        total = sum(len(cs.pre_image) for cs in ps._changesets if cs.pre_image)
+        assert total <= 200, f"byte cap not enforced; total={total}"
+        # At least one path was evicted.
+        assert ps._evicted_paths
+
+    def test_pass1_drops_only_enough_tombstones(self, bare_agent, tmp_path):
+        """v3.3 fixup: Pass 1 (reverted/tombstone eviction) re-checks
+        _over() after each drop, instead of dropping every tombstone in
+        a single pass. Prevents over-eviction when tombstones are many
+        but cap is only slightly exceeded."""
+        bare_agent.config.changeset_max_count = 3
+        bare_agent.config.changeset_max_total_bytes = 0
+        _make_agent_with_tools(bare_agent, tmp_path)
+
+        # Apply 3 patches and revert all 3 (3 tombstones, count == cap).
+        for i in range(3):
+            target = os.path.join(bare_agent.project_dir, f"f{i}.txt")
+            with open(target, "w") as f:
+                f.write(f"v{i}\n")
+            _call_tool_json(bare_agent, "apply_patch", target=f"f{i}.txt",
+                edits=[{"match": f"v{i}", "replace": "Y"}])
+        # Revert each (creates 3 tombstones, count still 3).
+        for i in range(3):
+            _call_tool_json(bare_agent, "revert_changes",
+                targets=[f"f{i}.txt"])
+
+        ps = bare_agent.modules["tools"].project_sync_service
+        # All 3 tombstones still present — count == cap, not over.
+        assert len(ps._changesets) == 3
+        assert all(cs.reverted for cs in ps._changesets)
+
+        # Add one more patch → over the cap → Pass 1 drops ONE tombstone
+        # (the oldest), keeping the rest.
+        target = os.path.join(bare_agent.project_dir, "fresh.txt")
+        with open(target, "w") as f:
+            f.write("z\n")
+        _call_tool_json(bare_agent, "apply_patch", target="fresh.txt",
+            edits=[{"match": "z", "replace": "X"}])
+
+        # 3 left: 2 tombstones + 1 fresh. Over-evict bug would have
+        # dropped all 3 tombstones, leaving only the fresh one.
+        assert len(ps._changesets) == 3, \
+            f"Pass 1 over-dropped tombstones; left {len(ps._changesets)}"
+        live_count = sum(1 for cs in ps._changesets if not cs.reverted)
+        assert live_count == 1
+        tomb_count = sum(1 for cs in ps._changesets if cs.reverted)
+        assert tomb_count == 2
+
+    def test_command_pattern_scope_filters_by_tool_name(self, bare_agent, tmp_path):
+        """v3.3 fixup: an ApprovalScope whose tool_names does NOT
+        contain 'command' must not pre-approve a command pattern,
+        even if it carries a command_patterns field."""
+        from llamagent.modules.sandbox.module import SandboxModule
+        from llamagent.core.zone import ZoneVerdict
+        from llamagent.core.authorization import ApprovalScope
+
+        _make_agent_with_tools(bare_agent, tmp_path)
+        bare_agent.register_module(SandboxModule(auto_assign=False))
+        engine = bare_agent._authorization_engine
+
+        # Scope intended for some other tool, with command_patterns set
+        # by mistake. Should NOT short-circuit the command engine.
+        engine.add_scope(ApprovalScope(
+            scope="session", zone="external",
+            actions=["execute"], path_prefixes=[],
+            tool_names=["some_other_tool"],   # ← not "command"
+            command_patterns=["rm node_modules*"],
+        ))
+
+        # `rm node_modules` would be ASK without scope short-circuit.
+        ev = engine._evaluate_command({"cmd": "rm node_modules"})
+        assert ev.overall_verdict == ZoneVerdict.CONFIRMABLE, \
+            "scope without 'command' in tool_names must NOT pre-approve"
+
     def test_revert_evicted_path_surfaces_precise_error(self, bare_agent, tmp_path):
         bare_agent.config.changeset_max_count = 2
         bare_agent.config.changeset_max_total_bytes = 0

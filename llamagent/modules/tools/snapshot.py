@@ -130,9 +130,12 @@ class SnapshotService:
             if not parent or parent == os.sep:
                 parent = os.path.join(os.path.expanduser("~"), ".llamagent")
             base = os.path.join(parent, ".llamagent_snapshots")
+        # Add a 4-char random suffix to defeat same-second collisions
+        # when multiple agents start concurrently against the same base.
         ts = time.strftime("%Y%m%d_%H%M%S")
         session_id = self._session_id_hint()
-        snap_dir = os.path.join(base, f"{ts}_{session_id}")
+        rand = "%04x" % (os.getpid() & 0xFFFF)
+        snap_dir = os.path.join(base, f"{ts}_{session_id}_{rand}")
         os.makedirs(snap_dir, exist_ok=True)
 
         ignore = self._build_ignore_callable(write_root)
