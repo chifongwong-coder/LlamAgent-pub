@@ -29,13 +29,16 @@ logger = logging.getLogger(__name__)
 # Storage ID for admin-created common tools
 COMMON_STORE_ID = "__common__"
 
-# Workspace behavioral guidelines injected via on_context
+# File-tool behavioral guidelines injected via on_context (v3.3 surface)
 WORKSPACE_GUIDE = """\
-[Workspace Guidelines]
-- Work in workspace first, then promote results to project via apply_patch.
-- Paths in workspace tools are relative to workspace root by default.
-  Use "project:" prefix to access project files (e.g., "project:src/main.py").
-- For command execution, use start_job. Set wait=True for quick commands, wait=False for long tasks."""
+[File Tool Guidelines]
+- File tool paths default to the project directory.
+- Project writes (write_files / apply_patch) are tracked by changeset; use
+  revert_changes to undo a recent edit.
+- For ephemeral scratch (intermediate computation, system cache lookups),
+  set zone='playground'. Playground writes are NOT tracked by revert_changes.
+- For shell command execution (move / copy / delete / glob / grep), use
+  start_job. Set wait=True for quick commands, wait=False for long tasks."""
 
 # Known text file extensions for automatic type detection in read_files
 _TEXT_EXTENSIONS = frozenset({
@@ -254,11 +257,37 @@ class ToolsModule(Module):
     def _register_workspace_tools(self):
         """Register workspace exploration and modification tools."""
         ws = self.workspace_service
+        from llamagent.modules.tools.workspace import _resolve_within
+
+        # v3.3 path resolution helpers — all 5 core tools route through these.
+        #
+        #   _read_base(args)  -> (base, allow_absolute)  for read tools
+        #   _write_base(args) -> (base, allow_absolute)  for write tools
+        #
+        # zone="playground"  -> base = ws.workspace_root, abs paths rejected
+        # zone="project"     -> reads against project_dir, writes against write_root
+        def _read_base(args):
+            if args.get("zone") == "playground":
+                return ws.workspace_root, False
+            return self.agent.project_dir, True
+
+        def _write_base(args):
+            if args.get("zone") == "playground":
+                return ws.workspace_root, False
+            return self.agent.write_root, True
+
+        def _resolve_for(args, *, write: bool, raw_path: str) -> str:
+            base, allow_abs = (_write_base(args) if write else _read_base(args))
+            return _resolve_within(raw_path, base=base, allow_absolute=allow_abs)
 
         # --- Exploration tools (safety_level=1) ---
 
-        def _list_tree(root: str = ".", max_depth: int = 3) -> str:
-            resolved = ws.resolve_path(root)
+        def _list_tree(root: str = ".", max_depth: int = 3, zone: str = "project") -> str:
+            args = {"root": root, "zone": zone}
+            try:
+                resolved = _resolve_for(args, write=False, raw_path=root)
+            except ValueError as e:
+                return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
             lines = []
             for dirpath, dirnames, filenames in os.walk(resolved):
                 depth = dirpath.replace(resolved, "").count(os.sep)
@@ -273,13 +302,18 @@ class ToolsModule(Module):
 
         self.agent.register_tool(
             name="list_tree", func=_list_tree,
-            description="List directory tree structure. Paths relative to workspace; use 'project:' prefix for project files.",
+            description=(
+                "List directory tree structure. Paths default to the project. "
+                "Set zone='playground' to list the framework's scratch cache."
+            ),
             parameters={"type": "object", "properties": {
-                "root": {"type": "string", "description": "Root directory (default: workspace root). Use 'project:' prefix for project files.", "default": "."},
+                "root": {"type": "string", "description": "Root directory (relative to project)", "default": "."},
                 "max_depth": {"type": "integer", "description": "Maximum depth (default: 3)", "default": 3},
+                "zone": {"type": "string", "enum": ["project", "playground"], "default": "project",
+                          "description": "Where to list. 'project' (default) | 'playground' (scratch cache)."},
             }},
             tier="common", safety_level=1,
-            path_extractor=lambda args: [ws.resolve_path(args.get("root", "."))],
+            path_extractor=lambda args: [_resolve_for(args, write=False, raw_path=args.get("root", "."))],
         )
 
         def _glob_files(pattern: str, root: str = ".") -> str:
@@ -300,12 +334,18 @@ class ToolsModule(Module):
             path_extractor=lambda args: [ws.resolve_path(args.get("root", "."))],
         )
 
-        def _search_text(query: str, paths: list = None, regex: bool = False, case_sensitive: bool = False) -> str:
+        def _search_text(query: str, paths: list = None, regex: bool = False,
+                         case_sensitive: bool = False, zone: str = "project") -> str:
             import re as _re
-            search_root = ws.workspace_root
+            args = {"zone": zone}
+            search_root, allow_abs = _read_base(args)
             target_files = []
             if paths:
-                target_files = [ws.resolve_path(p) for p in paths]
+                try:
+                    target_files = [_resolve_within(p, base=search_root, allow_absolute=allow_abs)
+                                    for p in paths]
+                except ValueError as e:
+                    return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
             else:
                 for dirpath, _, filenames in os.walk(search_root):
                     for fn in filenames:
@@ -327,27 +367,42 @@ class ToolsModule(Module):
 
         self.agent.register_tool(
             name="search_text", func=_search_text,
-            description="Search files for text content. Searches workspace by default; pass 'project:' prefixed paths to search project files.",
+            description=(
+                "Search files for text content. Default scope is the project. "
+                "Set zone='playground' to search the framework's scratch cache."
+            ),
             parameters={"type": "object", "properties": {
                 "query": {"type": "string", "description": "Search query string"},
-                "paths": {"type": "array", "items": {"type": "string"}, "description": "Paths to search (default: entire workspace)"},
+                "paths": {"type": "array", "items": {"type": "string"}, "description": "Paths to search (default: entire project)"},
                 "regex": {"type": "boolean", "description": "Use regex matching", "default": False},
                 "case_sensitive": {"type": "boolean", "description": "Case sensitive search", "default": False},
+                "zone": {"type": "string", "enum": ["project", "playground"], "default": "project",
+                          "description": "Where to search. 'project' (default) | 'playground' (scratch cache)."},
             }, "required": ["query"]},
             tier="common", safety_level=1,
-            path_extractor=lambda args: ws.resolve_paths(args["paths"]) if args.get("paths") else [],
+            path_extractor=lambda args: (
+                [_resolve_for(args, write=False, raw_path=p) for p in args["paths"]]
+                if args.get("paths") else []
+            ),
         )
 
-        def _read_files(paths: list, ranges: dict = None, with_line_numbers: bool = True, mode: str = "auto") -> str:
+        def _read_files(paths: list, ranges: dict = None, with_line_numbers: bool = True,
+                        mode: str = "auto", zone: str = "project") -> str:
             """Read files with automatic text/binary detection.
 
             mode: "auto" (detect by extension/content), "text" (force text), "binary" (return base64).
+            zone: "project" (default, relative to project_dir) or "playground" (scratch cache).
             """
+            args = {"zone": zone}
             budget = getattr(self.agent.config, "max_observation_tokens", 2000)
             per_file = max(200, budget // max(len(paths), 1))
             results = []
             for p in paths:
-                resolved = ws.resolve_path(p)
+                try:
+                    resolved = _resolve_for(args, write=False, raw_path=p)
+                except ValueError as e:
+                    results.append({"path": p, "error": str(e)})
+                    continue
                 try:
                     # Determine if file is text or binary
                     force_binary = (mode == "binary")
@@ -433,7 +488,8 @@ class ToolsModule(Module):
             description=(
                 "Read one or more files. Text files return content with line numbers; "
                 "binary files return metadata (size, mime type). "
-                "Paths relative to workspace; use 'project:' prefix for project files. "
+                "Paths default to the project directory. Set zone='playground' to "
+                "read from the framework's scratch cache. "
                 "Use 'ranges' to read specific line ranges. "
                 "Use mode='binary' to get base64 content of binary files."
             ),
@@ -442,9 +498,13 @@ class ToolsModule(Module):
                 "ranges": {"type": "object", "description": "Optional mapping of file path to 'start-end' line range string (e.g., {'main.py': '10-50'})"},
                 "with_line_numbers": {"type": "boolean", "description": "Include line numbers for text files", "default": True},
                 "mode": {"type": "string", "description": "Read mode: 'auto' (detect type), 'text' (force text), 'binary' (return base64)", "default": "auto"},
+                "zone": {"type": "string", "enum": ["project", "playground"], "default": "project",
+                          "description": "Where to read. 'project' (default) | 'playground' (scratch cache)."},
             }, "required": ["paths"]},
             tier="common", safety_level=1,
-            path_extractor=lambda args: ws.resolve_paths(args.get("paths", [])),
+            path_extractor=lambda args: [
+                _resolve_for(args, write=False, raw_path=p) for p in args.get("paths", [])
+            ],
         )
 
         def _stat_paths(paths: list) -> str:
@@ -474,13 +534,19 @@ class ToolsModule(Module):
 
         # --- Modification tools (safety_level=2) ---
 
-        def _write_files(files: dict, mode: str = "text") -> str:
-            """Write files to workspace. mode='text' (default) or 'binary' (base64-encoded content)."""
+        def _write_files(files: dict, mode: str = "text", zone: str = "project") -> str:
+            """Write files. Default zone is the project (write_root); set
+            zone='playground' for the framework's scratch cache.
+
+            Project writes are tracked by changeset for revert; playground
+            writes are ephemeral and not tracked.
+            """
+            args = {"zone": zone}
             written = []
             errors = []
             for path, content in files.items():
                 try:
-                    resolved = ws.resolve_path_workspace_only(path)
+                    resolved = _resolve_for(args, write=True, raw_path=path)
                 except ValueError as e:
                     errors.append({"path": path, "error": str(e)})
                     continue
@@ -504,28 +570,39 @@ class ToolsModule(Module):
             if errors:
                 sample = errors[0].get("path", "")
                 basename = os.path.basename(sample.rstrip("/")) or "newfile.txt"
-                response["hint"] = (
-                    f"Some paths were rejected because they resolve outside "
-                    f"the workspace. To retry, use a workspace-relative path. "
-                    f"For example, call write_files again with "
-                    f"files={{'{basename}': <content>}} to write '{basename}' "
-                    f"directly at the workspace root. If you actually need to "
-                    f"write into the project directory, use apply_patch."
-                )
+                if zone == "playground":
+                    response["hint"] = (
+                        f"Some paths were rejected because they resolve outside "
+                        f"the playground (or were absolute paths). Retry with a "
+                        f"playground-relative path like '{basename}'."
+                    )
+                else:
+                    response["hint"] = (
+                        f"Some paths were rejected because they resolve outside "
+                        f"the project's write boundary. Retry with a project-"
+                        f"relative path like '{basename}'. If you need to write "
+                        f"into the framework's scratch cache, set zone='playground'."
+                    )
             return json.dumps(response, ensure_ascii=False)
 
         self.agent.register_tool(
             name="write_files", func=_write_files,
             description=(
-                "Write one or more files to workspace. Keys are file paths, values are content strings. "
+                "Write one or more files. Default zone is the project; writes are "
+                "tracked by changeset for revert. Set zone='playground' for the "
+                "framework's scratch cache (writes there are ephemeral, not tracked). "
                 "Use mode='binary' to write base64-encoded binary content."
             ),
             parameters={"type": "object", "properties": {
                 "files": {"type": "object", "description": "Mapping of file path -> content string (or base64 for binary mode)"},
                 "mode": {"type": "string", "description": "Write mode: 'text' (default) or 'binary' (base64-encoded)", "default": "text"},
+                "zone": {"type": "string", "enum": ["project", "playground"], "default": "project",
+                          "description": "Where to write. 'project' (default, changeset-tracked) | 'playground' (scratch, ephemeral)."},
             }, "required": ["files"]},
             tier="common", safety_level=2,
-            path_extractor=lambda args: ws.resolve_paths(list(args.get("files", {}).keys())),
+            path_extractor=lambda args: [
+                _resolve_for(args, write=True, raw_path=p) for p in (args.get("files") or {}).keys()
+            ],
         )
 
         def _create_temp_file(prefix: str = "", suffix: str = "", content: str = "") -> str:
@@ -634,44 +711,95 @@ class ToolsModule(Module):
     def _register_project_sync_tools(self):
         """Register project sync tools (apply_patch, sync, revert)."""
         ps = self.project_sync_service
+        ws = self.workspace_service
+        from llamagent.modules.tools.workspace import _resolve_within
 
-        def _apply_patch(target: str, edits: list, preview: bool = False) -> str:
+        def _patch_base(args):
+            if args.get("zone") == "playground":
+                return ws.workspace_root, False
+            return self.agent.write_root, True
+
+        def _apply_patch(target: str, edits: list, preview: bool = False,
+                         zone: str = "project") -> str:
+            args = {"zone": zone}
+            base, allow_abs = _patch_base(args)
+            try:
+                resolved = _resolve_within(target, base=base, allow_absolute=allow_abs)
+            except ValueError as e:
+                return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
+            # Playground patches skip the changeset journal (ephemeral).
             if preview:
-                result = ps.preview_patch(target, edits)
+                result = ps.preview_patch(resolved, edits)
             else:
-                result = ps.apply_patch(target, edits)
+                result = ps.apply_patch(
+                    resolved, edits, record_changeset=(zone != "playground"),
+                )
             return json.dumps(result, ensure_ascii=False)
 
         self.agent.register_tool(
             name="apply_patch", func=_apply_patch,
-            description="Apply structured search/replace edits to a project file. Atomic: all edits succeed or none are written. Target path is relative to project root. Set preview=true to validate edits without writing.",
+            description=(
+                "Apply structured search/replace edits to a file. Atomic: all "
+                "edits succeed or none are written. Default zone is the project; "
+                "edits are tracked by changeset for revert. Set zone='playground' "
+                "to patch the framework's scratch cache (not tracked). "
+                "Set preview=true to validate without writing."
+            ),
             parameters={"type": "object", "properties": {
-                "target": {"type": "string", "description": "Target file path relative to project root"},
+                "target": {"type": "string", "description": "Target file path (relative to project by default)"},
                 "edits": {"type": "array", "items": {"type": "object", "properties": {
                     "match": {"type": "string", "description": "Exact text to find"},
                     "replace": {"type": "string", "description": "Replacement text"},
                     "expected_count": {"type": "integer", "description": "Expected match count (default: 1)", "default": 1},
                 }, "required": ["match", "replace"]}, "description": "List of search/replace operations"},
                 "preview": {"type": "boolean", "description": "If true, validate edits without writing to disk", "default": False},
+                "zone": {"type": "string", "enum": ["project", "playground"], "default": "project",
+                          "description": "Where to apply. 'project' (default, changeset-tracked) | 'playground' (scratch, ephemeral)."},
             }, "required": ["target", "edits"]},
             tier="common", safety_level=2,
-            path_extractor=lambda args: [ps.resolve_project_path(args.get("target", ""))],
+            path_extractor=lambda args: [
+                _resolve_within(
+                    args.get("target", ""),
+                    base=(ws.workspace_root if args.get("zone") == "playground" else self.agent.write_root),
+                    allow_absolute=(args.get("zone") != "playground"),
+                )
+            ],
         )
 
         def _revert_changes(targets: list = None) -> str:
-            result = ps.revert_changes(targets)
+            # Per D7 decision: a path that resolves to playground is never
+            # in the changeset stack (playground writes are ephemeral). Let
+            # the service surface the natural "no changeset" error.
+            if targets:
+                resolved_targets = []
+                for t in targets:
+                    try:
+                        resolved_targets.append(_resolve_within(
+                            t, base=self.agent.write_root, allow_absolute=True))
+                    except ValueError as e:
+                        return json.dumps({"status": "error", "error": str(e)},
+                                          ensure_ascii=False)
+                result = ps.revert_changes(resolved_targets)
+            else:
+                result = ps.revert_changes(None)
             return json.dumps(result, ensure_ascii=False)
 
         self.agent.register_tool(
             name="revert_changes", func=_revert_changes,
-            description="Revert the most recent project file change. Pass file paths to revert specific files, or omit for the most recent global changeset.",
+            description=(
+                "Revert the most recent project file change tracked by changeset. "
+                "Pass file paths (relative to project) to revert specific files, "
+                "or omit to revert the single most-recent global changeset. "
+                "Note: playground writes are ephemeral and not tracked."
+            ),
             parameters={"type": "object", "properties": {
-                "targets": {"type": "array", "items": {"type": "string"}, "description": "File paths to revert (relative to project root). Omit to revert most recent changeset."},
+                "targets": {"type": "array", "items": {"type": "string"}, "description": "File paths to revert (relative to project). Omit to revert most recent changeset."},
             }},
             tier="common", safety_level=2,
             path_extractor=lambda args: [
-                ps.resolve_project_path(t) for t in (args.get("targets") or [])
-            ] or [self.agent.project_dir],  # Sentinel: zone-check project_dir when targets=None
+                _resolve_within(t, base=self.agent.write_root, allow_absolute=True)
+                for t in (args.get("targets") or [])
+            ] or [self.agent.write_root],  # Sentinel: zone-check write_root when targets=None
         )
 
     # ============================================================

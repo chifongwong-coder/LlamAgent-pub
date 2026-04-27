@@ -159,9 +159,10 @@ class TestCrossModule:
         with open(config_file) as f:
             assert f.read() == original
 
-        # --- write_files rejects project: prefix ---
+        # --- v3.3: write_files rejects path-escape attempts ---
+        # 'project:' prefix no longer special; use '../' for the escape test.
         result = _call_tool_json(bare_agent, "write_files", files={
-            "project:hack.py": "bad content",
+            "../escape.py": "bad content",
         })
         assert result["status"] == "partial"
         assert len(result["errors"]) == 1
@@ -193,7 +194,7 @@ class TestCrossModule:
         context2 = skill_mod.on_context("create a tool", context2)
 
         # Both should be present
-        assert "[Workspace Guidelines]" in context2
+        assert "[File Tool Guidelines]" in context2
         assert "[Available Tool Packs]" in context2
         # If toolsmith skill was found, its playbook is also injected
         if "[Active Skill: toolsmith]" in context2:

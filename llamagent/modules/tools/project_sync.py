@@ -142,10 +142,9 @@ class ProjectSyncService:
         Returns:
             Absolute, symlink-resolved filesystem path.
         """
-        # Accept the 'project:' prefix from read_files' convention so
-        # models that learn the prefix from one tool can reuse it here.
-        if target.startswith("project:"):
-            target = target[len("project:"):]
+        # v3.3: 'project:' prefix removed (B2 decision). Tools now select
+        # between project and playground via the zone parameter; see
+        # workspace._resolve_within for the unified resolver.
         if os.path.isabs(target):
             return os.path.realpath(target)
         return os.path.realpath(os.path.join(self.agent.project_dir, target))
@@ -154,7 +153,8 @@ class ProjectSyncService:
     # Core: apply_patch
     # ================================================================
 
-    def apply_patch(self, target: str, edits: list[dict]) -> dict:
+    def apply_patch(self, target: str, edits: list[dict],
+                    record_changeset: bool = True) -> dict:
         """
         Apply structured search/replace edits to a project file atomically.
 
@@ -164,7 +164,9 @@ class ProjectSyncService:
         every edit succeeds, the result is written via temp file + fsync +
         atomic rename.  If any edit fails, the file is untouched.
 
-        Each successful apply creates a Changeset (decision C1).
+        Each successful apply creates a Changeset (decision C1) by default.
+        Pass ``record_changeset=False`` to skip changeset recording — used
+        by the v3.3 ``zone="playground"`` mode where edits are ephemeral.
 
         Args:
             target: File path (relative to project_dir, or absolute).
@@ -173,6 +175,9 @@ class ProjectSyncService:
                 - ``replace`` (str): Replacement text.
                 - ``expected_count`` (int, optional): Expected number of
                   occurrences of ``match``.  Defaults to 1.
+            record_changeset: When False, skip Changeset registration so
+                the edit cannot be reverted via ``revert_changes``. Used
+                for playground patches in v3.3.
 
         Returns:
             Result dict with ``status`` ("success" or "error") and details.
@@ -257,6 +262,19 @@ class ProjectSyncService:
 
             # All edits succeeded — atomic write
             self._atomic_write(resolved, content)
+
+            if not record_changeset:
+                # Playground / ephemeral mode: skip changeset registration.
+                logger.info(
+                    "apply_patch succeeded (no changeset): %s (%d edits)",
+                    resolved, len(edits),
+                )
+                return {
+                    "status": "success",
+                    "target": resolved,
+                    "edits_applied": len(edits),
+                    "changeset_id": None,
+                }
 
             # Record changeset
             changeset = Changeset(

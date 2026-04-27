@@ -153,16 +153,20 @@ class WorkspaceService:
 
     def resolve_path(self, raw_path: str) -> str:
         """
-        Resolve a raw path string to an absolute, real filesystem path.
+        Resolve a raw path string to an absolute, real filesystem path,
+        relative to ``workspace_root`` by default.
+
+        v3.3: legacy ``project:`` prefix support has been removed; the 5
+        core file tools select between project and playground via the
+        ``zone`` parameter and the new :func:`_resolve_within` helper.
+        This method is retained for backwards compatibility with
+        WorkspaceService internal callers (e.g. ``ensure_in_workspace``)
+        and for any third-party code that still uses it; new code should
+        prefer ``_resolve_within(raw, base=..., allow_absolute=...)``.
 
         Resolution rules:
-        - ``project:`` prefix -> relative to ``agent.project_dir``
         - Absolute path -> used as-is (after realpath)
         - Relative path -> relative to ``workspace_root``
-
-        Security: **always** applies ``os.path.realpath()`` to the final
-        result, resolving symlinks and ``..`` components.  This prevents
-        path-traversal attacks such as ``project:../../etc/passwd``.
 
         Args:
             raw_path: The raw path string from a tool argument.
@@ -170,16 +174,8 @@ class WorkspaceService:
         Returns:
             Absolute, symlink-resolved filesystem path.
         """
-        if raw_path.startswith("project:"):
-            relative = raw_path[len("project:"):]
-            return os.path.realpath(
-                os.path.join(self.agent.project_dir, relative)
-            )
-
         if os.path.isabs(raw_path):
             return os.path.realpath(raw_path)
-
-        # Relative path -> resolve against workspace root
         return os.path.realpath(
             os.path.join(self.workspace_root, raw_path)
         )

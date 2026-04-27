@@ -133,12 +133,12 @@ class TestContextInjection:
 
 
 class TestWorkspaceExplorationAndFileTypes:
-    """list_tree, read_files with project prefix, ranges, text/binary detection."""
+    """list_tree, read_files (zone parameter), ranges, text/binary detection."""
 
     def test_workspace_exploration_and_file_types(self, bare_agent, tmp_path):
         _make_agent_with_tools(bare_agent, tmp_path)
 
-        # -- write_files creates files, list_tree shows them --
+        # -- write_files creates files in project (v3.3 default) --
         result = _call_tool_json(bare_agent, "write_files", files={
             "src/main.py": "print('hello')",
             "README.md": "# Project",
@@ -149,12 +149,12 @@ class TestWorkspaceExplorationAndFileTypes:
         assert "main.py" in tree_result["tree"]
         assert "README.md" in tree_result["tree"]
 
-        # -- read_files resolves project: prefix to project_dir --
+        # -- read_files default = project (v3.3, no prefix) --
         project_dir = bare_agent.project_dir
         with open(os.path.join(project_dir, "test.txt"), "w") as f:
             f.write("project file content")
 
-        result = _call_tool_json(bare_agent, "read_files", paths=["project:test.txt"])
+        result = _call_tool_json(bare_agent, "read_files", paths=["test.txt"])
         assert result["status"] == "success"
         assert "project file content" in result["files"][0]["content"]
 
@@ -184,8 +184,7 @@ class TestWorkspaceExplorationAndFileTypes:
         assert file_info.get("binary") is not True
 
         # -- Binary file (.png) returns metadata only in auto mode --
-        ws_root = bare_agent.modules["tools"].workspace_service.workspace_root
-        bin_path = os.path.join(ws_root, "image.png")
+        bin_path = os.path.join(project_dir, "image.png")
         with open(bin_path, "wb") as f:
             f.write(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
 
@@ -198,7 +197,7 @@ class TestWorkspaceExplorationAndFileTypes:
         assert "content" not in file_info
 
         # -- mode='binary' returns base64-encoded content --
-        bin_path2 = os.path.join(ws_root, "data.bin")
+        bin_path2 = os.path.join(project_dir, "data.bin")
         original_bytes = b"\x00\x01\x02\x03\xff\xfe\xfd"
         with open(bin_path2, "wb") as f:
             f.write(original_bytes)
@@ -222,14 +221,29 @@ class TestWorkspaceExplorationAndFileTypes:
         assert "content" in file_info
         assert "echo hello" in file_info["content"]
 
+        # -- zone='playground' reads/writes from the playground (scratch) --
+        result = _call_tool_json(bare_agent, "write_files",
+            files={"scratch.txt": "scratch contents"}, zone="playground")
+        assert result["status"] == "success"
+        ws_root = bare_agent.modules["tools"].workspace_service.workspace_root
+        scratch_path = os.path.join(ws_root, "scratch.txt")
+        assert os.path.isfile(scratch_path)
+        assert open(scratch_path).read() == "scratch contents"
+
+        result = _call_tool_json(bare_agent, "read_files",
+            paths=["scratch.txt"], zone="playground")
+        assert result["status"] == "success"
+        assert "scratch contents" in result["files"][0]["content"]
+
 
 class TestWriteFilesAndRestrictions:
-    """Binary write, text write, reject project prefix, allow workspace."""
+    """v3.3: writes default to project (write_root); zone='playground' for scratch."""
 
     def test_write_files_and_restrictions(self, bare_agent, tmp_path):
         _make_agent_with_tools(bare_agent, tmp_path)
+        project_dir = bare_agent.project_dir
 
-        # -- mode='binary' writes base64-decoded bytes --
+        # -- mode='binary' writes base64-decoded bytes to project (default) --
         original_bytes = b"\x89PNG\r\n\x1a\n\x00\x01\x02\x03"
         b64_content = base64.b64encode(original_bytes).decode("ascii")
 
@@ -237,32 +251,43 @@ class TestWriteFilesAndRestrictions:
             files={"output.png": b64_content}, mode="binary")
         assert result["status"] == "success"
 
-        ws_root = bare_agent.modules["tools"].workspace_service.workspace_root
-        with open(os.path.join(ws_root, "output.png"), "rb") as f:
+        with open(os.path.join(project_dir, "output.png"), "rb") as f:
             assert f.read() == original_bytes
 
-        # -- Default mode='text' writes UTF-8 string content --
+        # -- Default mode='text' writes UTF-8 string content to project --
         result = _call_tool_json(bare_agent, "write_files",
             files={"test.txt": "hello world"})
         assert result["status"] == "success"
 
-        with open(os.path.join(ws_root, "test.txt"), "r") as f:
+        with open(os.path.join(project_dir, "test.txt"), "r") as f:
             assert f.read() == "hello world"
 
-        # -- write_files rejects project: prefix --
+        # -- v3.3: 'project:' prefix is no longer special; literal path
+        #    "project:hack.py" treated as a filename, fails containment
+        #    check (the colon doesn't prevent containment but '..' would). --
+        # -- write_files rejects path-escape attempts --
         result = _call_tool_json(bare_agent, "write_files", files={
-            "project:hack.py": "malicious content",
+            "../escape.py": "malicious content",
         })
         assert result["status"] == "partial"
         assert len(result["errors"]) == 1
-        assert "workspace" in result["errors"][0]["error"].lower()
+        assert "escape" in result["errors"][0]["error"].lower()
 
-        # -- write_files allows normal workspace-relative paths --
+        # -- write_files allows normal project-relative paths --
         result = _call_tool_json(bare_agent, "write_files", files={
             "normal.txt": "safe content",
         })
         assert result["status"] == "success"
         assert "normal.txt" in result["written"]
+
+        # -- zone='playground' writes to playground, not project --
+        ws_root = bare_agent.modules["tools"].workspace_service.workspace_root
+        result = _call_tool_json(bare_agent, "write_files",
+            files={"scratch.json": "{\"x\": 1}"}, zone="playground")
+        assert result["status"] == "success"
+        assert os.path.isfile(os.path.join(ws_root, "scratch.json"))
+        # Project file with same name was NOT created.
+        assert not os.path.isfile(os.path.join(project_dir, "scratch.json"))
 
 
 class TestPatchAndSyncLifecycle:
