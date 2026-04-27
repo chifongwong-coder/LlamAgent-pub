@@ -60,6 +60,68 @@ class SandboxModule(Module):
                 ):
                     tool["execution_policy"] = POLICY_LOCAL_SUBPROCESS
 
+        # v3.3: register the `command` shell tool. Provides a generic
+        # escape hatch for path operations (mv / cp / rm / find / grep /
+        # stat) that v3.3 deliberately took out of the typed surface.
+        # The tool's safety classification is owned by the authorization
+        # engine's `_evaluate_command` (shlex tokenize + structural
+        # pattern match against config.hooks_config["command_safety"]
+        # rules). When that classifier returns ASK, the agent's
+        # InteractivePolicy prompts the user; when it returns
+        # HARD_DENY, the call is blocked outright.
+        self._register_command_tool(agent)
+
+    def _register_command_tool(self, agent) -> None:
+        import json as _json
+        import subprocess as _subprocess
+
+        def _command(cmd: str, cwd: str | None = None, timeout: int = 30) -> str:
+            """Run a shell command. Cwd defaults to write_root."""
+            effective_cwd = cwd or getattr(agent, "write_root", None) or agent.project_dir
+            try:
+                proc = _subprocess.run(
+                    cmd, shell=True, capture_output=True, text=True,
+                    timeout=timeout, cwd=effective_cwd,
+                )
+                return _json.dumps({
+                    "status": "success" if proc.returncode == 0 else "error",
+                    "exit_code": proc.returncode,
+                    "stdout": proc.stdout,
+                    "stderr": proc.stderr,
+                }, ensure_ascii=False)
+            except _subprocess.TimeoutExpired as e:
+                return _json.dumps({
+                    "status": "error",
+                    "error": f"Command timed out after {timeout}s",
+                    "stdout": e.stdout or "", "stderr": e.stderr or "",
+                }, ensure_ascii=False)
+            except Exception as e:
+                return _json.dumps({
+                    "status": "error",
+                    "error": str(e),
+                }, ensure_ascii=False)
+
+        agent.register_tool(
+            name="command", func=_command,
+            description=(
+                "Run a shell command. Default cwd is the project's write "
+                "boundary. Use this for path operations (mv / cp / rm / "
+                "find / grep / stat) and other one-shot shell tasks. "
+                "Destructive patterns (rm -rf /, dd if=/dev/*, "
+                "git push --force, etc.) are auto-classified by the "
+                "authorization engine and either blocked or sent to the "
+                "user for confirmation."
+            ),
+            parameters={"type": "object", "properties": {
+                "cmd": {"type": "string", "description": "Shell command line"},
+                "cwd": {"type": "string", "description": "Working directory (defaults to project write boundary)"},
+                "timeout": {"type": "integer", "description": "Timeout in seconds (default: 30)", "default": 30},
+            }, "required": ["cmd"]},
+            tier="common",
+            safety_level=2,
+            action="execute",
+        )
+
     def on_shutdown(self) -> None:
         """Release all sandbox sessions and clean up workspaces."""
         if self.executor:

@@ -492,6 +492,87 @@ class TestChangesetLRU:
         assert any("f0.txt" in p for p in ps._evicted_paths)
         assert any("f1.txt" in p for p in ps._evicted_paths)
 
+    def test_command_tool_registered_and_runs(self, bare_agent, tmp_path):
+        """v3.3 D4: SandboxModule registers the `command` tool and the
+        engine's _evaluate_command classifies safe commands as ALLOW."""
+        from llamagent.modules.sandbox.module import SandboxModule
+
+        _make_agent_with_tools(bare_agent, tmp_path)
+        bare_agent.register_module(SandboxModule(auto_assign=False))
+
+        assert "command" in bare_agent._tools
+
+        # Run a benign command — engine classifies as ALLOW (default).
+        raw = bare_agent._tools["command"]["func"](cmd="echo hello")
+        result = json.loads(raw)
+        assert result["status"] == "success"
+        assert "hello" in result["stdout"]
+
+    def test_command_safety_hard_reject(self, bare_agent, tmp_path):
+        """`rm -rf /` is auto-classified as hard_reject by the engine."""
+        from llamagent.modules.sandbox.module import SandboxModule
+
+        _make_agent_with_tools(bare_agent, tmp_path)
+        bare_agent.register_module(SandboxModule(auto_assign=False))
+
+        engine = bare_agent._authorization_engine
+        tool = bare_agent._tools["command"]
+        result = engine.evaluate(tool, {"cmd": "rm -rf /"})
+        # Decision is non-None when blocked.
+        assert result.decision is not None
+        assert "block" in result.decision.lower() or "denied" in result.decision.lower() \
+            or "hard" in str(result.events).lower() or "deny" in str(result.events).lower()
+
+    def test_command_safety_ask_for_rm(self, bare_agent, tmp_path):
+        """Plain `rm foo.txt` is classified as ASK (CONFIRMABLE)."""
+        from llamagent.modules.sandbox.module import SandboxModule
+        from llamagent.core.zone import ZoneVerdict
+
+        _make_agent_with_tools(bare_agent, tmp_path)
+        bare_agent.register_module(SandboxModule(auto_assign=False))
+
+        engine = bare_agent._authorization_engine
+        evaluation = engine._evaluate_command({"cmd": "rm somefile.txt"})
+        assert evaluation.overall_verdict == ZoneVerdict.CONFIRMABLE
+
+    def test_command_safety_default_allow(self, bare_agent, tmp_path):
+        """Read-only commands (ls / cat / grep) are not flagged."""
+        from llamagent.modules.sandbox.module import SandboxModule
+        from llamagent.core.zone import ZoneVerdict
+
+        _make_agent_with_tools(bare_agent, tmp_path)
+        bare_agent.register_module(SandboxModule(auto_assign=False))
+
+        engine = bare_agent._authorization_engine
+        for cmd in ("ls -la", "cat README.md", "grep foo bar.txt"):
+            evaluation = engine._evaluate_command({"cmd": cmd})
+            assert evaluation.overall_verdict == ZoneVerdict.ALLOW, \
+                f"Expected ALLOW for {cmd!r}, got {evaluation.overall_verdict}"
+
+    def test_command_pattern_scope_short_circuits_ask(self, bare_agent, tmp_path):
+        """ApprovalScope.command_patterns can pre-approve a pattern."""
+        from llamagent.modules.sandbox.module import SandboxModule
+        from llamagent.core.zone import ZoneVerdict
+        from llamagent.core.authorization import ApprovalScope
+
+        _make_agent_with_tools(bare_agent, tmp_path)
+        bare_agent.register_module(SandboxModule(auto_assign=False))
+
+        engine = bare_agent._authorization_engine
+        # Without the scope: rm is CONFIRMABLE.
+        ev1 = engine._evaluate_command({"cmd": "rm node_modules"})
+        assert ev1.overall_verdict == ZoneVerdict.CONFIRMABLE
+
+        # Add a session-scope command_pattern allowance.
+        engine.add_scope(ApprovalScope(
+            scope="session", zone="external",
+            actions=["execute"], path_prefixes=[],
+            tool_names=["command"],
+            command_patterns=["rm node_modules*"],
+        ))
+        ev2 = engine._evaluate_command({"cmd": "rm node_modules"})
+        assert ev2.overall_verdict == ZoneVerdict.ALLOW
+
     def test_revert_evicted_path_surfaces_precise_error(self, bare_agent, tmp_path):
         bare_agent.config.changeset_max_count = 2
         bare_agent.config.changeset_max_total_bytes = 0
