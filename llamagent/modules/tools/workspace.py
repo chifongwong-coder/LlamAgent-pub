@@ -211,7 +211,7 @@ class WorkspaceService:
             raise ValueError(
                 f"Write operations are restricted to workspace. "
                 f"Path '{raw_path}' resolves outside workspace root. "
-                f"Use apply_patch or sync_workspace_to_project for project modifications."
+                f"Use apply_patch for project modifications."
             )
         return resolved
 

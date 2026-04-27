@@ -54,24 +54,27 @@ class TestToolRegistrationAndPackFiltering:
     def test_tool_registration_and_pack_filtering(self, bare_agent, tmp_path):
         _make_agent_with_tools(bare_agent, tmp_path)
 
-        # -- Default surface tools registered without pack --
+        # -- Default surface tools registered without pack (v3.3: 5 core tools) --
         default_tools = [
             "list_tree", "search_text", "read_files", "write_files",
-            "apply_patch", "sync_workspace_to_project", "revert_changes",
+            "apply_patch", "revert_changes",
         ]
         for tool_name in default_tools:
             assert tool_name in bare_agent._tools, f"default tool '{tool_name}' not registered"
             assert bare_agent._tools[tool_name].get("pack") is None, \
                 f"'{tool_name}' should not have a pack (default surface)"
 
-        # -- Pack tools registered with correct pack names --
+        # -- v3.3: sync_workspace_to_project deleted --
+        assert "sync_workspace_to_project" not in bare_agent._tools
+
+        # -- path-fallback tools registered (auto-load when no shell tool) --
         pack_expectations = {
-            "glob_files": "workspace-maintenance",
-            "stat_paths": "workspace-maintenance",
-            "create_temp_file": "workspace-maintenance",
-            "move_path": "workspace-maintenance",
-            "copy_path": "workspace-maintenance",
-            "delete_path": "workspace-maintenance",
+            "glob_files": "path-fallback",
+            "stat_paths": "path-fallback",
+            "create_temp_file": "path-fallback",
+            "move_path": "path-fallback",
+            "copy_path": "path-fallback",
+            "delete_path": "path-fallback",
         }
         for tool_name, expected_pack in pack_expectations.items():
             assert tool_name in bare_agent._tools, f"pack tool '{tool_name}' not registered"
@@ -90,20 +93,22 @@ class TestToolRegistrationAndPackFiltering:
         assert "write_files" in schema_names
         assert "apply_patch" in schema_names
 
-        assert "glob_files" not in schema_names
-        assert "move_path" not in schema_names
-        assert "stat_paths" not in schema_names
-
         # -- Toolsmith pack hidden by default --
         assert "create_tool" not in schema_names
         assert "list_my_tools" not in schema_names
         assert "delete_tool" not in schema_names
 
-        # -- Pack tools visible when activated --
-        bare_agent._active_packs.add("workspace-maintenance")
+        # -- path-fallback tools auto-visible when no shell tool registered --
+        # (bare_agent has no JobModule / SandboxModule, so path-fallback should
+        # auto-activate via on_input/on_context.)
+        bare_agent._active_packs.clear()
+        mod = bare_agent.modules["tools"]
+        mod.on_input("organize my files")
+        mod.on_context("organize my files", "")
+        assert "path-fallback" in bare_agent._active_packs, \
+            "path-fallback should auto-activate when no shell tool is available"
         schemas = bare_agent.get_all_tool_schemas()
         schema_names = [s["function"]["name"] for s in schemas]
-
         assert "glob_files" in schema_names
         assert "move_path" in schema_names
         assert "stat_paths" in schema_names
@@ -321,19 +326,8 @@ class TestPatchAndSyncLifecycle:
         with open(target3) as f:
             assert f.read() == original3
 
-        # -- sync_workspace_to_project copies workspace files to project --
-        _call_tool_json(bare_agent, "write_files", files={
-            "new_file.txt": "workspace content",
-        })
-
-        result = _call_tool_json(bare_agent, "sync_workspace_to_project", mode="auto")
-        assert result["status"] == "success"
-        assert result["synced"] >= 1
-
-        synced_path = os.path.join(project_dir, "new_file.txt")
-        assert os.path.isfile(synced_path)
-        with open(synced_path) as f:
-            assert f.read() == "workspace content"
+        # v3.3: sync_workspace_to_project removed; project writes go through
+        # write_files / apply_patch directly. The lifecycle test ends here.
 
         # -- on_shutdown removes the workspace session directory --
         _call_tool_json(bare_agent, "write_files", files={"temp.txt": "temporary"})

@@ -32,7 +32,7 @@ COMMON_STORE_ID = "__common__"
 # Workspace behavioral guidelines injected via on_context
 WORKSPACE_GUIDE = """\
 [Workspace Guidelines]
-- Work in workspace first, then sync results to project via apply_patch or sync_workspace_to_project.
+- Work in workspace first, then promote results to project via apply_patch.
 - Paths in workspace tools are relative to workspace root by default.
   Use "project:" prefix to access project files (e.g., "project:src/main.py").
 - For command execution, use start_job. Set wait=True for quick commands, wait=False for long tasks."""
@@ -83,9 +83,9 @@ CAPABILITY_HINT_BLOCK = """\
 These tool packs are hidden by default but can be activated when needed:
 - web: Fetch web page content (when task involves URLs or web pages)
 - toolsmith: Create and manage custom tools (when explicitly requested)
-- workspace-maintenance: Move/copy/delete/glob workspace files (when organizing workspace)
 - multi-agent: Lightweight role-based delegation (when collaboration is needed)
-- job-followup: Inspect/wait/cancel running jobs (auto-activated when jobs exist)"""
+- job-followup: Inspect/wait/cancel running jobs (auto-activated when jobs exist)
+- path-fallback: glob/move/copy/delete/stat workspace files (auto-activated when no shell tool is available)"""
 
 
 class ToolsModule(Module):
@@ -224,6 +224,24 @@ class ToolsModule(Module):
         if job_mod and getattr(job_mod, "service", None) and job_mod.service.list_jobs():
             self.agent._active_packs.add("job-followup")
 
+        # path-fallback: if neither a registered shell tool (`command`) nor
+        # the JobModule's `start_job` is available, expose the legacy
+        # path-op tools (move/copy/delete/glob/stat/temp) so the model
+        # still has a way to manipulate workspace files. When a shell
+        # tool exists, these stay hidden.
+        if not self._shell_tool_available():
+            self.agent._active_packs.add("path-fallback")
+
+    def _shell_tool_available(self) -> bool:
+        """Whether any general-purpose shell-execution tool is registered.
+
+        Used to decide whether to expose the legacy path-op fallback pack.
+        """
+        for tool_name in ("command", "start_job"):
+            if tool_name in self.agent._tools:
+                return True
+        return False
+
     def on_shutdown(self) -> None:
         """Clean up workspace session directory on agent shutdown."""
         if hasattr(self, "workspace_service") and self.workspace_service:
@@ -278,7 +296,7 @@ class ToolsModule(Module):
                 "root": {"type": "string", "description": "Root directory (default: workspace root)", "default": "."},
             }, "required": ["pattern"]},
             tier="common", safety_level=1,
-            pack="workspace-maintenance",
+            pack="path-fallback",
             path_extractor=lambda args: [ws.resolve_path(args.get("root", "."))],
         )
 
@@ -450,7 +468,7 @@ class ToolsModule(Module):
                 "paths": {"type": "array", "items": {"type": "string"}, "description": "Paths to stat"},
             }, "required": ["paths"]},
             tier="common", safety_level=1,
-            pack="workspace-maintenance",
+            pack="path-fallback",
             path_extractor=lambda args: ws.resolve_paths(args.get("paths", [])),
         )
 
@@ -492,8 +510,7 @@ class ToolsModule(Module):
                     f"For example, call write_files again with "
                     f"files={{'{basename}': <content>}} to write '{basename}' "
                     f"directly at the workspace root. If you actually need to "
-                    f"write into the project directory, use apply_patch or "
-                    f"sync_workspace_to_project instead."
+                    f"write into the project directory, use apply_patch."
                 )
             return json.dumps(response, ensure_ascii=False)
 
@@ -528,7 +545,7 @@ class ToolsModule(Module):
                 "content": {"type": "string", "description": "File content", "default": ""},
             }},
             tier="common", safety_level=1,
-            pack="workspace-maintenance",
+            pack="path-fallback",
         )
 
         def _move_path(src: str, dst: str) -> str:
@@ -551,7 +568,7 @@ class ToolsModule(Module):
                 "dst": {"type": "string", "description": "Destination path"},
             }, "required": ["src", "dst"]},
             tier="common", safety_level=2,
-            pack="workspace-maintenance",
+            pack="path-fallback",
             path_extractor=lambda args: [ws.resolve_path(args.get("src", "")), ws.resolve_path(args.get("dst", ""))],
         )
 
@@ -579,7 +596,7 @@ class ToolsModule(Module):
                 "dst": {"type": "string", "description": "Destination path"},
             }, "required": ["src", "dst"]},
             tier="common", safety_level=2,
-            pack="workspace-maintenance",
+            pack="path-fallback",
             path_extractor=lambda args: [ws.resolve_path(args.get("src", "")), ws.resolve_path(args.get("dst", ""))],
         )
 
@@ -606,7 +623,7 @@ class ToolsModule(Module):
                 "path": {"type": "string", "description": "Path to delete"},
             }, "required": ["path"]},
             tier="common", safety_level=2,
-            pack="workspace-maintenance",
+            pack="path-fallback",
             path_extractor=lambda args: [ws.resolve_path(args.get("path", ""))],
         )
 
@@ -639,23 +656,6 @@ class ToolsModule(Module):
             }, "required": ["target", "edits"]},
             tier="common", safety_level=2,
             path_extractor=lambda args: [ps.resolve_project_path(args.get("target", ""))],
-        )
-
-        def _sync_workspace_to_project(paths: list = None, mode: str = "auto") -> str:
-            result = ps.sync_workspace_to_project(paths, mode)
-            return json.dumps(result, ensure_ascii=False)
-
-        self.agent.register_tool(
-            name="sync_workspace_to_project", func=_sync_workspace_to_project,
-            description="Sync workspace files to project. mode='auto' (default): copy new files, replace changed files. mode='copy': copy only, fail if exists. mode='patch': replace only existing files.",
-            parameters={"type": "object", "properties": {
-                "paths": {"type": "array", "items": {"type": "string"}, "description": "Workspace-relative paths to sync (default: all changed files)"},
-                "mode": {"type": "string", "description": "Sync mode: 'auto' (default), 'copy', 'patch'", "default": "auto"},
-            }},
-            tier="common", safety_level=2,
-            path_extractor=lambda args: [
-                ps.resolve_project_path(p) for p in (args.get("paths") or [])
-            ] or [self.agent.project_dir],  # Sentinel: zone-check project_dir when paths=None
         )
 
         def _revert_changes(targets: list = None) -> str:
