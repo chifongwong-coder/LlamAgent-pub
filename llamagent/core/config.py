@@ -76,6 +76,7 @@ _YAML_MAP = [
     (("snapshot", "ignore_gitignore"), "snapshot_ignore_gitignore", bool),
     (("snapshot", "max_size_mb"), "snapshot_max_size_mb", int),
     (("snapshot", "retention_count"), "snapshot_retention_count", int),
+    (("snapshot", "dir"), "snapshot_dir", str),
     (("retrieval", "persist_dir"), "retrieval_persist_dir", str),
     (("retrieval", "embedding", "provider"), "embedding_provider", str),
     (("retrieval", "embedding", "model"), "embedding_model", str),
@@ -222,6 +223,11 @@ class Config:
         self.snapshot_ignore_gitignore: bool = True   # skip .git/.gitignore'd files
         self.snapshot_max_size_mb: int = 500           # refuse if write_root exceeds
         self.snapshot_retention_count: int = 5         # keep last N session snapshots
+        # Custom snapshot storage directory. Empty string falls back to
+        # `<parent of write_root>/.llamagent_snapshots/`. Useful for
+        # large project trees where the snapshot would clutter the
+        # parent dir, or sharing snapshots across sessions on a SSD.
+        self.snapshot_dir: str = ""
         # When auto_approve=True, snapshot is force-enabled (CI safety net),
         # regardless of the explicit setting above. Set explicitly here only
         # to opt INTO snapshot in interactive mode.

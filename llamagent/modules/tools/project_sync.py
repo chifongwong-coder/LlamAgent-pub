@@ -5,7 +5,7 @@ ProjectSyncService is a plain service class (not a Module), instantiated by
 ToolsModule.on_attach(). It provides:
 
 - Structured search/replace patching (apply_patch, preview_patch, replace_block)
-- Workspace-to-project file synchronization (sync_workspace_to_project)
+- Per-write changeset tracking for write_files (record_write_changeset)
 - Changeset-based revert for all project modifications (revert_changes)
 
 All project writes are atomic (temp file + fsync + os.rename) and recorded as
@@ -95,7 +95,7 @@ class ProjectSyncService:
         Args:
             agent: The LlamAgent instance that owns this service.
             workspace_service: The WorkspaceService used for workspace
-                path resolution (needed by sync_workspace_to_project).
+                path resolution (used by changeset/write helpers).
         """
         self.agent = agent
         self.workspace_service = workspace_service
@@ -219,6 +219,16 @@ class ProjectSyncService:
     # Core: apply_patch
     # ================================================================
 
+    def _maybe_snapshot(self) -> None:
+        """v3.3 D7: snapshot trigger lives at the service layer so any
+        caller (tool wrapper, child agent, replay code, ...) goes through
+        it. Idempotent — the SnapshotService's _taken flag guarantees a
+        single capture per session, even if every call site invokes
+        ensure_snapshot."""
+        agent = self.agent
+        if hasattr(agent, "ensure_snapshot"):
+            agent.ensure_snapshot()
+
     def apply_patch(self, target: str, edits: list[dict],
                     record_changeset: bool = True) -> dict:
         """
@@ -248,6 +258,10 @@ class ProjectSyncService:
         Returns:
             Result dict with ``status`` ("success" or "error") and details.
         """
+        # v3.3 D7: snapshot before mutating project. Skipped for previews
+        # and for playground patches (record_changeset=False).
+        if record_changeset:
+            self._maybe_snapshot()
         resolved = self.resolve_project_path(target)
         lock = self._get_file_lock(resolved)
 
@@ -513,186 +527,6 @@ class ProjectSyncService:
             Result dict (same format as apply_patch).
         """
         return self.apply_patch(file, [{"match": old, "replace": new}])
-
-    # ================================================================
-    # Sync: sync_workspace_to_project
-    # ================================================================
-
-    def sync_workspace_to_project(
-        self, paths: list[str] | None, mode: str
-    ) -> dict:
-        """
-        Synchronize files from workspace to project directory.
-
-        Paths are workspace-relative and auto-mapped to the same location
-        in project_dir (e.g. workspace ``src/main.py`` maps to
-        ``<project_dir>/src/main.py``).
-
-        Each file synced creates its own changeset for independent revert.
-
-        Args:
-            paths: List of workspace-relative paths to sync, or None to
-                sync all files in the workspace.
-            mode: Sync mode:
-                - ``"auto"``: file exists in project -> whole-file replace
-                  if different; doesn't exist -> copy.
-                - ``"copy"``: copy file; fail if target exists in project.
-                - ``"patch"``: whole-file preimage/postimage compare; read
-                  project file and workspace file, if different then atomic
-                  replace (decision F1).
-
-        Returns:
-            Result dict with counts of synced, skipped, and failed files.
-        """
-        workspace_root = self.workspace_service.workspace_root
-
-        # Resolve the list of files to sync
-        if paths is None:
-            # Walk the entire workspace to find all files
-            file_list = []
-            for dirpath, _dirnames, filenames in os.walk(workspace_root):
-                for fname in filenames:
-                    abs_path = os.path.join(dirpath, fname)
-                    rel_path = os.path.relpath(abs_path, workspace_root)
-                    file_list.append(rel_path)
-        else:
-            file_list = list(paths)
-
-        synced = 0
-        skipped = 0
-        failed: list[dict] = []
-
-        for rel_path in file_list:
-            ws_abs = os.path.realpath(
-                os.path.join(workspace_root, rel_path)
-            )
-
-            # Source validation: must be inside workspace root (rule B, 10.2)
-            if not self.workspace_service.ensure_in_workspace(ws_abs):
-                failed.append({
-                    "path": rel_path,
-                    "error": "Source path is not inside workspace",
-                })
-                continue
-
-            # Read workspace file content
-            try:
-                with open(ws_abs, "r", encoding="utf-8") as f:
-                    ws_content = f.read()
-            except OSError as e:
-                failed.append({"path": rel_path, "error": str(e)})
-                continue
-            except UnicodeDecodeError:
-                failed.append({
-                    "path": rel_path,
-                    "error": f"Binary file cannot be patched: {ws_abs}",
-                })
-                continue
-
-            # Target path in project (same relative location)
-            project_abs = self.resolve_project_path(rel_path)
-            lock = self._get_file_lock(project_abs)
-
-            with lock:
-                target_exists = os.path.isfile(project_abs)
-
-                # Read project file content if it exists
-                project_content: str | None = None
-                if target_exists:
-                    try:
-                        with open(project_abs, "r", encoding="utf-8") as f:
-                            project_content = f.read()
-                    except OSError as e:
-                        failed.append({
-                            "path": rel_path,
-                            "error": f"Failed to read project file: {e}",
-                        })
-                        continue
-                    except UnicodeDecodeError:
-                        failed.append({
-                            "path": rel_path,
-                            "error": f"Binary file cannot be patched: {project_abs}",
-                        })
-                        continue
-
-                # Mode dispatch
-                if mode == "copy":
-                    if target_exists:
-                        failed.append({
-                            "path": rel_path,
-                            "error": "Target already exists in project (mode=copy)",
-                        })
-                        continue
-                    # New file — pre_image is None
-                    pre_image = None
-
-                elif mode == "patch":
-                    if not target_exists:
-                        failed.append({
-                            "path": rel_path,
-                            "error": "Target does not exist in project (mode=patch)",
-                        })
-                        continue
-                    if project_content == ws_content:
-                        skipped += 1
-                        continue
-                    pre_image = project_content
-
-                elif mode == "auto":
-                    if target_exists:
-                        if project_content == ws_content:
-                            skipped += 1
-                            continue
-                        pre_image = project_content
-                    else:
-                        pre_image = None
-
-                else:
-                    failed.append({
-                        "path": rel_path,
-                        "error": f"Unknown sync mode: {mode}",
-                    })
-                    continue
-
-                # Ensure parent directory exists
-                parent_dir = os.path.dirname(project_abs)
-                os.makedirs(parent_dir, exist_ok=True)
-
-                # Atomic write
-                self._atomic_write(project_abs, ws_content)
-
-                # Record changeset
-                changeset = Changeset(
-                    changeset_id=uuid.uuid4().hex,
-                    target_path=project_abs,
-                    pre_image=pre_image,
-                    ops=[{
-                        "action": "sync",
-                        "mode": mode,
-                        "source": ws_abs,
-                        "target": project_abs,
-                    }],
-                    timestamp=time.time(),
-                )
-                self._changesets.append(changeset)
-                self._enforce_changeset_caps()
-
-                logger.info(
-                    "sync_workspace_to_project: %s -> %s (mode=%s, changeset %s)",
-                    ws_abs, project_abs, mode, changeset.changeset_id,
-                )
-                synced += 1
-
-        logger.info(
-            "sync_workspace_to_project completed: synced=%d, skipped=%d, failed=%d",
-            synced, skipped, len(failed),
-        )
-        return {
-            "status": "success",
-            "synced": synced,
-            "skipped": skipped,
-            "failed": failed,
-        }
 
     # ================================================================
     # Revert: revert_changes

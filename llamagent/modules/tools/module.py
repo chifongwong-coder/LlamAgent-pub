@@ -559,17 +559,42 @@ class ToolsModule(Module):
                     errors.append({"path": path, "error": str(e)})
                     continue
                 # Capture pre-image for changeset if writing to project zone.
+                # If the existing file isn't readable as UTF-8 text (i.e. it's
+                # binary), refuse to overwrite it via text mode — the changeset
+                # journal can't faithfully record the bytes, and a later revert
+                # would silently DELETE the binary file (interpreting pre_image
+                # =None as "did not exist before"). Surface a clear error so
+                # the model retries with mode='binary' or apply_patch.
                 pre_image = None
                 had_prior = False
                 if track_changeset and os.path.isfile(resolved):
-                    try:
-                        with open(resolved, "r", encoding="utf-8") as fp:
-                            pre_image = fp.read()
-                        had_prior = True
-                    except (OSError, UnicodeDecodeError):
-                        # Binary or unreadable existing file — record None pre-image
-                        # so revert at least removes whatever we wrote.
-                        had_prior = True
+                    if mode == "text":
+                        try:
+                            with open(resolved, "r", encoding="utf-8") as fp:
+                                pre_image = fp.read()
+                            had_prior = True
+                        except UnicodeDecodeError:
+                            errors.append({
+                                "path": path,
+                                "error": (
+                                    f"Refusing to overwrite existing binary file "
+                                    f"'{path}' with text content. The changeset "
+                                    f"journal cannot record binary pre-images, and "
+                                    f"reverting would delete the file. Use "
+                                    f"mode='binary' to overwrite it as bytes, or "
+                                    f"apply_patch if it's actually text in a "
+                                    f"different encoding."
+                                ),
+                            })
+                            continue
+                        except OSError as e:
+                            errors.append({"path": path, "error": str(e)})
+                            continue
+                    else:
+                        # mode='binary': skip pre_image read entirely; revert
+                        # will delete the new file on rollback. The user is
+                        # accepting bytes-mode semantics by passing mode='binary'.
+                        had_prior = False
                         pre_image = None
                 # v3.3 D7: take a snapshot before the first project-zone write.
                 if track_changeset:
@@ -755,10 +780,9 @@ class ToolsModule(Module):
                 resolved = _resolve_within(target, base=base, allow_absolute=allow_abs)
             except ValueError as e:
                 return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
-            # v3.3 D7: snapshot before the first project-zone patch.
-            if zone != "playground" and not preview:
-                self.agent.ensure_snapshot()
-            # Playground patches skip the changeset journal (ephemeral).
+            # Snapshot trigger lives in ProjectSyncService.apply_patch
+            # (see project_sync.py::_maybe_snapshot). Tool wrapper just
+            # forwards the resolved path + record_changeset flag.
             if preview:
                 result = ps.preview_patch(resolved, edits)
             else:

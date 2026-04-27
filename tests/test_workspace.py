@@ -614,6 +614,33 @@ class TestChangesetLRU:
         assert getattr(bare_agent, "_snapshot_service", None) is None or \
             bare_agent._snapshot_service._snapshot_dir is None
 
+    def test_write_files_refuses_text_overwrite_of_binary(self, bare_agent, tmp_path):
+        """v3.3 fixup: text-mode write to a pre-existing binary file is
+        rejected with a clear hint, NOT silently registered with
+        pre_image=None (which would cause revert to delete the file)."""
+        _make_agent_with_tools(bare_agent, tmp_path)
+        # Seed a binary file in the project.
+        target = os.path.join(bare_agent.project_dir, "model.bin")
+        with open(target, "wb") as f:
+            f.write(b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\xff\xfe\xfd")
+
+        # Attempt to overwrite via text mode.
+        result = _call_tool_json(bare_agent, "write_files",
+            files={"model.bin": "this would clobber the binary"})
+        assert result["status"] == "partial"
+        assert len(result["errors"]) == 1
+        err = result["errors"][0]["error"].lower()
+        assert "binary" in err and "mode='binary'" in err
+
+        # Original binary content preserved.
+        with open(target, "rb") as f:
+            assert f.read() == b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\xff\xfe\xfd"
+
+        # No changeset registered for this rejected write.
+        ps = bare_agent.modules["tools"].project_sync_service
+        assert all(cs.target_path != os.path.realpath(target)
+                   for cs in ps._changesets)
+
     def test_snapshot_force_enabled_under_auto_approve(self, bare_agent, tmp_path):
         """auto_approve=True force-enables snapshot even if user
         didn't set snapshot_enabled."""

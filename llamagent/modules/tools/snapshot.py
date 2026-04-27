@@ -116,13 +116,20 @@ class SnapshotService:
             self._taken = True
             return None
 
-        # data/snapshots/<ts>_<session>/
-        base = os.path.join(
-            os.path.dirname(write_root),  # heuristic: alongside the project
-            ".llamagent_snapshots",
-        ) if not getattr(self.agent.config, "snapshot_dir", None) else self.agent.config.snapshot_dir
-        # Prefer project-adjacent location to avoid cluttering shared dirs.
-        # If user has a dedicated snapshot_dir, use it.
+        # Snapshot location:
+        # - Custom: config.snapshot_dir (when explicitly set, useful for
+        #   large project trees or shared SSD storage)
+        # - Default: alongside the project at <parent>/.llamagent_snapshots/
+        custom = getattr(self.agent.config, "snapshot_dir", "") or ""
+        if custom:
+            base = os.path.realpath(custom)
+        else:
+            parent = os.path.dirname(write_root)
+            # Edge case: write_root is "/" (extremely unlikely in practice
+            # but be defensive — falls back to data dir).
+            if not parent or parent == os.sep:
+                parent = os.path.join(os.path.expanduser("~"), ".llamagent")
+            base = os.path.join(parent, ".llamagent_snapshots")
         ts = time.strftime("%Y%m%d_%H%M%S")
         session_id = self._session_id_hint()
         snap_dir = os.path.join(base, f"{ts}_{session_id}")

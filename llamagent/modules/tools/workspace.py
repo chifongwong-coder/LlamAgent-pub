@@ -201,7 +201,7 @@ class WorkspaceService:
         Check whether a resolved path is inside the current workspace root.
 
         This is used by tools that require source paths to stay within the
-        workspace (e.g. ``sync_workspace_to_project`` source validation).
+        workspace (used by other tools that gate paths to the playground area).
 
         Args:
             resolved_path: An already-resolved absolute path (typically the
