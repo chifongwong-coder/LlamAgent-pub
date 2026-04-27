@@ -219,16 +219,6 @@ class ProjectSyncService:
     # Core: apply_patch
     # ================================================================
 
-    def _maybe_snapshot(self) -> None:
-        """v3.3 D7: snapshot trigger lives at the service layer so any
-        caller (tool wrapper, child agent, replay code, ...) goes through
-        it. Idempotent — the SnapshotService's _taken flag guarantees a
-        single capture per session, even if every call site invokes
-        ensure_snapshot."""
-        agent = self.agent
-        if hasattr(agent, "ensure_snapshot"):
-            agent.ensure_snapshot()
-
     def apply_patch(self, target: str, edits: list[dict],
                     record_changeset: bool = True) -> dict:
         """
@@ -258,10 +248,8 @@ class ProjectSyncService:
         Returns:
             Result dict with ``status`` ("success" or "error") and details.
         """
-        # v3.3 D7: snapshot before mutating project. Skipped for previews
-        # and for playground patches (record_changeset=False).
-        if record_changeset:
-            self._maybe_snapshot()
+        # v3.3 D7: snapshot is captured eagerly at agent init, not here.
+        # See LlamAgent.__init__ -> ensure_snapshot().
         resolved = self.resolve_project_path(target)
         lock = self._get_file_lock(resolved)
 

@@ -76,10 +76,11 @@ class SandboxModule(Module):
         import subprocess as _subprocess
 
         def _command(cmd: str, cwd: str | None = None, timeout: int = 30) -> str:
-            """Run a shell command. Cwd defaults to write_root."""
-            # v3.3 D7: snapshot before any shell command, since shell can
-            # mutate state outside the typed write tool's awareness.
-            agent.ensure_snapshot()
+            """Run a shell command. Cwd defaults to write_root.
+
+            v3.3 D7: snapshot is captured eagerly at agent init when
+            enabled — no per-call trigger needed.
+            """
             effective_cwd = cwd or getattr(agent, "write_root", None) or agent.project_dir
             try:
                 proc = _subprocess.run(

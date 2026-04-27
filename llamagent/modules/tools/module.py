@@ -596,9 +596,6 @@ class ToolsModule(Module):
                         # accepting bytes-mode semantics by passing mode='binary'.
                         had_prior = False
                         pre_image = None
-                # v3.3 D7: take a snapshot before the first project-zone write.
-                if track_changeset:
-                    self.agent.ensure_snapshot()
                 try:
                     os.makedirs(os.path.dirname(resolved), exist_ok=True)
                     if mode == "binary":

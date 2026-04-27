@@ -364,6 +364,14 @@ class LlamAgent:
         self._write_root: str = self._compute_write_root()
         self._write_root_project_dir: str = self.project_dir
 
+        # v3.3 D7: snapshot is captured **eagerly** at agent init when
+        # enabled (or when auto_approve=True force-enables it). One call
+        # site, no lazy trigger sprinkled across tools or services. The
+        # trade-off is that read-only sessions also pay the snapshot cost
+        # — users who care can either keep snapshot disabled (interactive
+        # default) or set config.snapshot_dir to a fast SSD path.
+        self.ensure_snapshot()
+
         self.tool_executor = None  # v1.2: injected by SandboxModule for sandbox execution dispatch
 
         # v1.9: authorization engine (encapsulates zone evaluation + policy decision)

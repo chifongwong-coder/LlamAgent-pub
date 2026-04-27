@@ -574,8 +574,9 @@ class TestChangesetLRU:
         assert ev2.overall_verdict == ZoneVerdict.ALLOW
 
     def test_snapshot_taken_before_first_project_write(self, bare_agent, tmp_path):
-        """v3.3 D7: enabling snapshot causes the first write to capture
-        the write_root tree before mutating it."""
+        """v3.3 D7 (eager init): snapshot is captured at agent.ensure_snapshot()
+        which runs in LlamAgent.__init__. Tests that bypass __init__ (the
+        bare_agent fixture pattern) trigger it explicitly after wiring."""
         _make_agent_with_tools(bare_agent, tmp_path)
         bare_agent.config.snapshot_enabled = True
         # Seed an existing project file we'll modify.
@@ -583,7 +584,12 @@ class TestChangesetLRU:
         with open(original_path, "w") as f:
             f.write("v1\n")
 
-        # First write triggers snapshot.
+        # Tests that build agent via __new__ (bypassing __init__) must
+        # explicitly trigger snapshot after wiring config + project_dir.
+        bare_agent.ensure_snapshot()
+
+        # Subsequent write does NOT re-trigger snapshot (it's idempotent
+        # and was already captured above).
         _call_tool_json(bare_agent, "write_files",
             files={"main.py": "v2\n"})
 
@@ -647,6 +653,10 @@ class TestChangesetLRU:
         _make_agent_with_tools(bare_agent, tmp_path)
         bare_agent.config.auto_approve = True
         bare_agent.config.snapshot_enabled = False
+
+        # Eager init mode — explicitly trigger after config wiring (the
+        # bare_agent fixture bypasses __init__).
+        bare_agent.ensure_snapshot()
 
         _call_tool_json(bare_agent, "write_files",
             files={"y.txt": "2"})
