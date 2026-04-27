@@ -70,6 +70,8 @@ _YAML_MAP = [
     (("agent", "react", "total_timeout"), "react_total_timeout", float),
     (("agent", "max_observation_tokens"), "max_observation_tokens", int),
     (("agent", "tool_result_persist_threshold"), "tool_result_persist_threshold", int),
+    (("changeset", "max_count"), "changeset_max_count", int),
+    (("changeset", "max_total_bytes"), "changeset_max_total_bytes", int),
     (("retrieval", "persist_dir"), "retrieval_persist_dir", str),
     (("retrieval", "embedding", "provider"), "embedding_provider", str),
     (("retrieval", "embedding", "model"), "embedding_model", str),
@@ -199,6 +201,15 @@ class Config:
         # (see agent.py _truncate_observation + _persist_tool_result).
         self.max_observation_tokens: int = 32000
         self.tool_result_persist_threshold: int = 0  # 0 = follow max_observation_tokens
+
+        # v3.3: changeset LRU caps for ProjectSyncService.
+        # Memory grows with each apply_patch / write_files in project zone;
+        # cap the count and total pre_image bytes to prevent OOM in long
+        # sessions. Eviction is LRU (oldest reverted first, then oldest
+        # unreverted); evicted paths are remembered in a small ledger so
+        # revert_changes can give a precise error.
+        self.changeset_max_count: int = 200
+        self.changeset_max_total_bytes: int = 50 * 1024 * 1024  # 50 MB
 
         # Retrieval (shared)
         self.embedding_provider: str = "chromadb"

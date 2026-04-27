@@ -100,6 +100,9 @@ class ProjectSyncService:
         self.agent = agent
         self.workspace_service = workspace_service
         self._changesets: list[Changeset] = []
+        # v3.3: paths whose changesets were dropped by the LRU cap;
+        # used by revert_changes to surface a precise error.
+        self._evicted_paths: set[str] = set()
         self._file_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
 
@@ -123,6 +126,69 @@ class ProjectSyncService:
             if path not in self._file_locks:
                 self._file_locks[path] = threading.Lock()
             return self._file_locks[path]
+
+    # ================================================================
+    # v3.3: changeset LRU caps
+    # ================================================================
+
+    def _changeset_bytes(self, cs: Changeset) -> int:
+        """Approximate memory footprint of a Changeset's pre_image."""
+        return len(cs.pre_image) if cs.pre_image else 0
+
+    def _enforce_changeset_caps(self) -> None:
+        """LRU eviction when ``len(_changesets)`` exceeds count cap or
+        ``sum(pre_image bytes)`` exceeds byte cap. Reverted changesets
+        are dropped first (they're tombstones); then oldest unreverted.
+        Evicted target paths land in ``_evicted_paths`` so
+        ``revert_changes`` can surface a precise error.
+        """
+        cfg = self.agent.config
+        max_count = getattr(cfg, "changeset_max_count", 200)
+        max_bytes = getattr(cfg, "changeset_max_total_bytes", 50 * 1024 * 1024)
+        if max_count <= 0 and max_bytes <= 0:
+            return
+
+        def _total_bytes() -> int:
+            return sum(self._changeset_bytes(cs) for cs in self._changesets)
+
+        def _over():
+            over_count = max_count > 0 and len(self._changesets) > max_count
+            over_bytes = max_bytes > 0 and _total_bytes() > max_bytes
+            return over_count or over_bytes
+
+        # Pass 1: drop reverted (tombstone) changesets oldest-first.
+        if _over():
+            keep: list[Changeset] = []
+            dropped = 0
+            for cs in self._changesets:
+                if cs.reverted and _over():
+                    self._evicted_paths.add(cs.target_path)
+                    logger.info(
+                        "changeset evicted (reverted/tombstone): %s",
+                        cs.target_path,
+                    )
+                    dropped += 1
+                    # Pretend it's gone for the over-check via a temporary
+                    # rebuild after the loop.
+                else:
+                    keep.append(cs)
+            if dropped:
+                self._changesets = keep
+
+        # Pass 2: drop oldest unreverted as needed.
+        while _over() and self._changesets:
+            cs = self._changesets.pop(0)
+            self._evicted_paths.add(cs.target_path)
+            logger.warning(
+                "changeset evicted (cap hit, was unreverted): %s "
+                "(count=%d bytes=%d max_count=%d max_bytes=%d)",
+                cs.target_path, len(self._changesets) + 1, _total_bytes(),
+                max_count, max_bytes,
+            )
+
+    def _was_evicted(self, target_path: str) -> bool:
+        """Whether a path's changeset was previously dropped by the cap."""
+        return target_path in self._evicted_paths
 
     # ================================================================
     # Path resolution
@@ -285,6 +351,7 @@ class ProjectSyncService:
                 timestamp=time.time(),
             )
             self._changesets.append(changeset)
+            self._enforce_changeset_caps()
 
             logger.info(
                 "apply_patch succeeded: %s (%d edits, changeset %s)",
@@ -331,6 +398,7 @@ class ProjectSyncService:
             timestamp=time.time(),
         )
         self._changesets.append(changeset)
+        self._enforce_changeset_caps()
         return changeset.changeset_id
 
     # ================================================================
@@ -607,6 +675,7 @@ class ProjectSyncService:
                     timestamp=time.time(),
                 )
                 self._changesets.append(changeset)
+                self._enforce_changeset_caps()
 
                 logger.info(
                     "sync_workspace_to_project: %s -> %s (mode=%s, changeset %s)",
@@ -666,10 +735,20 @@ class ProjectSyncService:
             for resolved_target in resolved_targets:
                 changeset = self._find_revert_candidate([resolved_target])
                 if changeset is None:
-                    errors.append({
-                        "path": resolved_target,
-                        "error": "No unreverted changeset found",
-                    })
+                    if self._was_evicted(resolved_target):
+                        errors.append({
+                            "path": resolved_target,
+                            "error": (
+                                f"Changeset for '{resolved_target}' was evicted "
+                                f"(LRU cap hit). Older edits to this file are "
+                                f"no longer revertable."
+                            ),
+                        })
+                    else:
+                        errors.append({
+                            "path": resolved_target,
+                            "error": "No unreverted changeset found",
+                        })
                     continue
 
                 error = self._revert_single_changeset(changeset)

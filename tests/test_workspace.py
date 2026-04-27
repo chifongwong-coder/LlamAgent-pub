@@ -466,3 +466,49 @@ class TestWriteFilesChangesetTracking:
         # No changeset created → revert finds nothing.
         result = _call_tool_json(bare_agent, "revert_changes")
         assert result["status"] == "error"
+
+
+class TestChangesetLRU:
+    """v3.3 §五 changeset cap: LRU eviction + evicted ledger surfaces a
+    precise error in revert_changes."""
+
+    def test_lru_evicts_oldest_unreverted_when_count_exceeded(self, bare_agent, tmp_path):
+        # Tighten the cap to make the test fast.
+        bare_agent.config.changeset_max_count = 3
+        bare_agent.config.changeset_max_total_bytes = 0  # disable byte cap
+        _make_agent_with_tools(bare_agent, tmp_path)
+
+        # Apply 5 patches → only the latest 3 changesets remain.
+        for i in range(5):
+            target = os.path.join(bare_agent.project_dir, f"f{i}.txt")
+            with open(target, "w") as f:
+                f.write(f"v{i}\n")
+            _call_tool_json(bare_agent, "apply_patch",
+                target=f"f{i}.txt", edits=[{"match": f"v{i}", "replace": "X"}])
+
+        ps = bare_agent.modules["tools"].project_sync_service
+        assert len(ps._changesets) == 3
+        # The oldest 2 paths are in the evicted ledger.
+        assert any("f0.txt" in p for p in ps._evicted_paths)
+        assert any("f1.txt" in p for p in ps._evicted_paths)
+
+    def test_revert_evicted_path_surfaces_precise_error(self, bare_agent, tmp_path):
+        bare_agent.config.changeset_max_count = 2
+        bare_agent.config.changeset_max_total_bytes = 0
+        _make_agent_with_tools(bare_agent, tmp_path)
+
+        # 3 writes → first changeset evicted.
+        for i in range(3):
+            target = os.path.join(bare_agent.project_dir, f"g{i}.txt")
+            with open(target, "w") as f:
+                f.write(f"v{i}\n")
+            _call_tool_json(bare_agent, "apply_patch",
+                target=f"g{i}.txt", edits=[{"match": f"v{i}", "replace": "X"}])
+
+        # Try to revert the evicted (g0.txt) target — error mentions eviction.
+        result = _call_tool_json(bare_agent, "revert_changes",
+            targets=["g0.txt"])
+        assert result["status"] == "error"
+        # Either the top-level error or per-file error mentions eviction.
+        msg_blob = json.dumps(result)
+        assert "evicted" in msg_blob.lower()
