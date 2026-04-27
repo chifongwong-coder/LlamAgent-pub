@@ -35,6 +35,34 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _resolve_within(raw: str, *, base: str, allow_absolute: bool = True) -> str:
+    """Resolve ``raw`` against ``base``; reject if it escapes ``base``.
+
+    Used by v3.3 file-tool path_extractors as the single, simple
+    write-boundary primitive. Distinct from
+    :meth:`WorkspaceService.resolve_path` which still understands the
+    legacy ``project:`` prefix for backward compatibility.
+
+    Args:
+        raw: Caller-supplied raw path string.
+        base: Absolute base directory to resolve against.
+        allow_absolute: If False, reject absolute paths in ``raw``
+            (used in playground mode where the caller must always
+            stay relative to the playground root).
+
+    Raises:
+        ValueError: If absolute paths are disallowed and ``raw`` is
+            absolute, or if the resolved path escapes ``base``.
+    """
+    if not allow_absolute and os.path.isabs(raw):
+        raise ValueError(f"Absolute paths not allowed: {raw}")
+    base_real = os.path.realpath(base)
+    resolved = os.path.realpath(os.path.join(base_real, raw))
+    if not (resolved == base_real or resolved.startswith(base_real + os.sep)):
+        raise ValueError(f"Path '{raw}' escapes base directory")
+    return resolved
+
+
 class WorkspaceService:
     """
     Logical workspace manager for a single LlamAgent instance.

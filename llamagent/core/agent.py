@@ -354,6 +354,16 @@ class LlamAgent:
             os.makedirs(self.playground_dir, exist_ok=True)
         except OSError:
             pass  # Playground creation failed (read-only fs, permissions, etc.); zone system still works
+
+        # v3.3: write_root — the framework-internal write boundary. All typed
+        # write tools resolve their paths against this directory. Computed
+        # once at init (frozen for the agent's lifetime); mid-session changes
+        # to config.edit_root are ignored. See _compute_write_root().
+        # Tracking _write_root_project_dir lets the property re-derive once
+        # if a test reassigns agent.project_dir post-construction.
+        self._write_root: str = self._compute_write_root()
+        self._write_root_project_dir: str = self.project_dir
+
         self.tool_executor = None  # v1.2: injected by SandboxModule for sandbox execution dispatch
 
         # v1.9: authorization engine (encapsulates zone evaluation + policy decision)
@@ -427,6 +437,59 @@ class LlamAgent:
         if model not in self._llm_cache:
             self._llm_cache[model] = LLMClient(model, self.config.api_retry_count)
         return self._llm_cache[model]
+
+    # ============================================================
+    # Write boundary (v3.3)
+    # ============================================================
+
+    def _compute_write_root(self) -> str:
+        """Resolve the write boundary at agent init.
+
+        Soft fallback: invalid `config.edit_root` (escapes project_dir,
+        not a directory, etc.) logs a warning and falls back to
+        `project_dir`. Snapshot (D7) is the safety net for misconfig.
+        """
+        project_root = os.path.realpath(self.project_dir)
+        edit_root_cfg = getattr(self.config, "edit_root", "") or ""
+        if not edit_root_cfg:
+            return project_root
+        try:
+            candidate = os.path.realpath(os.path.join(project_root, edit_root_cfg))
+        except OSError as e:
+            logger.warning(
+                "edit_root '%s' resolution failed: %s; falling back to project_dir.",
+                edit_root_cfg, e,
+            )
+            return project_root
+        if not (candidate == project_root or candidate.startswith(project_root + os.sep)):
+            logger.warning(
+                "edit_root '%s' escapes project_dir; falling back to project_dir. "
+                "Snapshot remains the safety net.",
+                edit_root_cfg,
+            )
+            return project_root
+        if not os.path.isdir(candidate):
+            logger.warning(
+                "edit_root '%s' is not an existing directory; falling back to project_dir.",
+                edit_root_cfg,
+            )
+            return project_root
+        return candidate
+
+    @property
+    def write_root(self) -> str:
+        """Frozen write boundary. Re-derived lazily if `project_dir` is
+        reassigned (common in tests via __new__ + manual setup); otherwise
+        stable for the agent's lifetime. Mid-session changes to
+        `config.edit_root` after first read do not take effect (D7.1).
+        """
+        # If project_dir has been reassigned since init (test setup pattern),
+        # recompute once so write_root tracks the new project_dir.
+        cached_under = getattr(self, "_write_root_project_dir", None)
+        if cached_under != self.project_dir:
+            self._write_root = self._compute_write_root()
+            self._write_root_project_dir = self.project_dir
+        return self._write_root
 
     # ============================================================
     # Module management

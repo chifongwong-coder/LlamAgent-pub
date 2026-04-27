@@ -105,6 +105,7 @@ _YAML_MAP = [
     (("job", "max_active"), "job_max_active", int),
     (("job", "profiles"), "job_profiles", dict),
     (("output", "dir"), "output_dir", str),
+    (("edit_root",), "edit_root", str),
     (("web", "search_provider"), "web_search_provider", str),
     (("web", "search_num_results"), "web_search_num_results", int),
     (("web", "search_api_key"), "web_search_api_key", str),
@@ -270,6 +271,12 @@ class Config:
 
         # Workspace (runtime field, not encouraged in YAML)
         self.workspace_id: str | None = None
+
+        # v3.3: optional sub-directory of project_dir that the agent is
+        # allowed to write into. When unset, the entire project_dir is
+        # writable. Invalid values (escape, missing) log a warning and
+        # fall back to project_dir. See agent.write_root.
+        self.edit_root: str = ""
 
         # Output
         self.output_dir: str = str(BASE_DIR / "output")
