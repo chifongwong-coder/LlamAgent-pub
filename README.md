@@ -41,7 +41,7 @@ agent.register_module(PlanningModule())   # DAG-based task decomposition
 
 **Smart tool exposure** — Not all tools need to be visible all the time. The pack system dynamically shows the right tools at the right moment — triggered by task context, skills, or runtime state. Small models see a clean 12-tool surface, not a wall of 40 schemas.
 
-**Workspace-first safety** — The agent works in an isolated workspace. Project modifications go through explicit sync channels with full changeset tracking and one-click revert. Three-zone protection (playground / project / external) prevents accidental damage without blocking productivity.
+**Two-tier write safety (v3.3)** — Every project write (`write_files`, `apply_patch`) is tracked in a Changeset journal for instant `revert_changes` rollback. In CI / `auto_approve=True` mode, a coarse snapshot of the project is captured before the first state-changing operation as a manual-restore safety net. Configure `edit_root` to narrow the agent's write boundary to a sub-directory; the model physically can't write outside it. A `zone="playground"` parameter routes ephemeral scratch work to a framework cache that never touches the project.
 
 **Memory that actually works** — Not text blobs in a vector DB. LlamAgent extracts structured facts from conversations, deduplicates them, resolves conflicts when information changes, and auto-recalls relevant memories each turn. Periodic consolidation cleans up outdated or redundant facts automatically.
 
