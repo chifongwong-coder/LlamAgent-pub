@@ -122,6 +122,19 @@ def _ddgs_available() -> bool:
         return False
 
 
+def _resolve_api_key(config, provider_env_var: str) -> str:
+    """Resolve an API key for the selected provider.
+
+    Priority: ``config.web_search_api_key`` (explicit user config) >
+    the provider-specific env var (``TAVILY_API_KEY`` / ``SERPAPI_KEY``).
+    Returns empty string when nothing is set.
+    """
+    cfg_key = getattr(config, "web_search_api_key", "") if config is not None else ""
+    if cfg_key:
+        return cfg_key
+    return os.getenv(provider_env_var, "")
+
+
 def create_search_backend(config) -> SearchBackend | None:
     """
     Create a search backend based on config and available API keys.
@@ -136,26 +149,26 @@ def create_search_backend(config) -> SearchBackend | None:
 
     # Explicit provider specified
     if provider:
-        return _create_explicit_backend(provider)
+        return _create_explicit_backend(provider, config)
 
     # Auto-detect from API keys
-    serpapi_key = os.getenv("SERPAPI_KEY")
+    serpapi_key = _resolve_api_key(config, "SERPAPI_KEY")
     if serpapi_key:
         try:
             import serpapi  # noqa: F401
-            logger.info("Detected SERPAPI_KEY, using SerpAPI search backend")
+            logger.info("Using SerpAPI search backend (key configured)")
             return SerpAPIBackend(api_key=serpapi_key)
         except ImportError:
-            logger.warning("SERPAPI_KEY set but serpapi not installed, trying next backend")
+            logger.warning("SerpAPI key configured but serpapi not installed, trying next backend")
 
-    tavily_key = os.getenv("TAVILY_API_KEY")
+    tavily_key = _resolve_api_key(config, "TAVILY_API_KEY")
     if tavily_key:
         try:
             import tavily  # noqa: F401
-            logger.info("Detected TAVILY_API_KEY, using Tavily search backend")
+            logger.info("Using Tavily search backend (key configured)")
             return TavilyBackend(api_key=tavily_key)
         except ImportError:
-            logger.warning("TAVILY_API_KEY set but tavily not installed, trying next backend")
+            logger.warning("Tavily key configured but tavily-python not installed, trying next backend")
 
     # Fallback to DuckDuckGo (free, no key)
     if _ddgs_available():
@@ -169,7 +182,7 @@ def create_search_backend(config) -> SearchBackend | None:
     return None
 
 
-def _create_explicit_backend(provider: str) -> SearchBackend | None:
+def _create_explicit_backend(provider: str, config=None) -> SearchBackend | None:
     """Create a backend by explicit provider name. Fails loudly if key is missing."""
     provider = provider.lower()
 
@@ -180,9 +193,12 @@ def _create_explicit_backend(provider: str) -> SearchBackend | None:
         return None
 
     if provider == "serpapi":
-        key = os.getenv("SERPAPI_KEY")
+        key = _resolve_api_key(config, "SERPAPI_KEY")
         if not key:
-            logger.error("web_search_provider='serpapi' but SERPAPI_KEY not set")
+            logger.error(
+                "web_search_provider='serpapi' but no API key. Set "
+                "config.web_search_api_key or SERPAPI_KEY env var."
+            )
             return None
         try:
             import serpapi  # noqa: F401
@@ -192,9 +208,12 @@ def _create_explicit_backend(provider: str) -> SearchBackend | None:
             return None
 
     if provider == "tavily":
-        key = os.getenv("TAVILY_API_KEY")
+        key = _resolve_api_key(config, "TAVILY_API_KEY")
         if not key:
-            logger.error("web_search_provider='tavily' but TAVILY_API_KEY not set")
+            logger.error(
+                "web_search_provider='tavily' but no API key. Set "
+                "config.web_search_api_key or TAVILY_API_KEY env var."
+            )
             return None
         try:
             import tavily  # noqa: F401

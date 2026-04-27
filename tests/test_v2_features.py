@@ -457,6 +457,72 @@ def test_retrieval_fs_backend(bare_agent, mock_llm_client, tmp_path):
     assert "Intro" in result
 
 
+def test_web_search_api_key_resolved_from_config_first():
+    """web_search_api_key on config takes precedence over env vars when
+    creating a Tavily / SerpAPI backend.
+
+    Also pins that an empty config field falls back to the provider
+    env var so existing env-based setups keep working.
+    """
+    import os
+    from unittest.mock import patch
+    from llamagent.modules.tools.web import (
+        TavilyBackend, SerpAPIBackend, _create_explicit_backend, _resolve_api_key,
+    )
+    from llamagent.core.config import Config
+
+    # --- resolver: config wins over env ---
+    cfg = Config.__new__(Config)
+    cfg.__init__()
+    cfg.web_search_api_key = "cfg-key-abc"
+
+    with patch.dict(os.environ, {"TAVILY_API_KEY": "env-key-xyz"}, clear=False):
+        assert _resolve_api_key(cfg, "TAVILY_API_KEY") == "cfg-key-abc"
+
+    # --- resolver: empty config falls back to env ---
+    cfg.web_search_api_key = ""
+    with patch.dict(os.environ, {"TAVILY_API_KEY": "env-only"}, clear=False):
+        assert _resolve_api_key(cfg, "TAVILY_API_KEY") == "env-only"
+
+    # --- explicit tavily backend picks up the config key even with no env ---
+    # Fake a tavily import so the backend constructor succeeds without the
+    # real package being installed.
+    import sys, types
+    stub = types.ModuleType("tavily")
+    class _FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+        def search(self, query, max_results):
+            return {"results": []}
+    stub.TavilyClient = _FakeClient
+    with patch.dict(sys.modules, {"tavily": stub}):
+        cfg.web_search_api_key = "tavily-cfg-key"
+        with patch.dict(os.environ, {}, clear=False):
+            # Ensure no env leaks through
+            os.environ.pop("TAVILY_API_KEY", None)
+            backend = _create_explicit_backend("tavily", config=cfg)
+            assert isinstance(backend, TavilyBackend)
+            assert backend.api_key == "tavily-cfg-key"
+
+
+def test_web_search_explicit_tavily_fails_cleanly_without_key():
+    """Selecting tavily provider without any key (config or env) returns
+    None and logs a clear error rather than raising."""
+    import os
+    from unittest.mock import patch
+    from llamagent.modules.tools.web import _create_explicit_backend
+    from llamagent.core.config import Config
+
+    cfg = Config.__new__(Config)
+    cfg.__init__()
+    cfg.web_search_api_key = ""  # no config key
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("TAVILY_API_KEY", None)
+        backend = _create_explicit_backend("tavily", config=cfg)
+        assert backend is None
+
+
 def test_interface_presets_default_backends_to_fs():
     """apply_presets() gives CLI / Web / API sane FS defaults for memory,
     retrieval, and reflection.

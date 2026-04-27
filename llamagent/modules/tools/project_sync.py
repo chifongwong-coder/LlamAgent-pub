@@ -142,6 +142,10 @@ class ProjectSyncService:
         Returns:
             Absolute, symlink-resolved filesystem path.
         """
+        # Accept the 'project:' prefix from read_files' convention so
+        # models that learn the prefix from one tool can reuse it here.
+        if target.startswith("project:"):
+            target = target[len("project:"):]
         if os.path.isabs(target):
             return os.path.realpath(target)
         return os.path.realpath(os.path.join(self.agent.project_dir, target))

@@ -385,6 +385,7 @@ class ToolsModule(Module):
                             content_lines = []
                             char_count = 0
                             truncated = False
+                            last_line_shown = 0
                             for i, line in enumerate(all_lines, 1):
                                 if char_count + len(line) > per_file:
                                     truncated = True
@@ -392,10 +393,19 @@ class ToolsModule(Module):
                                 prefix = f"{i:>4}\t" if with_line_numbers else ""
                                 content_lines.append(f"{prefix}{line.rstrip()}")
                                 char_count += len(line)
-                            results.append({
+                                last_line_shown = i
+                            entry = {
                                 "path": p, "content": "\n".join(content_lines),
                                 "lines": len(all_lines), "truncated": truncated,
-                            })
+                            }
+                            if truncated:
+                                entry["hint"] = (
+                                    f"Output stopped at line {last_line_shown} of {len(all_lines)} "
+                                    f"due to size limit. To read the remainder, call read_files again "
+                                    f"with ranges={{'{p}': '{last_line_shown + 1}-{len(all_lines)}'}} "
+                                    f"(or any sub-range you need)."
+                                )
+                            results.append(entry)
                 except Exception as e:
                     results.append({"path": p, "error": str(e)})
             return json.dumps({"status": "success", "files": results}, ensure_ascii=False)
@@ -468,7 +478,24 @@ class ToolsModule(Module):
                     written.append(path)
                 except Exception as e:
                     errors.append({"path": path, "error": str(e)})
-            return json.dumps({"status": "success" if not errors else "partial", "written": written, "errors": errors}, ensure_ascii=False)
+            response = {
+                "status": "success" if not errors else "partial",
+                "written": written,
+                "errors": errors,
+            }
+            if errors:
+                sample = errors[0].get("path", "")
+                basename = os.path.basename(sample.rstrip("/")) or "newfile.txt"
+                response["hint"] = (
+                    f"Some paths were rejected because they resolve outside "
+                    f"the workspace. To retry, use a workspace-relative path. "
+                    f"For example, call write_files again with "
+                    f"files={{'{basename}': <content>}} to write '{basename}' "
+                    f"directly at the workspace root. If you actually need to "
+                    f"write into the project directory, use apply_patch or "
+                    f"sync_workspace_to_project instead."
+                )
+            return json.dumps(response, ensure_ascii=False)
 
         self.agent.register_tool(
             name="write_files", func=_write_files,
