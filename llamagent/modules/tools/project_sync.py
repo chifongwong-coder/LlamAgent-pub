@@ -298,6 +298,42 @@ class ProjectSyncService:
             }
 
     # ================================================================
+    # v3.3: write_files changeset registration
+    # ================================================================
+
+    def record_write_changeset(self, target: str, pre_image: str | None) -> str:
+        """Register a Changeset for an out-of-band write performed by
+        ``write_files`` in v3.3.
+
+        ``write_files`` does its own atomic write (it has to support
+        ``mode='binary'`` and ``makedirs(exist_ok=True)`` for nested
+        paths), so this helper just records the pre-image so that
+        ``revert_changes`` can roll back the write.
+
+        Args:
+            target: Absolute path that was written.
+            pre_image: Prior file content as a string, or ``None`` if
+                the file did not exist before the write (revert deletes
+                the file).
+
+        Returns:
+            The newly-registered Changeset id.
+        """
+        resolved = os.path.realpath(target)
+        changeset = Changeset(
+            changeset_id=uuid.uuid4().hex,
+            target_path=resolved,
+            pre_image=pre_image,
+            ops=[{
+                "action": "write_file",
+                "had_prior_content": pre_image is not None,
+            }],
+            timestamp=time.time(),
+        )
+        self._changesets.append(changeset)
+        return changeset.changeset_id
+
+    # ================================================================
     # Preview: preview_patch
     # ================================================================
 

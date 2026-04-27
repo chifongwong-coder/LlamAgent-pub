@@ -23,6 +23,7 @@ import tempfile
 from llamagent.core.agent import Module
 from llamagent.modules.tools.registry import ToolRegistry, global_registry
 from llamagent.modules.tools.agent_tools import AgentToolManager
+from llamagent.modules.tools.workspace import _resolve_within
 
 logger = logging.getLogger(__name__)
 
@@ -257,8 +258,6 @@ class ToolsModule(Module):
     def _register_workspace_tools(self):
         """Register workspace exploration and modification tools."""
         ws = self.workspace_service
-        from llamagent.modules.tools.workspace import _resolve_within
-
         # v3.3 path resolution helpers — all 5 core tools route through these.
         #
         #   _read_base(args)  -> (base, allow_absolute)  for read tools
@@ -279,6 +278,19 @@ class ToolsModule(Module):
         def _resolve_for(args, *, write: bool, raw_path: str) -> str:
             base, allow_abs = (_write_base(args) if write else _read_base(args))
             return _resolve_within(raw_path, base=base, allow_absolute=allow_abs)
+
+        def _safe_extract(args, *, write: bool, raw_paths) -> list[str]:
+            """path_extractor-safe wrapper: rejected paths are dropped from
+            the auth engine's view; the tool body re-resolves and surfaces
+            the error to the model. Prevents auth-layer crashes on
+            malformed input (nul bytes, escape attempts)."""
+            out = []
+            for p in raw_paths:
+                try:
+                    out.append(_resolve_for(args, write=write, raw_path=p))
+                except (ValueError, OSError):
+                    continue
+            return out
 
         # --- Exploration tools (safety_level=1) ---
 
@@ -313,7 +325,7 @@ class ToolsModule(Module):
                           "description": "Where to list. 'project' (default) | 'playground' (scratch cache)."},
             }},
             tier="common", safety_level=1,
-            path_extractor=lambda args: [_resolve_for(args, write=False, raw_path=args.get("root", "."))],
+            path_extractor=lambda args: _safe_extract(args, write=False, raw_paths=[args.get("root", ".")]),
         )
 
         def _glob_files(pattern: str, root: str = ".") -> str:
@@ -324,7 +336,7 @@ class ToolsModule(Module):
 
         self.agent.register_tool(
             name="glob_files", func=_glob_files,
-            description="Search files by glob pattern. Paths relative to workspace; use 'project:' prefix for project files.",
+            description="Search files by glob pattern. Paths relative to the playground (scratch cache) — only auto-loaded when no shell tool is available.",
             parameters={"type": "object", "properties": {
                 "pattern": {"type": "string", "description": "Glob pattern (e.g., '**/*.py')"},
                 "root": {"type": "string", "description": "Root directory (default: workspace root)", "default": "."},
@@ -380,10 +392,7 @@ class ToolsModule(Module):
                           "description": "Where to search. 'project' (default) | 'playground' (scratch cache)."},
             }, "required": ["query"]},
             tier="common", safety_level=1,
-            path_extractor=lambda args: (
-                [_resolve_for(args, write=False, raw_path=p) for p in args["paths"]]
-                if args.get("paths") else []
-            ),
+            path_extractor=lambda args: _safe_extract(args, write=False, raw_paths=args.get("paths") or []),
         )
 
         def _read_files(paths: list, ranges: dict = None, with_line_numbers: bool = True,
@@ -502,9 +511,7 @@ class ToolsModule(Module):
                           "description": "Where to read. 'project' (default) | 'playground' (scratch cache)."},
             }, "required": ["paths"]},
             tier="common", safety_level=1,
-            path_extractor=lambda args: [
-                _resolve_for(args, write=False, raw_path=p) for p in args.get("paths", [])
-            ],
+            path_extractor=lambda args: _safe_extract(args, write=False, raw_paths=args.get("paths") or []),
         )
 
         def _stat_paths(paths: list) -> str:
@@ -544,12 +551,26 @@ class ToolsModule(Module):
             args = {"zone": zone}
             written = []
             errors = []
+            track_changeset = (zone != "playground")
             for path, content in files.items():
                 try:
                     resolved = _resolve_for(args, write=True, raw_path=path)
                 except ValueError as e:
                     errors.append({"path": path, "error": str(e)})
                     continue
+                # Capture pre-image for changeset if writing to project zone.
+                pre_image = None
+                had_prior = False
+                if track_changeset and os.path.isfile(resolved):
+                    try:
+                        with open(resolved, "r", encoding="utf-8") as fp:
+                            pre_image = fp.read()
+                        had_prior = True
+                    except (OSError, UnicodeDecodeError):
+                        # Binary or unreadable existing file — record None pre-image
+                        # so revert at least removes whatever we wrote.
+                        had_prior = True
+                        pre_image = None
                 try:
                     os.makedirs(os.path.dirname(resolved), exist_ok=True)
                     if mode == "binary":
@@ -560,6 +581,14 @@ class ToolsModule(Module):
                         with open(resolved, "w", encoding="utf-8") as f:
                             f.write(content)
                     written.append(path)
+                    if track_changeset:
+                        # File didn't exist before -> pre_image=None means
+                        # revert deletes it. File existed -> revert restores
+                        # the captured pre_image (or deletes if it was binary).
+                        self.project_sync_service.record_write_changeset(
+                            resolved,
+                            pre_image if had_prior else None,
+                        )
                 except Exception as e:
                     errors.append({"path": path, "error": str(e)})
             response = {
@@ -600,9 +629,7 @@ class ToolsModule(Module):
                           "description": "Where to write. 'project' (default, changeset-tracked) | 'playground' (scratch, ephemeral)."},
             }, "required": ["files"]},
             tier="common", safety_level=2,
-            path_extractor=lambda args: [
-                _resolve_for(args, write=True, raw_path=p) for p in (args.get("files") or {}).keys()
-            ],
+            path_extractor=lambda args: _safe_extract(args, write=True, raw_paths=list((args.get("files") or {}).keys())),
         )
 
         def _create_temp_file(prefix: str = "", suffix: str = "", content: str = "") -> str:
@@ -712,8 +739,6 @@ class ToolsModule(Module):
         """Register project sync tools (apply_patch, sync, revert)."""
         ps = self.project_sync_service
         ws = self.workspace_service
-        from llamagent.modules.tools.workspace import _resolve_within
-
         def _patch_base(args):
             if args.get("zone") == "playground":
                 return ws.workspace_root, False
@@ -757,14 +782,19 @@ class ToolsModule(Module):
                           "description": "Where to apply. 'project' (default, changeset-tracked) | 'playground' (scratch, ephemeral)."},
             }, "required": ["target", "edits"]},
             tier="common", safety_level=2,
-            path_extractor=lambda args: [
-                _resolve_within(
+            path_extractor=lambda args: _safe_apply_patch_extract(args),
+        )
+
+        def _safe_apply_patch_extract(args):
+            """Exception-safe path extraction for apply_patch (auth layer)."""
+            try:
+                return [_resolve_within(
                     args.get("target", ""),
                     base=(ws.workspace_root if args.get("zone") == "playground" else self.agent.write_root),
                     allow_absolute=(args.get("zone") != "playground"),
-                )
-            ],
-        )
+                )]
+            except (ValueError, OSError):
+                return []
 
         def _revert_changes(targets: list = None) -> str:
             # Per D7 decision: a path that resolves to playground is never
@@ -796,11 +826,18 @@ class ToolsModule(Module):
                 "targets": {"type": "array", "items": {"type": "string"}, "description": "File paths to revert (relative to project). Omit to revert most recent changeset."},
             }},
             tier="common", safety_level=2,
-            path_extractor=lambda args: [
-                _resolve_within(t, base=self.agent.write_root, allow_absolute=True)
-                for t in (args.get("targets") or [])
-            ] or [self.agent.write_root],  # Sentinel: zone-check write_root when targets=None
+            path_extractor=lambda args: _safe_revert_extract(args),
         )
+
+        def _safe_revert_extract(args):
+            """Exception-safe path extraction for revert_changes."""
+            out = []
+            for t in (args.get("targets") or []):
+                try:
+                    out.append(_resolve_within(t, base=self.agent.write_root, allow_absolute=True))
+                except (ValueError, OSError):
+                    continue
+            return out or [self.agent.write_root]  # sentinel for targets=None
 
     # ============================================================
     # Meta-tool registration (all go to agent_registry to avoid global overwrite)

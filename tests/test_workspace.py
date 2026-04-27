@@ -367,3 +367,102 @@ class TestPatchAndSyncLifecycle:
             mod.workspace_service.workspace_id,
         )
         assert not os.path.isdir(session_dir)
+
+
+# ============================================================
+# v3.3: write_root primitive + write_files changeset tracking
+# ============================================================
+
+class TestWriteRootBoundary:
+    """v3.3 D8: write_root is the single write boundary used by all
+    typed write tools. Verify the soft-fallback semantics for invalid
+    edit_root values and the boundary enforcement."""
+
+    def test_write_root_defaults_to_project_dir(self, bare_agent, tmp_path):
+        _make_agent_with_tools(bare_agent, tmp_path)
+        assert bare_agent.write_root == os.path.realpath(bare_agent.project_dir)
+
+    def test_edit_root_narrows_write_root(self, bare_agent, tmp_path):
+        project_dir = os.path.join(str(tmp_path), "project")
+        os.makedirs(os.path.join(project_dir, "src"), exist_ok=True)
+        bare_agent.config.edit_root = "src"
+        bare_agent.project_dir = project_dir
+        bare_agent.playground_dir = os.path.join(str(tmp_path), "llama_playground")
+        os.makedirs(bare_agent.playground_dir, exist_ok=True)
+        bare_agent.register_module(ToolsModule())
+
+        # write_root is now project/src; writes outside src are rejected.
+        assert bare_agent.write_root.endswith("/src")
+
+        # Write inside edit_root → succeeds
+        result = _call_tool_json(bare_agent, "write_files",
+            files={"main.py": "x"})
+        assert result["status"] == "success"
+        assert os.path.isfile(os.path.join(project_dir, "src", "main.py"))
+
+        # Write outside edit_root via "../README.md" → rejected (escape)
+        result = _call_tool_json(bare_agent, "write_files",
+            files={"../README.md": "y"})
+        assert result["status"] == "partial"
+        assert len(result["errors"]) == 1
+
+    def test_invalid_edit_root_falls_back_with_warning(self, bare_agent, tmp_path, caplog):
+        project_dir = os.path.join(str(tmp_path), "project")
+        os.makedirs(project_dir, exist_ok=True)
+        bare_agent.config.edit_root = "../../../escape"
+        bare_agent.project_dir = project_dir
+        bare_agent.playground_dir = os.path.join(str(tmp_path), "llama_playground")
+        os.makedirs(bare_agent.playground_dir, exist_ok=True)
+
+        with caplog.at_level("WARNING"):
+            bare_agent.register_module(ToolsModule())
+
+        # Falls back to project_dir.
+        assert bare_agent.write_root == os.path.realpath(project_dir)
+        # Warning was emitted.
+        assert any("escapes project_dir" in r.message for r in caplog.records)
+
+
+class TestWriteFilesChangesetTracking:
+    """v3.3 D6: write_files records a changeset so revert_changes can
+    undo a write. Playground writes are NOT tracked."""
+
+    def test_write_then_revert_restores_original(self, bare_agent, tmp_path):
+        _make_agent_with_tools(bare_agent, tmp_path)
+        # Seed an existing project file.
+        target = os.path.join(bare_agent.project_dir, "config.txt")
+        with open(target, "w") as f:
+            f.write("version=1.0\n")
+
+        # Overwrite via write_files.
+        _call_tool_json(bare_agent, "write_files",
+            files={"config.txt": "version=2.0\n"})
+        assert open(target).read() == "version=2.0\n"
+
+        # Revert restores the original.
+        result = _call_tool_json(bare_agent, "revert_changes")
+        assert result["status"] == "success"
+        assert open(target).read() == "version=1.0\n"
+
+    def test_write_new_file_then_revert_deletes(self, bare_agent, tmp_path):
+        _make_agent_with_tools(bare_agent, tmp_path)
+        target = os.path.join(bare_agent.project_dir, "new_file.txt")
+        assert not os.path.exists(target)
+
+        _call_tool_json(bare_agent, "write_files",
+            files={"new_file.txt": "fresh content"})
+        assert os.path.isfile(target)
+
+        result = _call_tool_json(bare_agent, "revert_changes")
+        assert result["status"] == "success"
+        assert not os.path.exists(target)
+
+    def test_playground_writes_are_not_tracked(self, bare_agent, tmp_path):
+        _make_agent_with_tools(bare_agent, tmp_path)
+
+        _call_tool_json(bare_agent, "write_files",
+            files={"scratch.txt": "ephemeral"}, zone="playground")
+
+        # No changeset created → revert finds nothing.
+        result = _call_tool_json(bare_agent, "revert_changes")
+        assert result["status"] == "error"

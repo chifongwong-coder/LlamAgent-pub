@@ -455,7 +455,8 @@ class LlamAgent:
             return project_root
         try:
             candidate = os.path.realpath(os.path.join(project_root, edit_root_cfg))
-        except OSError as e:
+        except (OSError, ValueError) as e:
+            # ValueError on POSIX nul-byte paths; OSError on transient FS errors.
             logger.warning(
                 "edit_root '%s' resolution failed: %s; falling back to project_dir.",
                 edit_root_cfg, e,
