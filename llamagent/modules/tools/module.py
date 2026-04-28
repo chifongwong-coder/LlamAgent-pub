@@ -38,7 +38,7 @@ import tempfile
 from llamagent.core.agent import Module
 from llamagent.modules.tools.registry import ToolRegistry, global_registry
 from llamagent.modules.tools.agent_tools import AgentToolManager
-from llamagent.modules.tools.workspace import _resolve_within, _resolve_path, classify_write
+from llamagent.modules.tools.scratch import _resolve_within, _resolve_path, classify_write
 
 logger = logging.getLogger(__name__)
 
@@ -155,10 +155,10 @@ class ToolsModule(Module):
             builtin.ask_user._handler = agent.interaction_handler
 
         # --- 1b. Create v1.5 internal services ---
-        from llamagent.modules.tools.workspace import WorkspaceService
+        from llamagent.modules.tools.scratch import ScratchService
         from llamagent.modules.tools.project_sync import ProjectSyncService
-        self.workspace_service = WorkspaceService(agent, workspace_id=agent.config.workspace_id)
-        self.project_sync_service = ProjectSyncService(agent, self.workspace_service)
+        self.scratch_service = ScratchService(agent, scratch_id=agent.config.scratch_id)
+        self.project_sync_service = ProjectSyncService(agent, self.scratch_service)
 
         # --- 2. Load admin-created common tools (from __common__.json into common_registry) ---
         try:
@@ -278,17 +278,17 @@ class ToolsModule(Module):
         return False
 
     def on_shutdown(self) -> None:
-        """Clean up workspace session directory on agent shutdown."""
-        if hasattr(self, "workspace_service") and self.workspace_service:
-            self.workspace_service.cleanup()
+        """Clean up scratch session directory on agent shutdown."""
+        if hasattr(self, "scratch_service") and self.scratch_service:
+            self.scratch_service.cleanup()
 
     # ============================================================
-    # v1.5 workspace tool registration
+    # v1.5 file tool registration
     # ============================================================
 
     def _register_workspace_tools(self):
-        """Register workspace exploration and modification tools."""
-        ws = self.workspace_service
+        """Register file-tool surface (read/write/patch/list/revert + pack)."""
+        ws = self.scratch_service
         # v3.3: paths from the model are always resolved against project_dir.
         # classify_write decides the routing for writes (playground / project /
         # rejected). Reads default to project_dir; the authorization engine's

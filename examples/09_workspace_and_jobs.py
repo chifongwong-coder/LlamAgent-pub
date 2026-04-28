@@ -241,18 +241,18 @@ def part3_job_execution(agent):
 
 def part4_workspace_lifecycle(agent, tools_mod):
     print("\n" + "=" * 60)
-    print("Part 4: Workspace Lifecycle (cleanup on shutdown)")
+    print("Part 4: Scratch Lifecycle (cleanup on shutdown)")
     print("=" * 60)
 
-    ws_root = tools_mod.workspace_service.workspace_root
-    print(f"\n  Workspace root: {ws_root}")
-    print(f"  Exists before shutdown: {os.path.isdir(ws_root)}")
+    scratch_root = tools_mod.scratch_service.scratch_root
+    print(f"\n  Scratch root: {scratch_root}")
+    print(f"  Exists before shutdown: {os.path.isdir(scratch_root)}")
 
     # Shutdown the agent (calls on_shutdown on all modules in reverse order)
     agent.shutdown()
     print("\n  agent.shutdown() called")
-    print(f"  Exists after shutdown:  {os.path.isdir(ws_root)}")
-    print("  (workspace session directory cleaned up)")
+    print(f"  Exists after shutdown:  {os.path.isdir(scratch_root)}")
+    print("  (scratch session directory cleaned up)")
 
 
 # =============================================================

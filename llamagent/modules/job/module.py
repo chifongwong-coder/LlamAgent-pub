@@ -174,35 +174,36 @@ class JobModule(Module):
         """
         Resolve the cwd parameter to an absolute directory path.
 
-        Resolution rules:
-        - "workspace" -> workspace root from ToolsModule, or playground_dir fallback
+        Resolution rules (legacy literals retained until commit-3 R6
+        switches the surface to path-only):
+        - "workspace" -> scratch root from ToolsModule, or playground_dir fallback
         - "project"   -> agent.project_dir
-        - relative    -> resolved relative to workspace root
+        - relative    -> resolved relative to scratch root
         - absolute    -> used as-is
         """
         agent = self.agent
 
-        # Get workspace root (soft dependency on ToolsModule)
-        workspace_root = None
+        # Get scratch root (soft dependency on ToolsModule)
+        scratch_root = None
         tools_mod = agent.get_module("tools")
         if tools_mod is not None:
-            ws = getattr(tools_mod, "workspace_service", None)
-            if ws is not None:
-                workspace_root = getattr(ws, "workspace_root", None)
+            ss = getattr(tools_mod, "scratch_service", None)
+            if ss is not None:
+                scratch_root = getattr(ss, "scratch_root", None)
 
         # Fallback to playground_dir if ToolsModule unavailable
-        if workspace_root is None:
-            workspace_root = getattr(agent, "playground_dir", os.getcwd())
+        if scratch_root is None:
+            scratch_root = getattr(agent, "playground_dir", os.getcwd())
 
         if cwd == "workspace":
-            return os.path.realpath(workspace_root)
+            return os.path.realpath(scratch_root)
         elif cwd == "project":
             return os.path.realpath(agent.project_dir)
         elif os.path.isabs(cwd):
             return os.path.realpath(cwd)
         else:
-            # Relative path -> resolve from workspace root
-            return os.path.realpath(os.path.join(workspace_root, cwd))
+            # Relative path -> resolve from scratch root
+            return os.path.realpath(os.path.join(scratch_root, cwd))
 
     # ================================================================
     # Tool implementations

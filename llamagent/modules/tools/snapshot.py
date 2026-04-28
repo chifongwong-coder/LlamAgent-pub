@@ -171,11 +171,11 @@ class SnapshotService:
 
     def _session_id_hint(self) -> str:
         """Best-effort short identifier for the current session."""
-        ws = getattr(self.agent, "modules", {}).get("tools")
-        if ws is not None and getattr(ws, "workspace_service", None):
-            wid = getattr(ws.workspace_service, "_workspace_id", None)
-            if wid:
-                return wid[:12]
+        tools_mod = getattr(self.agent, "modules", {}).get("tools")
+        if tools_mod is not None and getattr(tools_mod, "scratch_service", None):
+            sid = getattr(tools_mod.scratch_service, "_scratch_id", None)
+            if sid:
+                return sid[:12]
         return f"pid{os.getpid()}"
 
     def _estimate_size(self, root: str) -> tuple[int, int]:

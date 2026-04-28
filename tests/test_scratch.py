@@ -365,17 +365,17 @@ class TestPatchAndSyncLifecycle:
         # v3.3: sync_workspace_to_project removed; project writes go through
         # write_files / apply_patch directly. The lifecycle test ends here.
 
-        # -- on_shutdown removes the workspace session directory --
+        # -- on_shutdown removes the scratch session directory --
         _call_tool_json(bare_agent, "write_files", files={"temp.txt": "temporary"})
 
-        ws_root = mod.workspace_service.workspace_root
-        assert os.path.isdir(ws_root)
+        scratch_root = mod.scratch_service.scratch_root
+        assert os.path.isdir(scratch_root)
 
         mod.on_shutdown()
 
         session_dir = os.path.join(
             bare_agent.playground_dir, "sessions",
-            mod.workspace_service.workspace_id,
+            mod.scratch_service.scratch_id,
         )
         assert not os.path.isdir(session_dir)
 

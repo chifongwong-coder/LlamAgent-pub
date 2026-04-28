@@ -301,8 +301,8 @@ class Config:
         self.job_max_active: int = 10
         self.job_profiles: dict = {}
 
-        # Workspace (runtime field, not encouraged in YAML)
-        self.workspace_id: str | None = None
+        # Per-session scratch identifier (runtime field, programmatic-only — not in YAML map)
+        self.scratch_id: str | None = None
 
         # v3.3: optional sub-directory of project_dir that the agent is
         # allowed to write into. When unset, the entire project_dir is
