@@ -1,9 +1,8 @@
 """Streaming event protocol for interface layer (v3.0.3).
 
 Version 1. All events carry a `type` discriminator and a `seq` monotonic
-counter within a single stream. When the framework natively emits structured
-events (planned v3.1+), the same schema is reused — the adapter in
-`stream_adapter.py` becomes a passthrough.
+counter within a single stream. The adapter in `stream_adapter.py` parses
+control markers from the text stream into these typed events.
 
 Event types:
 - content           : LLM text chunk
@@ -13,9 +12,9 @@ Event types:
 - error             : Fatal error during generation
 - done              : End of stream marker (always last)
 
-Fields that are `None` in the current adapter (`args`, `result_preview`) will
-be populated when native event emission lands. UI code should treat `None`
-as "not available" and degrade gracefully.
+Optional fields (`args`, `result_preview`) are `None` in the current
+adapter. UI code should treat `None` as "not available" and degrade
+gracefully.
 """
 
 from typing import TypedDict, Literal, Optional

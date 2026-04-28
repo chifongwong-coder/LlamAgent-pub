@@ -1,10 +1,10 @@
 """
-09 -- Workspace & Jobs: The v3.3 Tool System
+09 -- File Tools & Jobs: The v3.3/v3.4 Tool System
 
-v3.3 path-classifying tool system. The default surface is 5 core
-file tools (read/write/patch/list/revert) plus the `command` shell
-escape hatch (when SandboxModule is loaded) — small models see a
-clean tool list, not 13+ overlapping options.
+v3.3 path-classifying tool system with v3.4 rename_path addition. The
+default surface is 5 core file tools (read/write/patch/list/revert)
+plus the `command` shell escape hatch (when SandboxModule is loaded)
+— small models see a clean tool list, not 13+ overlapping options.
 
 Key concepts:
 - Path classification: writes auto-route to playground (no Changeset),
@@ -14,9 +14,10 @@ Key concepts:
   large read_files) flow into llama_playground/tool_results/; the
   model reads them back via read_files (cap'd to fit context).
 - Changeset journal: every typed write (write_files / apply_patch /
-  move_path / copy_path / delete_path) is reversible via
-  revert_changes.
+  rename_path / move_path / copy_path / delete_path) is reversible
+  via revert_changes.
 - Jobs: start_job with wait=True (sync) or wait=False (async lifecycle).
+  cwd is a plain path (None = scratch root, relative = project_dir).
 - Packs: conditional tool groups (path-fallback auto-activates when
   no shell tool is registered; toolsmith / web / multi-agent activate
   by skill or state).

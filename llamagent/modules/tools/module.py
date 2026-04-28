@@ -207,7 +207,7 @@ class ToolsModule(Module):
         # --- 4. Register meta-tools (per-instance, by role) ---
         self._register_meta_tools()
 
-        # --- 4b. Register v1.5 workspace + project sync tools ---
+        # --- 4b. Register v1.5 file + project sync tools ---
         self._register_workspace_tools()
         self._register_project_sync_tools()
 
@@ -257,7 +257,7 @@ class ToolsModule(Module):
         """Evaluate state-driven packs and inject guidelines into LLM context."""
         # Step 2: evaluate state-driven packs
         self._evaluate_state_packs()
-        # Inject workspace guide + capability hints
+        # Inject file-tool guide + capability hints
         guide = FILE_TOOL_GUIDE + "\n\n" + CAPABILITY_HINT_BLOCK
         return f"{context}\n\n{guide}" if context else guide
 
@@ -268,10 +268,10 @@ class ToolsModule(Module):
             self.agent._active_packs.add("job-followup")
 
         # path-fallback: if neither a registered shell tool (`command`) nor
-        # the JobModule's `start_job` is available, expose the legacy
-        # path-op tools (move/copy/delete/glob/stat/temp) so the model
-        # still has a way to manipulate workspace files. When a shell
-        # tool exists, these stay hidden.
+        # the JobModule's `start_job` is available, expose the path-op
+        # tools (rename/move/copy/delete/glob/stat/temp) so the model
+        # still has a way to manage files. When a shell tool exists,
+        # these stay hidden.
         if not self._shell_tool_available():
             self.agent._active_packs.add("path-fallback")
 
