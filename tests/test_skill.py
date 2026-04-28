@@ -348,7 +348,7 @@ class TestBuiltinSkills:
 
         assert mod.index.lookup("toolsmith") is not None
         assert mod.index.lookup("web-access") is not None
-        assert mod.index.lookup("workspace-ops") is not None
+        assert mod.index.lookup("path-ops") is not None
         assert mod.index.lookup("lightweight-collab") is not None
 
         # --- Project skill overrides builtin ---

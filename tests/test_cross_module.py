@@ -86,7 +86,7 @@ class TestCrossModule:
         assert "glob_files" in schema_names
         assert "move_path" in schema_names
 
-        # Skill match still works (workspace-ops requires path-fallback).
+        # Skill match still works (path-ops requires path-fallback).
         skill_mod.on_context("move some files around", "")
         # Whether the skill activated depends on tag matching; either
         # outcome is fine — the path-fallback pack is already active.
