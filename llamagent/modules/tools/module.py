@@ -17,12 +17,14 @@ Responsibilities:
       playground (no changeset), project (changeset-tracked), or
       rejected (outside writable root). No `zone` parameter.
     * Pack `path-fallback` (auto-activated when neither `command`
-      nor `start_job` is registered): move_path, copy_path,
-      delete_path, glob_files, search_text, stat_paths,
-      create_temp_file. Destructive 3 (move/copy/delete) register
-      changesets when targeting write_root; delete_path rejects
-      directories and binary files. Other packs (web / toolsmith /
-      multi-agent / job-followup) follow the same pack mechanism.
+      nor `start_job` is registered): rename_path, move_path,
+      copy_path, delete_path, glob_files, search_text, stat_paths,
+      create_temp_file. rename_path renames in-place (basename only);
+      move_path crosses directories (same-parent rejected). Destructive
+      3 (move/copy/delete) register changesets when targeting write_root;
+      delete_path rejects directories and binary files. Other packs
+      (web / toolsmith / multi-agent / job-followup) follow the same
+      pack mechanism.
 - FILE_TOOL_GUIDE + CAPABILITY_HINT_BLOCK injection via on_context.
 """
 
@@ -55,6 +57,12 @@ You can read and write files in the project directory using:
   - apply_patch(target, edits) # surgical match/replace edits
   - list_tree(root)           # browse project structure
   - revert_changes(targets)   # undo recent typed writes (within the project)
+
+File management (path-fallback pack):
+  - rename_path(target, new_name)  # rename in-place; new_name must be a filename, not a path
+  - move_path(src, dst)            # move across directories (same-parent rejected — use rename_path)
+  - copy_path(src, dst)            # copy file or directory
+  - delete_path(path)              # delete a single file (directories rejected)
 
 Path conventions:
   - All paths are relative to the project root unless absolute. No prefixes.
@@ -715,12 +723,62 @@ class ToolsModule(Module):
             pack="path-fallback",
         )
 
+        def _rename_path(target: str, new_name: str) -> str:
+            # new_name must be a plain filename — no path separators allowed.
+            if os.sep in new_name or "/" in new_name or "\\" in new_name:
+                return json.dumps({
+                    "status": "error",
+                    "error": (
+                        f"rename_path: new_name must be a filename, not a path "
+                        f"(got '{new_name}'). Use move_path to move across directories."
+                    ),
+                }, ensure_ascii=False)
+            try:
+                rsrc = _resolve_path(target, base=agent.project_dir)
+            except (ValueError, OSError) as e:
+                return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
+            if classify_write(rsrc, agent) == "rejected":
+                return json.dumps({
+                    "status": "error",
+                    "error": _writable_root_hint(target),
+                }, ensure_ascii=False)
+            rdst = os.path.join(os.path.dirname(rsrc), new_name)
+            rdst = os.path.realpath(rdst)
+            try:
+                shutil.move(rsrc, rdst)
+                if classify_write(rdst, agent) == "project":
+                    self.project_sync_service.record_move_changeset(rsrc, rdst)
+                return json.dumps({"status": "success", "target": target, "new_name": new_name}, ensure_ascii=False)
+            except Exception as e:
+                return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
+
+        self.agent.register_tool(
+            name="rename_path", func=_rename_path,
+            description="Rename a file or directory in-place. new_name must be a filename (no slashes); use move_path to move across directories.",
+            parameters={"type": "object", "properties": {
+                "target": {"type": "string", "description": "Path to rename (relative to project root)"},
+                "new_name": {"type": "string", "description": "New filename (basename only, no path separators)"},
+            }, "required": ["target", "new_name"]},
+            tier="common", safety_level=2,
+            pack="path-fallback",
+            path_extractor=lambda args: _safe_extract_paths([args.get("target", "")]),
+        )
+
         def _move_path(src: str, dst: str) -> str:
             try:
                 rsrc = _resolve_path(src, base=agent.project_dir)
                 rdst = _resolve_path(dst, base=agent.project_dir)
             except (ValueError, OSError) as e:
                 return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
+            # Same-parent rejection: use rename_path for in-place renames.
+            if os.path.dirname(rsrc) == os.path.dirname(rdst):
+                return json.dumps({
+                    "status": "error",
+                    "error": (
+                        f"move_path: source and destination share the same parent directory. "
+                        f"Use rename_path('{src}', '{os.path.basename(dst)}') to rename in-place."
+                    ),
+                }, ensure_ascii=False)
             for raw, resolved in (("src", rsrc), ("dst", rdst)):
                 if classify_write(resolved, agent) == "rejected":
                     return json.dumps({
@@ -738,10 +796,10 @@ class ToolsModule(Module):
 
         self.agent.register_tool(
             name="move_path", func=_move_path,
-            description="Move a file or directory within the project.",
+            description="Move a file or directory to a different directory. Rejects same-parent calls — use rename_path to rename in-place.",
             parameters={"type": "object", "properties": {
                 "src": {"type": "string", "description": "Source path"},
-                "dst": {"type": "string", "description": "Destination path"},
+                "dst": {"type": "string", "description": "Destination path (must be in a different directory than src)"},
             }, "required": ["src", "dst"]},
             tier="common", safety_level=2,
             pack="path-fallback",

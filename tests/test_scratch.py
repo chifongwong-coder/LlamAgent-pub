@@ -82,6 +82,7 @@ class TestToolRegistrationAndPackFiltering:
             "search_text": "path-fallback",
             "stat_paths": "path-fallback",
             "create_temp_file": "path-fallback",
+            "rename_path": "path-fallback",
             "move_path": "path-fallback",
             "copy_path": "path-fallback",
             "delete_path": "path-fallback",
@@ -120,6 +121,7 @@ class TestToolRegistrationAndPackFiltering:
         schemas = bare_agent.get_all_tool_schemas()
         schema_names = [s["function"]["name"] for s in schemas]
         assert "glob_files" in schema_names
+        assert "rename_path" in schema_names
         assert "move_path" in schema_names
         assert "stat_paths" in schema_names
 
@@ -817,3 +819,28 @@ class TestChangesetLRU:
         # Either the top-level error or per-file error mentions eviction.
         msg_blob = json.dumps(result)
         assert "evicted" in msg_blob.lower()
+
+
+class TestR4RenamePathAndMovePathSplit:
+    """v3.4 R4 smoke tests: rename_path in-place rename + move_path same-parent rejection."""
+
+    def test_rename_path(self, bare_agent, tmp_path):
+        """rename_path renames a project file; file exists under new name."""
+        _make_agent_with_tools(bare_agent, tmp_path)
+        src = os.path.join(bare_agent.project_dir, "before.txt")
+        with open(src, "w") as f:
+            f.write("content")
+        result = _call_tool_json(bare_agent, "rename_path", target="before.txt", new_name="after.txt")
+        assert result["status"] == "success"
+        assert not os.path.exists(src)
+        assert os.path.exists(os.path.join(bare_agent.project_dir, "after.txt"))
+
+    def test_move_path_same_parent_rejected(self, bare_agent, tmp_path):
+        """move_path with src and dst in the same directory is rejected with a hint to use rename_path."""
+        _make_agent_with_tools(bare_agent, tmp_path)
+        src = os.path.join(bare_agent.project_dir, "x.txt")
+        with open(src, "w") as f:
+            f.write("x")
+        result = _call_tool_json(bare_agent, "move_path", src="x.txt", dst="y.txt")
+        assert result["status"] == "error"
+        assert "rename_path" in result["error"]
