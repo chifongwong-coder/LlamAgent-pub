@@ -23,7 +23,7 @@ Responsibilities:
       changesets when targeting write_root; delete_path rejects
       directories and binary files. Other packs (web / toolsmith /
       multi-agent / job-followup) follow the same pack mechanism.
-- WORKSPACE_GUIDE + CAPABILITY_HINT_BLOCK injection via on_context.
+- FILE_TOOL_GUIDE + CAPABILITY_HINT_BLOCK injection via on_context.
 """
 
 import base64
@@ -48,7 +48,7 @@ COMMON_STORE_ID = "__common__"
 # File-tool behavioral guidelines injected via on_context (v3.3 surface).
 # This block is the model's primary reference for file-tool semantics; mock
 # tests in tests/test_workspace.py assert exact substrings — change carefully.
-WORKSPACE_GUIDE = """\
+FILE_TOOL_GUIDE = """\
 You can read and write files in the project directory using:
   - read_files(paths)         # read one or more files (relative to project root)
   - write_files(files)        # create or overwrite (relative to project root)
@@ -250,7 +250,7 @@ class ToolsModule(Module):
         # Step 2: evaluate state-driven packs
         self._evaluate_state_packs()
         # Inject workspace guide + capability hints
-        guide = WORKSPACE_GUIDE + "\n\n" + CAPABILITY_HINT_BLOCK
+        guide = FILE_TOOL_GUIDE + "\n\n" + CAPABILITY_HINT_BLOCK
         return f"{context}\n\n{guide}" if context else guide
 
     def _evaluate_state_packs(self):

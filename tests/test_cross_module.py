@@ -193,7 +193,7 @@ class TestCrossModule:
         context2 = tools_mod.on_context("create a tool", context2)
         context2 = skill_mod.on_context("create a tool", context2)
 
-        # v3.3 WORKSPACE_GUIDE header was rewritten — assert a stable
+        # v3.3 FILE_TOOL_GUIDE header was rewritten — assert a stable
         # substring from the new body instead of the old "[File Tool
         # Guidelines]" bracketed header.
         assert "All paths are relative" in context2

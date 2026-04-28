@@ -3,14 +3,14 @@ Workspace and project sync flow tests: v1.6 tool system.
 
 Tests cover ToolsModule registration, pack mechanism, workspace exploration,
 project sync (apply_patch with preview, revert), workspace-only write restriction,
-context injection (WORKSPACE_GUIDE + capability hint block), and workspace lifecycle.
+context injection (FILE_TOOL_GUIDE + capability hint block), and workspace lifecycle.
 """
 
 import base64
 import json
 import os
 
-from llamagent.modules.tools.module import ToolsModule, WORKSPACE_GUIDE, CAPABILITY_HINT_BLOCK
+from llamagent.modules.tools.module import ToolsModule, FILE_TOOL_GUIDE, CAPABILITY_HINT_BLOCK
 
 
 # ============================================================
@@ -125,20 +125,20 @@ class TestToolRegistrationAndPackFiltering:
 
 
 class TestContextInjection:
-    """on_context injects WORKSPACE_GUIDE + CAPABILITY_HINT_BLOCK."""
+    """on_context injects FILE_TOOL_GUIDE + CAPABILITY_HINT_BLOCK."""
 
     def test_context_injection(self, bare_agent, tmp_path):
         mod = _make_agent_with_tools(bare_agent, tmp_path)
 
         # -- Guide and hints injected into existing context --
         result = mod.on_context("test query", "existing context")
-        assert WORKSPACE_GUIDE in result
+        assert FILE_TOOL_GUIDE in result
         assert CAPABILITY_HINT_BLOCK in result
         assert "existing context" in result
 
         # -- Guide and hints injected when context is empty --
         result = mod.on_context("test query", "")
-        assert WORKSPACE_GUIDE in result
+        assert FILE_TOOL_GUIDE in result
         assert CAPABILITY_HINT_BLOCK in result
 
 
