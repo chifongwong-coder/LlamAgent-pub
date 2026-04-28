@@ -74,7 +74,12 @@ class SkillModule(Module):
             names = [s.name for s in skills]
             logger.info("SkillModule loaded %d skill(s): %s", len(skills), names)
 
-        # Register load_skill tool (L3: LLM can self-serve skill content)
+        # Register load_skill tool (L3: LLM can self-serve skill content).
+        # truncatable=False: skill bodies are author-controlled content, not
+        # tool output that needs persisting. If a skill is genuinely huge,
+        # the author should split it; routing it through _truncate_observation
+        # would create the absurd state of the model being told to read_files
+        # its own freshly-loaded skill back from disk.
         agent.register_tool(
             name="load_skill",
             func=self._load_skill_handler,
@@ -94,6 +99,7 @@ class SkillModule(Module):
             },
             tier="default",
             safety_level=1,
+            truncatable=False,
         )
 
     def _build_scan_paths(self, agent: LlamAgent) -> list[tuple[str, str]]:

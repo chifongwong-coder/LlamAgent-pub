@@ -10,8 +10,10 @@ v1.9.6: ApprovalScope moved here from zone.py; engine.set_mode() replaced by _sw
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import os
+import shlex
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -51,6 +53,12 @@ class ApprovalScope:
     max_uses: int | None = None         # max usage count (None = unlimited)
     uses: int = 0                       # current usage count
     source: str = "contract"            # "contract" | "seed" | "api"
+    # v3.3: command-pattern allowlist for the `command` tool. When the
+    # current command (normalized via shlex) matches any fnmatch pattern
+    # here, the scope grants permission for it. None means "no command-
+    # specific allowance" — only useful when actions includes "execute"
+    # and tool_names contains "command".
+    command_patterns: list[str] | None = None
 
 
 # ======================================================================
@@ -58,7 +66,7 @@ class ApprovalScope:
 # ======================================================================
 
 # Tools known to be command execution (not just read/write)
-_EXECUTE_TOOLS = frozenset({"start_job", "execute_command"})
+_EXECUTE_TOOLS = frozenset({"start_job", "execute_command", "command"})
 
 
 def infer_action(tool: dict) -> str:
@@ -164,6 +172,16 @@ class InteractivePolicy(AuthorizationPolicy):
             )
             response = engine.confirm(request)
             if not response.allow:
+                # v3.3 §3.5: command rejection has its own do-not-retry
+                # template so the model treats user denial as terminal,
+                # not as "try a different command".
+                if tool_name == "command":
+                    return AuthorizationResult(
+                        decision=(
+                            "Command rejected by user. Do not retry the same "
+                            "command; ask user for an alternative approach."
+                        )
+                    )
                 return AuthorizationResult(
                     decision=f"Tool '{tool_name}' operation on '{item.path}' was denied."
                 )
@@ -268,6 +286,15 @@ class TaskPolicy(AuthorizationPolicy):
                 )
                 response = engine.confirm(request)
                 if not response.allow:
+                    # v3.3 §3.5: command-tool-specific rejection text.
+                    if tool_name == "command":
+                        return AuthorizationResult(
+                            decision=(
+                                "Command rejected by user. Do not retry the same "
+                                "command; ask user for an alternative approach."
+                            ),
+                            events=events,
+                        )
                     return AuthorizationResult(
                         decision=f"Tool '{tool_name}' operation on '{item.path}' was denied.",
                         events=events,
@@ -606,10 +633,18 @@ class AuthorizationEngine:
         """
         Complete authorization flow: path extraction → zone evaluation → policy decision.
 
+        v3.3: the `command` shell tool routes through `_evaluate_command`
+        rather than path-based zone evaluation; the safety check is shlex
+        tokenization + structural pattern matching against rules in
+        ``config.hooks_config["command_safety"]``.
+
         Returns AuthorizationResult with decision (None=allow, str=rejection) and events.
         """
-        paths = self._extract_paths(tool, args)
-        evaluation = self._evaluate_zone(tool, paths)
+        if tool.get("name") == "command":
+            evaluation = self._evaluate_command(args)
+        else:
+            paths = self._extract_paths(tool, args)
+            evaluation = self._evaluate_zone(tool, paths)
         return self.policy.decide(evaluation, tool.get("name", "unknown"), self)
 
     def confirm(self, request: ConfirmRequest) -> ConfirmResponse:
@@ -638,6 +673,184 @@ class AuthorizationEngine:
             if any(kw in k.lower() for kw in PATH_KEYWORDS)
             and isinstance(v, str)
         ]
+
+    # ------------------------------------------------------------------
+    # v3.3: command-tool safety evaluation
+    # ------------------------------------------------------------------
+
+    # Default rules for the `command` tool. Users can override or extend
+    # via Config.hooks_config["command_safety"]. Each entry is matched
+    # structurally against the shlex-tokenized command.
+    _DEFAULT_COMMAND_RULES: dict = {
+        "hard_reject": [
+            # Catastrophic: rm -rf / or /*
+            {"cmd": "rm", "flags_subset": ["-rf"], "targets_any": ["/", "/*"]},
+            {"cmd": "rm", "flags_subset": ["-fr"], "targets_any": ["/", "/*"]},
+            # dd if=/dev/<something>
+            {"cmd": "dd", "arg_glob": "if=/dev/*"},
+            # Curl piped to shell
+            {"cmd_chain": ["curl", "sh"]},
+            {"cmd_chain": ["wget", "sh"]},
+            # Filesystem creation on a real device
+            {"cmd_glob": "mkfs.*"},
+        ],
+        "ask": [
+            # Any rm (covered above for the catastrophic shapes)
+            {"cmd": "rm"},
+            # Recursive chmod / chown
+            {"cmd": "chmod", "flags_subset": ["-R"]},
+            {"cmd": "chown", "flags_subset": ["-R"]},
+            # Force-push, hard reset
+            {"cmd": "git", "subcmd": ["push", "--force"]},
+            {"cmd": "git", "subcmd": ["push", "-f"]},
+            {"cmd": "git", "subcmd": ["reset", "--hard"]},
+        ],
+    }
+
+    def _evaluate_command(self, args: dict) -> ZoneEvaluation:
+        """Classify a `command` invocation as ALLOW / CONFIRMABLE / HARD_DENY
+        based on shlex-tokenized rule matching.
+
+        Rules come from ``config.hooks_config["command_safety"]`` (if
+        present) merged on top of ``_DEFAULT_COMMAND_RULES``.
+        """
+        cmd = (args or {}).get("cmd") or (args or {}).get("command") or ""
+        if not isinstance(cmd, str) or not cmd.strip():
+            # Empty / non-string — let the tool itself reject; allow at
+            # this layer.
+            return ZoneEvaluation.from_items([])
+
+        try:
+            tokens = shlex.split(cmd)
+        except ValueError as e:
+            # Mismatched quotes etc. — surface as deny so model retries.
+            item = ZoneDecisionItem(
+                path=cmd[:80], verdict=ZoneVerdict.HARD_DENY,
+                zone="external", action="execute",
+                message=f"Could not parse command: {e}",
+            )
+            return ZoneEvaluation.from_items([item])
+        if not tokens:
+            return ZoneEvaluation.from_items([])
+
+        rules = self._merged_command_rules()
+        normalized = " ".join(tokens)
+
+        # 1. Hard reject?
+        for pat in rules.get("hard_reject", []):
+            if self._command_matches(tokens, pat):
+                logger.warning(
+                    "command_safety: HARD_REJECT cmd=%r (rule=%s)", cmd, pat,
+                )
+                item = ZoneDecisionItem(
+                    path=cmd[:80], verdict=ZoneVerdict.HARD_DENY,
+                    zone="external", action="execute",
+                    message="Command blocked by safety policy (hard reject).",
+                )
+                return ZoneEvaluation.from_items([item])
+
+        # 2. Ask?
+        for pat in rules.get("ask", []):
+            if self._command_matches(tokens, pat):
+                # ApprovalScope command_patterns can short-circuit the ask:
+                # if any active scope's command_patterns matches the
+                # normalized command, allow without prompting.
+                if self._command_pattern_allowed(normalized):
+                    logger.info(
+                        "command_safety: ALLOW (matched ApprovalScope pattern) cmd=%r",
+                        cmd,
+                    )
+                    return ZoneEvaluation.from_items([])
+                logger.warning(
+                    "command_safety: ASK cmd=%r (rule=%s)", cmd, pat,
+                )
+                item = ZoneDecisionItem(
+                    path=cmd[:80], verdict=ZoneVerdict.CONFIRMABLE,
+                    zone="external", action="execute",
+                    message="Command flagged for safety review.",
+                )
+                return ZoneEvaluation.from_items([item])
+
+        # 3. Default allow.
+        return ZoneEvaluation.from_items([])
+
+    def _merged_command_rules(self) -> dict:
+        """Merge user-supplied rules onto defaults."""
+        merged = {
+            "hard_reject": list(self._DEFAULT_COMMAND_RULES.get("hard_reject", [])),
+            "ask": list(self._DEFAULT_COMMAND_RULES.get("ask", [])),
+        }
+        cfg = getattr(self.agent.config, "hooks_config", None) or {}
+        user = (cfg.get("command_safety") or {}) if isinstance(cfg, dict) else {}
+        for key in ("hard_reject", "ask"):
+            extra = user.get(key) or []
+            if isinstance(extra, list):
+                merged[key].extend(extra)
+        return merged
+
+    @staticmethod
+    def _command_matches(tokens: list[str], pat: dict) -> bool:
+        """Structural match between a tokenized command and a rule dict.
+
+        Supported pat keys (any/all match):
+        - cmd:           basename of tokens[0] equals this
+        - cmd_glob:      basename of tokens[0] matches this fnmatch
+        - cmd_chain:     all listed cmds appear in the tokens
+        - subcmd:        tokens[1:1+len(subcmd)] equals this list
+        - flags_subset:  ALL flags in this list appear somewhere in tokens
+        - targets_any:   ANY target in this list appears as a token
+        - arg_glob:      ANY token matches this fnmatch
+        """
+        if not tokens:
+            return False
+        head = os.path.basename(tokens[0])
+
+        if "cmd" in pat and pat["cmd"] != head:
+            return False
+        if "cmd_glob" in pat and not fnmatch.fnmatchcase(head, pat["cmd_glob"]):
+            return False
+        if "cmd_chain" in pat:
+            present = {os.path.basename(t) for t in tokens}
+            if not all(c in present for c in pat["cmd_chain"]):
+                return False
+        if "subcmd" in pat:
+            sub = pat["subcmd"]
+            if tokens[1:1 + len(sub)] != list(sub):
+                return False
+        if "flags_subset" in pat:
+            if not all(flag in tokens for flag in pat["flags_subset"]):
+                return False
+        if "targets_any" in pat:
+            if not any(t in tokens for t in pat["targets_any"]):
+                return False
+        if "arg_glob" in pat:
+            if not any(fnmatch.fnmatchcase(t, pat["arg_glob"]) for t in tokens):
+                return False
+        return True
+
+    def _command_pattern_allowed(self, normalized: str) -> bool:
+        """Check whether any active ApprovalScope.command_patterns matches.
+
+        Scopes whose ``tool_names`` does not include "command" are
+        skipped — a scope created for a different tool MUST NOT
+        accidentally pre-approve a command pattern.
+        """
+        scopes = self._active_command_scopes()
+        for sc in scopes:
+            tool_names = sc.tool_names or []
+            if "command" not in tool_names:
+                continue
+            for pattern in (sc.command_patterns or []):
+                if fnmatch.fnmatchcase(normalized, pattern):
+                    return True
+        return False
+
+    def _active_command_scopes(self):
+        """Iterate currently-active ApprovalScope entries (session + task)."""
+        out = list(self.state.session_scopes)
+        for task_scopes in self.state.task_scopes.values():
+            out.extend(task_scopes)
+        return out
 
     # ------------------------------------------------------------------
     # Zone evaluation (moved from LlamAgent._check_zone)

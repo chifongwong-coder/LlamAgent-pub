@@ -82,11 +82,14 @@ def main():
     reply = agent.chat("What's the weather in Tokyo?")
     print(f"Agent: {reply}")
 
-    # --- Zone-based safety (v1.3) ---
-    # Tools with path_extractor are checked against three zones:
-    #   playground/ -> always allowed
-    #   project dir -> sl=1 allowed, sl=2 needs confirmation
-    #   outside     -> sl=1 needs confirmation, sl=2 denied
+    # --- Zone-based safety ---
+    # Custom tools with a path_extractor are routed by the same zone
+    # engine the built-in file tools use. The framework classifies each
+    # extracted path:
+    #   under llama_playground/  -> "playground": always allowed
+    #   under write_root         -> "project":    sl=1 allowed, sl=2 needs confirmation
+    #   anywhere else            -> "external":   sl=1 needs confirmation, sl=2 denied
+    # The model never names the zone — it just supplies a path.
     agent.register_tool(
         name="write_example",
         func=lambda filename, content: f"Written to {filename}",
@@ -99,7 +102,7 @@ def main():
     result = agent.call_tool("write_example", {"filename": "llama_playground/test.txt", "content": "hello"})
     print(f"Playground write: {result}")
 
-    # Writing outside project: denied
+    # Writing outside write_root: denied at sl=2
     result = agent.call_tool("write_example", {"filename": "/etc/test.txt", "content": "hack"})
     print(f"External write: {result}")  # Denied by zone system
 

@@ -265,6 +265,10 @@ def bare_agent(mock_llm_client):
     agent._tools = {}
     agent._active_packs = set()
     agent._tools_version = 0
+    # v3.3 contract A: tracking set for persisted tool result paths,
+    # consumed by _truncate_observation defense-line-2.
+    from collections import OrderedDict as _OD
+    agent._persisted_files = _OD()
     agent._hooks = {}
     agent._session_started = False
     agent._in_hook = False

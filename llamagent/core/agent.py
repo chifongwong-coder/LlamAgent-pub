@@ -17,6 +17,7 @@ import logging
 import os
 import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable, Generator, Literal
 
@@ -41,8 +42,13 @@ from llamagent.core.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 
-# Maximum characters to include as a preview when persisting large tool results
-_PERSIST_PREVIEW_CHARS = 500
+# Preview length when persisting an oversized tool result. Smaller forces the
+# model to call read_files for the full content rather than guess from preview.
+_PERSIST_PREVIEW_CHARS = 300
+
+# LRU cap on the per-agent _persisted_files set. ~256 paths × ~100 chars each
+# bounds memory at ~25 KB even on long ContinuousRunner sessions.
+_PERSISTED_FILES_CAP = 256
 
 
 # ======================================================================
@@ -354,6 +360,36 @@ class LlamAgent:
             os.makedirs(self.playground_dir, exist_ok=True)
         except OSError:
             pass  # Playground creation failed (read-only fs, permissions, etc.); zone system still works
+
+        # v3.3: write_root — the framework-internal write boundary. All typed
+        # write tools resolve their paths against this directory. Computed
+        # once at init (frozen for the agent's lifetime); mid-session changes
+        # to config.edit_root are ignored. See _compute_write_root().
+        # Tracking _write_root_project_dir lets the property re-derive once
+        # if a test reassigns agent.project_dir post-construction.
+        self._write_root: str = self._compute_write_root()
+        self._write_root_project_dir: str = self.project_dir
+
+        # v3.3 D7: snapshot is captured **eagerly** at agent init when
+        # enabled (or when auto_approve=True force-enables it). One call
+        # site, no lazy trigger sprinkled across tools or services. The
+        # trade-off is that read-only sessions also pay the snapshot cost
+        # — users who care can either keep snapshot disabled (interactive
+        # default) or set config.snapshot_dir to a fast SSD path.
+        self.ensure_snapshot()
+
+        # v3.3 contract A defense-line-2: track files persisted by
+        # _persist_tool_result so _truncate_observation can early-return
+        # when the model reads them back via read_files (otherwise the
+        # read result re-triggers persist, creating duplicate files).
+        # In-memory only; not serialized across sessions.
+        self._persisted_files: OrderedDict[str, None] = OrderedDict()
+
+        # v3.3 MF4: one-shot deprecation flag for legacy zone= kwarg
+        # silently stripped from incoming tool args. Persisted v3.2
+        # history may carry it; we accept and warn once per agent.
+        self._zone_deprecation_warned: bool = False
+
         self.tool_executor = None  # v1.2: injected by SandboxModule for sandbox execution dispatch
 
         # v1.9: authorization engine (encapsulates zone evaluation + policy decision)
@@ -427,6 +463,75 @@ class LlamAgent:
         if model not in self._llm_cache:
             self._llm_cache[model] = LLMClient(model, self.config.api_retry_count)
         return self._llm_cache[model]
+
+    # ============================================================
+    # Write boundary (v3.3)
+    # ============================================================
+
+    def _compute_write_root(self) -> str:
+        """Resolve the write boundary at agent init.
+
+        Soft fallback: invalid `config.edit_root` (escapes project_dir,
+        not a directory, etc.) logs a warning and falls back to
+        `project_dir`. Snapshot (D7) is the safety net for misconfig.
+        """
+        project_root = os.path.realpath(self.project_dir)
+        edit_root_cfg = getattr(self.config, "edit_root", "") or ""
+        if not edit_root_cfg:
+            return project_root
+        try:
+            candidate = os.path.realpath(os.path.join(project_root, edit_root_cfg))
+        except (OSError, ValueError) as e:
+            # ValueError on POSIX nul-byte paths; OSError on transient FS errors.
+            logger.warning(
+                "edit_root '%s' resolution failed: %s; falling back to project_dir.",
+                edit_root_cfg, e,
+            )
+            return project_root
+        if not (candidate == project_root or candidate.startswith(project_root + os.sep)):
+            logger.warning(
+                "edit_root '%s' escapes project_dir; falling back to project_dir. "
+                "Snapshot remains the safety net.",
+                edit_root_cfg,
+            )
+            return project_root
+        if not os.path.isdir(candidate):
+            logger.warning(
+                "edit_root '%s' is not an existing directory; falling back to project_dir.",
+                edit_root_cfg,
+            )
+            return project_root
+        return candidate
+
+    @property
+    def write_root(self) -> str:
+        """Frozen write boundary. Re-derived lazily if `project_dir` is
+        reassigned (common in tests via __new__ + manual setup); otherwise
+        stable for the agent's lifetime. Mid-session changes to
+        `config.edit_root` after first read do not take effect (D7.1).
+        """
+        # If project_dir has been reassigned since init (test setup pattern),
+        # recompute once so write_root tracks the new project_dir.
+        cached_under = getattr(self, "_write_root_project_dir", None)
+        if cached_under != self.project_dir:
+            self._write_root = self._compute_write_root()
+            self._write_root_project_dir = self.project_dir
+        return self._write_root
+
+    def ensure_snapshot(self) -> str | None:
+        """v3.3 D7: capture a one-shot snapshot of write_root before any
+        state-changing operation (write_files, apply_patch, command).
+        Idempotent. No-op when snapshot is disabled (default in interactive
+        mode). Auto-enabled when ``config.auto_approve == True``.
+
+        Returns the snapshot directory path on success, None otherwise.
+        """
+        # Lazy-init the service so we don't pay the import cost when
+        # snapshot is disabled.
+        if not hasattr(self, "_snapshot_service"):
+            from llamagent.modules.tools.snapshot import SnapshotService
+            self._snapshot_service = SnapshotService(self)
+        return self._snapshot_service.ensure_taken()
 
     # ============================================================
     # Module management
@@ -619,6 +724,7 @@ class LlamAgent:
         pack: str | None = None,
         action: str | None = None,
         timeout: float | None = None,
+        truncatable: bool = True,
     ) -> None:
         """
         Register a tool in the registry.
@@ -652,6 +758,7 @@ class LlamAgent:
             "pack": pack,
             "action": action,
             "timeout": timeout,
+            "truncatable": truncatable,
         }
         self._tools_version += 1
         logger.debug("Tool registered: %s (tier=%s, safety_level=%d)", name, tier, safety_level)
@@ -700,6 +807,20 @@ class LlamAgent:
             return hook_data.get("skip_reason", f"Tool '{name}' blocked by hook.")
         args = hook_data.get("args", args)  # Hook may have modified args
 
+        # v3.3 MF4: silently strip legacy `zone=` kwarg before schema
+        # validation. v3.2 personas / persisted history / PRE_TOOL_USE
+        # hooks may inject zone="project|playground"; new schemas don't
+        # declare it, so validation would otherwise reject the call.
+        # One-shot WARNING per agent instance points users at migration.
+        if isinstance(args, dict) and "zone" in args:
+            args.pop("zone", None)
+            if not getattr(self, "_zone_deprecation_warned", False):
+                logger.warning(
+                    "tool arg 'zone' is deprecated since v3.3, ignoring "
+                    "(model now sees only paths; framework auto-classifies)"
+                )
+                self._zone_deprecation_warned = True
+
         # 2.5. Validate args against schema
         schema = tool.get("parameters", {})
         validation_error = _validate_tool_args(args, schema)
@@ -712,7 +833,14 @@ class LlamAgent:
         for event_name, event_data in auth.events:
             self.emit_hook(HookEvent(event_name), event_data)
         if auth.decision is not None:
-            return auth.decision
+            # v3.3: wrap auth-deny in the same JSON envelope tool bodies
+            # use, so downstream consumers (mock tests, model parsing,
+            # compression module) see a consistent shape regardless of
+            # whether the deny came from auth or from the tool itself.
+            return json.dumps(
+                {"status": "error", "error": auth.decision},
+                ensure_ascii=False,
+            )
 
         # 4. Execute tool (unified path for both direct and executor/sandbox)
         start_time = time.time()
@@ -1544,7 +1672,7 @@ class LlamAgent:
                     result = f"Tool execution error: {e}"
 
                 # --- Observation: truncate overly long results ---
-                result = self._truncate_observation(result, tool_name=tool_name)
+                result = self._truncate_observation(result, tool_name=tool_name, tool_args=tool_args)
 
                 # Append tool message
                 messages.append({
@@ -1715,7 +1843,7 @@ class LlamAgent:
                     except Exception as e:
                         logger.error("Tool '%s' dispatch error: %s", tool_name, e)
                         result = f"Tool execution error: {e}"
-                    result = self._truncate_observation(result, tool_name=tool_name)
+                    result = self._truncate_observation(result, tool_name=tool_name, tool_args=tool_args)
                     yield f"[{tool_name} done]\n"
 
                     messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
@@ -1753,39 +1881,76 @@ class LlamAgent:
                 if hasattr(delta.function, "arguments") and delta.function.arguments:
                     tc["function"]["arguments"] += delta.function.arguments
 
-    def _truncate_observation(self, text: str, tool_name: str = "") -> str:
-        """
-        Truncate overly long tool return results.
+    def _truncate_observation(
+        self,
+        text: str,
+        tool_name: str = "",
+        tool_args: dict | None = None,
+    ) -> str:
+        """v3.3 contract A: persist long tool results + emit a hint that
+        directs the model to read_files.
 
-        Counts by tokens (max_observation_tokens); truncates and appends a notice when exceeded.
-        When the result exceeds the persist threshold and read_files is available,
-        persists the full result to a file and returns a preview with path hint.
+        Two early-return paths:
+        - Tool registered with ``truncatable=False`` (e.g. stat_paths,
+          load_skill): return text unchanged. Short-result tools opt out.
+        - Tool is ``read_files`` reading a path already in
+          ``self._persisted_files``: skip the persist branch (would create
+          a duplicate file under tool_results/) and fall through to the
+          simple-truncation fallback. Defense-line-2 against the
+          read-then-re-persist loop; defense-line-1 is read_files's own
+          internal cap.
         """
+        # Defense-line-2: bypass persist for tools that opt out.
+        tool_info = self._tools.get(tool_name) or {}
+        if not tool_info.get("truncatable", True):
+            return text
+
         max_tokens = self.config.max_observation_tokens
         token_count = self.llm.count_tokens(text)
         if token_count <= max_tokens:
             return text
+
+        # Defense-line-2 (continued): if this is read_files reading an
+        # already-persisted file, fall through to simple truncation —
+        # don't write the same content out again under a fresh filename.
+        suppress_persist = False
+        if tool_name == "read_files" and tool_args:
+            paths = tool_args.get("paths") or []
+            resolved = set()
+            for p in paths:
+                if not isinstance(p, str):
+                    continue
+                if os.path.isabs(p):
+                    resolved.add(os.path.realpath(p))
+                else:
+                    resolved.add(os.path.realpath(os.path.join(self.project_dir, p)))
+            if resolved & set(self._persisted_files):
+                suppress_persist = True
 
         # Determine persist threshold
         threshold = self.config.tool_result_persist_threshold
         if threshold <= 0:
             threshold = max_tokens
 
-        if token_count > threshold:
-            # Only persist if read_files tool is available (otherwise LLM can't access the file)
+        if (not suppress_persist) and token_count > threshold:
+            # Only persist if read_files tool is available (otherwise LLM
+            # has no way to fetch the full content back).
             has_read_files = "read_files" in self._tools
             if has_read_files:
                 result_path = self._persist_tool_result(text, tool_name)
                 if result_path:
                     preview = text[:_PERSIST_PREVIEW_CHARS]
+                    rel_path = os.path.relpath(result_path, self.project_dir)
+                    size_bytes = len(text.encode("utf-8"))
+                    line_count = text.count("\n") + 1
                     return (
                         f"{preview}\n\n"
-                        f"...(result too large: {token_count} tokens, truncated)\n"
-                        f"Full result saved to: {result_path}\n"
-                        f"Use read_files tool with ranges parameter to read specific sections."
+                        f"Output truncated. Full result saved to {rel_path} "
+                        f"({size_bytes} bytes, {line_count} lines). "
+                        f"Use read_files(['{rel_path}']) to read it."
                     )
 
-        # Fallback: original truncation behavior
+        # Fallback: simple ratio truncation with a generic suffix.
         ratio = max_tokens / max(token_count, 1)
         cut_pos = max(int(len(text) * ratio), 100)
         truncated = text[:cut_pos]
@@ -1793,7 +1958,11 @@ class LlamAgent:
         return truncated + "\n...(content truncated)"
 
     def _persist_tool_result(self, text: str, tool_name: str) -> str | None:
-        """Write full tool result to playground_dir/tool_results/ and return the path."""
+        """Write full tool result to playground_dir/tool_results/ and return
+        the absolute realpath. Also records the path in
+        ``self._persisted_files`` (LRU bound) so subsequent read_files
+        calls on it bypass re-persist (contract A defense-line-2).
+        """
         import time as _time
 
         results_dir = os.path.join(self.playground_dir, "tool_results")
@@ -1802,9 +1971,14 @@ class LlamAgent:
             ts = int(_time.time() * 1000)
             safe_name = tool_name.replace("/", "_").replace("\\", "_") or "unknown"
             filename = f"{safe_name}_{ts}.txt"
-            filepath = os.path.join(results_dir, filename)
+            filepath = os.path.realpath(os.path.join(results_dir, filename))
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(text)
+            # LRU-bounded set: most-recently-persisted path bubbles to end.
+            self._persisted_files[filepath] = None
+            self._persisted_files.move_to_end(filepath)
+            while len(self._persisted_files) > _PERSISTED_FILES_CAP:
+                self._persisted_files.popitem(last=False)
             logger.debug("Tool result persisted: %s (%d chars)", filepath, len(text))
             return filepath
         except OSError as e:

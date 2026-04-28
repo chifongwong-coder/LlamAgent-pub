@@ -2,12 +2,32 @@
 LlamAgent — A modular AI Agent framework.
 
 Core design:
-- core/ provides a standalone base Agent (conversation, LLM calls)
-- modules/ provides 13 pluggable enhanced capabilities (tools, retrieval, memory, reasoning, reflection, MCP, safety, skill, sandbox, child agent, job, compression, persistence)
-- interfaces/ provides multiple interaction methods (CLI, Web UI, API)
+- core/ provides a standalone base Agent (conversation, LLM calls,
+  authorization engine, write-boundary primitives, persistence
+  round-trip contracts).
+- modules/ provides 15 pluggable enhanced capabilities (resilience,
+  safety, compression, persistence, sandbox, tools, job, retrieval,
+  memory, skill, reflection, reasoning/planning, mcp, child_agent,
+  toolsmith). Loading a module is one line; modules are loosely
+  coupled (graceful degradation when peers are absent).
+- interfaces/ provides three interaction surfaces (CLI, Web UI, API)
+  with shared module presets.
 
-Even without loading any modules, LlamAgent is a fully functional conversational Agent.
-Each module loaded grants the Agent a new capability.
+A bare LlamAgent is a fully functional conversational Agent. Each
+module loaded grants a new capability.
+
+v3.3 highlights:
+- Model never sees a `zone` parameter or path prefix; the framework
+  auto-classifies write paths into playground / project / rejected
+  via classify_write.
+- Long tool outputs (web_fetch, wait_job, child_agent return, large
+  read_files) flow through a unified persistence contract: results
+  are saved under llama_playground/tool_results/ and the model
+  reads them back via read_files. read_files has an internal cap so
+  re-reads can't cycle.
+- Every typed write (write_files / apply_patch / move_path /
+  copy_path / delete_path) is recorded as a Changeset and can be
+  rolled back via revert_changes.
 
 Usage:
     from llamagent import LlamAgent, Config, Module
@@ -15,7 +35,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "2.9"
+__version__ = "3.3"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager

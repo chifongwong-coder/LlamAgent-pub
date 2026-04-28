@@ -1092,10 +1092,17 @@ def test_child_metrics_include_budget(bare_agent, mock_llm_client):
 # --- Feature 1: Large Result Persistence ---
 
 def test_large_result_persisted(bare_agent, tmp_path):
-    """When tool result exceeds max_observation_tokens and read_files is available,
-    persist the full result to a file and return preview + path hint."""
+    """v3.3 contract A: when tool result exceeds max_observation_tokens
+    and read_files is available, persist the full result to a file and
+    return preview + the canonical hint template."""
     bare_agent.config.max_observation_tokens = 100
-    bare_agent.playground_dir = str(tmp_path)
+    # Use production-like layout (playground inside project) so rel_path
+    # in the hint stays compact rather than showing many '../'.
+    project_dir = str(tmp_path / "project")
+    playground_dir = str(tmp_path / "project" / "llama_playground")
+    os.makedirs(playground_dir, exist_ok=True)
+    bare_agent.project_dir = project_dir
+    bare_agent.playground_dir = playground_dir
 
     # Register read_files so persistence path is activated
     bare_agent.register_tool(
@@ -1108,17 +1115,21 @@ def test_large_result_persisted(bare_agent, tmp_path):
 
     result = bare_agent._truncate_observation(large_content, tool_name="web_search")
 
-    # Should contain the persistence hint, not just a plain truncation
-    assert "Full result saved to:" in result
-    assert "read_files" in result
+    # New v3.3 hint: "Output truncated. Full result saved to <rel_path>
+    # (<size> bytes, <lines> lines). Use read_files(['<rel_path>']) to read it."
+    assert "Output truncated." in result
+    assert "Full result saved to " in result
+    assert "bytes," in result and "lines)" in result
+    assert "Use read_files(['" in result
 
     # Verify the file was actually written to disk with full content
-    tool_results_dir = tmp_path / "tool_results"
-    assert tool_results_dir.is_dir()
-    saved_files = list(tool_results_dir.iterdir())
+    tool_results_dir = os.path.join(playground_dir, "tool_results")
+    assert os.path.isdir(tool_results_dir)
+    saved_files = sorted(os.listdir(tool_results_dir))
     assert len(saved_files) == 1
-    assert saved_files[0].name.startswith("web_search_")
-    assert saved_files[0].read_text() == large_content
+    assert saved_files[0].startswith("web_search_")
+    full_path = os.path.join(tool_results_dir, saved_files[0])
+    assert open(full_path).read() == large_content
 
 
 # --- Feature 2: Tool Input JSON Schema Validation ---
@@ -1861,8 +1872,16 @@ def test_history_includes_tool_messages(bare_agent, mock_llm_client):
         make_llm_response("", tool_calls=[make_tool_call("my_tool", {"x": 1})]),
         make_llm_response("Final answer"),
     ])
-    bare_agent._tools = {"my_tool": lambda **kw: "tool result"}
-    bare_agent._tools_version = 1
+    # v3.3: register via the public API so _tools[name] is a dict
+    # (matching production shape); _truncate_observation reads
+    # _tools[name].get("truncatable", True) and would silently degrade
+    # to default-true if the entry were a raw function.
+    bare_agent.register_tool(
+        "my_tool",
+        lambda **kw: "tool result",
+        "Test tool",
+        parameters={"type": "object", "properties": {"x": {"type": "integer"}}},
+    )
 
     def tool_dispatch(name, args):
         return "tool result"

@@ -67,33 +67,31 @@ class TestCrossModule:
     """Consolidated cross-module integration flow tests."""
 
     def test_pack_skill_integration(self, bare_agent, tmp_path):
-        """Skill activation triggers pack visibility, and on_input resets packs each turn."""
+        """Skill activation + state-driven pack auto-activation, on_input resets per turn."""
         tools_mod, skill_mod = _setup_tools_and_skill(bare_agent, tmp_path)
 
-        # Before: workspace-maintenance tools hidden
+        # v3.3: bare_agent has no shell tool, so path-fallback auto-activates
+        # when on_context runs (state-driven). Verify the cycle.
+        bare_agent._active_packs.clear()
+        tools_mod.on_input("move some files around")
+        # After on_input alone, packs are cleared.
+        assert "path-fallback" not in bare_agent._active_packs
+
+        tools_mod.on_context("move some files around", "")
+        # After on_context, path-fallback auto-activates because no
+        # shell tool is registered on bare_agent.
+        assert "path-fallback" in bare_agent._active_packs
         schemas = bare_agent.get_all_tool_schemas()
         schema_names = [s["function"]["name"] for s in schemas]
-        assert "glob_files" not in schema_names
-        assert "move_path" not in schema_names
+        assert "glob_files" in schema_names
+        assert "move_path" in schema_names
 
-        # Simulate a turn: on_input clears packs, on_context evaluates
-        tools_mod.on_input("move some files around")
-        tools_mod.on_context("move some files around", "")
-        # Skill matching: "move" should match workspace-ops builtin skill
+        # Skill match still works (workspace-ops requires path-fallback).
         skill_mod.on_context("move some files around", "")
+        # Whether the skill activated depends on tag matching; either
+        # outcome is fine — the path-fallback pack is already active.
 
-        # After: if skill matched, workspace-maintenance pack should be active
-        if "workspace-maintenance" in bare_agent._active_packs:
-            schemas = bare_agent.get_all_tool_schemas()
-            schema_names = [s["function"]["name"] for s in schemas]
-            assert "glob_files" in schema_names
-            assert "move_path" in schema_names
-
-        # --- on_input resets packs each turn ---
-        bare_agent._active_packs.add("workspace-maintenance")
-        assert "workspace-maintenance" in bare_agent._active_packs
-
-        # New turn: on_input clears
+        # --- on_input clears packs ---
         tools_mod.on_input("hello")
         assert len(bare_agent._active_packs) == 0
 
@@ -138,23 +136,8 @@ class TestCrossModule:
         bare_agent._tools["cancel_job"]["func"](job_id=job_id)
 
     def test_workspace_project_flow(self, bare_agent, tmp_path):
-        """Write+sync to project, patch+revert, and reject project prefix."""
+        """Patch+revert flow on project files (v3.3: sync_workspace_to_project deleted)."""
         _setup_tools_and_skill(bare_agent, tmp_path)
-
-        # --- Write in workspace then sync to project ---
-        result = _call_tool_json(bare_agent, "write_files", files={
-            "app.py": "print('hello')\n",
-        })
-        assert result["status"] == "success"
-
-        result = _call_tool_json(bare_agent, "sync_workspace_to_project", mode="auto")
-        assert result["status"] == "success"
-        assert result["synced"] >= 1
-
-        project_file = os.path.join(bare_agent.project_dir, "app.py")
-        assert os.path.isfile(project_file)
-        with open(project_file) as f:
-            assert "hello" in f.read()
 
         # --- Patch project file then revert ---
         config_file = os.path.join(bare_agent.project_dir, "config.txt")
@@ -176,9 +159,10 @@ class TestCrossModule:
         with open(config_file) as f:
             assert f.read() == original
 
-        # --- write_files rejects project: prefix ---
+        # --- v3.3: write_files rejects path-escape attempts ---
+        # 'project:' prefix no longer special; use '../' for the escape test.
         result = _call_tool_json(bare_agent, "write_files", files={
-            "project:hack.py": "bad content",
+            "../escape.py": "bad content",
         })
         assert result["status"] == "partial"
         assert len(result["errors"]) == 1
@@ -209,8 +193,10 @@ class TestCrossModule:
         context2 = tools_mod.on_context("create a tool", context2)
         context2 = skill_mod.on_context("create a tool", context2)
 
-        # Both should be present
-        assert "[Workspace Guidelines]" in context2
+        # v3.3 WORKSPACE_GUIDE header was rewritten — assert a stable
+        # substring from the new body instead of the old "[File Tool
+        # Guidelines]" bracketed header.
+        assert "All paths are relative" in context2
         assert "[Available Tool Packs]" in context2
         # If toolsmith skill was found, its playbook is also injected
         if "[Active Skill: toolsmith]" in context2:

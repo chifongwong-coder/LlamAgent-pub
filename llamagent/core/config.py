@@ -70,6 +70,13 @@ _YAML_MAP = [
     (("agent", "react", "total_timeout"), "react_total_timeout", float),
     (("agent", "max_observation_tokens"), "max_observation_tokens", int),
     (("agent", "tool_result_persist_threshold"), "tool_result_persist_threshold", int),
+    (("changeset", "max_count"), "changeset_max_count", int),
+    (("changeset", "max_total_bytes"), "changeset_max_total_bytes", int),
+    (("snapshot", "enabled"), "snapshot_enabled", bool),
+    (("snapshot", "ignore_gitignore"), "snapshot_ignore_gitignore", bool),
+    (("snapshot", "max_size_mb"), "snapshot_max_size_mb", int),
+    (("snapshot", "retention_count"), "snapshot_retention_count", int),
+    (("snapshot", "dir"), "snapshot_dir", str),
     (("retrieval", "persist_dir"), "retrieval_persist_dir", str),
     (("retrieval", "embedding", "provider"), "embedding_provider", str),
     (("retrieval", "embedding", "model"), "embedding_model", str),
@@ -105,6 +112,7 @@ _YAML_MAP = [
     (("job", "max_active"), "job_max_active", int),
     (("job", "profiles"), "job_profiles", dict),
     (("output", "dir"), "output_dir", str),
+    (("edit_root",), "edit_root", str),
     (("web", "search_provider"), "web_search_provider", str),
     (("web", "search_num_results"), "web_search_num_results", int),
     (("web", "search_api_key"), "web_search_api_key", str),
@@ -199,6 +207,31 @@ class Config:
         self.max_observation_tokens: int = 32000
         self.tool_result_persist_threshold: int = 0  # 0 = follow max_observation_tokens
 
+        # v3.3: changeset LRU caps for ProjectSyncService.
+        # Memory grows with each apply_patch / write_files in project zone;
+        # cap the count and total pre_image bytes to prevent OOM in long
+        # sessions. Eviction is LRU (oldest reverted first, then oldest
+        # unreverted); evicted paths are remembered in a small ledger so
+        # revert_changes can give a precise error.
+        self.changeset_max_count: int = 200
+        self.changeset_max_total_bytes: int = 50 * 1024 * 1024  # 50 MB
+
+        # v3.3: Snapshot (D7) — coarse-grained safety net for CI / auto_approve.
+        # Lazy: a single tar-free directory copy of agent.write_root captured
+        # before the first project-zone write or command invocation.
+        self.snapshot_enabled: bool = False
+        self.snapshot_ignore_gitignore: bool = True   # skip .git/.gitignore'd files
+        self.snapshot_max_size_mb: int = 500           # refuse if write_root exceeds
+        self.snapshot_retention_count: int = 5         # keep last N session snapshots
+        # Custom snapshot storage directory. Empty string falls back to
+        # `<parent of write_root>/.llamagent_snapshots/`. Useful for
+        # large project trees where the snapshot would clutter the
+        # parent dir, or sharing snapshots across sessions on a SSD.
+        self.snapshot_dir: str = ""
+        # When auto_approve=True, snapshot is force-enabled (CI safety net),
+        # regardless of the explicit setting above. Set explicitly here only
+        # to opt INTO snapshot in interactive mode.
+
         # Retrieval (shared)
         self.embedding_provider: str = "chromadb"
         self.embedding_model: str = ""
@@ -270,6 +303,12 @@ class Config:
 
         # Workspace (runtime field, not encouraged in YAML)
         self.workspace_id: str | None = None
+
+        # v3.3: optional sub-directory of project_dir that the agent is
+        # allowed to write into. When unset, the entire project_dir is
+        # writable. Invalid values (escape, missing) log a warning and
+        # fall back to project_dir. See agent.write_root.
+        self.edit_root: str = ""
 
         # Output
         self.output_dir: str = str(BASE_DIR / "output")

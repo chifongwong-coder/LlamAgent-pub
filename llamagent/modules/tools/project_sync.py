@@ -1,23 +1,37 @@
 """
-ProjectSyncService: workspace-to-project synchronization for the v1.5 tool system.
+ProjectSyncService: project-write tracking and revert for the v3.3 tool system.
 
-ProjectSyncService is a plain service class (not a Module), instantiated by
-ToolsModule.on_attach(). It provides:
+Plain service class (not a Module), instantiated by
+ToolsModule.on_attach(). Owns the in-memory Changeset journal that
+makes every typed project write reversible via revert_changes.
 
-- Structured search/replace patching (apply_patch, preview_patch, replace_block)
-- Workspace-to-project file synchronization (sync_workspace_to_project)
-- Changeset-based revert for all project modifications (revert_changes)
+Provides:
+- Atomic patch application (apply_patch, preview_patch).
+- Changeset registration for the five typed write surfaces:
+    * record_write_changeset(target, pre_image)  — write_files
+    * apply_patch (registers internally)          — apply_patch
+    * record_delete_changeset(target, pre_image)  — delete_path
+    * record_move_changeset(src, dst)             — move_path
+    * record_copy_changeset(src, dst)             — copy_path
+- Changeset-based revert dispatching by action type
+  (create / overwrite / patch / delete / move / copy).
+- LRU eviction (count + byte cap) with an evicted-paths ledger so
+  revert can surface a precise error when the target's changeset
+  was dropped under memory pressure.
 
-All project writes are atomic (temp file + fsync + os.rename) and recorded as
-changesets with pre-image snapshots for reliable rollback.
+All project writes go through `_atomic_write` (temp file + fsync +
+os.rename, POSIX-atomic). Pre-image snapshots are kept as text;
+binary files are refused upstream by write_files / delete_path so
+the journal never has to encode bytes.
 
-Decision references (from v1.5 design doc section 10.8):
-- D5: Project sync paths are always relative to project_dir
-- B1: apply_patch is atomic (all-or-nothing)
-- B5: File-level locks for serialization
-- C1: Changeset per successful write, stacked for multi-step revert
-- C2: revert marks changeset as reverted (not deleted)
-- F1: sync patch mode uses whole-file preimage/postimage compare
+Key v3.3 decisions baked into this layer:
+- All typed writes inside write_root are revertable; playground
+  writes are ephemeral and never enter the journal (classify_write
+  decides at the tool layer).
+- delete_path accepts only single files (MF2): each file gets its
+  own delete-action Changeset with the original bytes as pre_image.
+- Snapshot (D7) is the cross-changeset safety net for command-tool
+  shell mutations that don't go through this service.
 """
 
 from __future__ import annotations
@@ -48,17 +62,43 @@ class Changeset:
     """
     Record of a single project file modification.
 
-    Each successful project write (apply_patch, sync, etc.) creates one
-    Changeset.  The pre_image allows exact restoration on revert.
+    Each successful project write creates one Changeset. The fields
+    available depend on the action type:
+
+      action="patch" / "overwrite" / "create":
+        target_path holds the file path. pre_image holds the original
+        bytes (None for "create"). Inverse: write pre_image back, or
+        unlink the file for "create".
+
+      action="delete":
+        target_path holds the deleted file's path. pre_image holds the
+        bytes that were removed. Inverse: write pre_image back to
+        target_path. delete_path tool only accepts files (not dirs),
+        so pre_image is always a scalar string.
+
+      action="move":
+        src and dst hold the source and destination paths. pre_image is
+        None. Inverse: os.rename(dst, src).
+
+      action="copy":
+        src holds the source (untouched), dst holds the new copy.
+        pre_image is None. Inverse: os.unlink(dst) — src is unchanged
+        so no restoration is needed there.
 
     Attributes:
         changeset_id: Unique identifier for this changeset.
-        target_path: Absolute path to the modified project file.
-        pre_image: Original file content before modification, or None if
-            the file did not exist (new file creation).
+        target_path: Absolute path to the modified project file (for
+            patch/overwrite/create/delete; "" or unused for move/copy).
+        pre_image: Pre-modification content for patch/overwrite/delete.
+            None for create/move/copy.
         ops: Structured log of operations applied (for audit/preview).
         timestamp: Unix timestamp of when the changeset was created.
         reverted: Whether this changeset has been reverted.
+        action: Action type — one of "patch" / "overwrite" / "create"
+            / "delete" / "move" / "copy". Default "patch" for backwards
+            compatibility with pre-13a callers.
+        src: Source path for move/copy (None otherwise).
+        dst: Destination path for move/copy (None otherwise).
     """
 
     changeset_id: str
@@ -67,6 +107,9 @@ class Changeset:
     ops: list[dict]
     timestamp: float
     reverted: bool = False
+    action: str = "patch"
+    src: str | None = None
+    dst: str | None = None
 
 
 # ======================================================================
@@ -95,11 +138,14 @@ class ProjectSyncService:
         Args:
             agent: The LlamAgent instance that owns this service.
             workspace_service: The WorkspaceService used for workspace
-                path resolution (needed by sync_workspace_to_project).
+                path resolution (used by changeset/write helpers).
         """
         self.agent = agent
         self.workspace_service = workspace_service
         self._changesets: list[Changeset] = []
+        # v3.3: paths whose changesets were dropped by the LRU cap;
+        # used by revert_changes to surface a precise error.
+        self._evicted_paths: set[str] = set()
         self._file_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
 
@@ -125,6 +171,81 @@ class ProjectSyncService:
             return self._file_locks[path]
 
     # ================================================================
+    # v3.3: changeset LRU caps
+    # ================================================================
+
+    def _changeset_bytes(self, cs: Changeset) -> int:
+        """Approximate memory footprint of a Changeset.
+
+        v3.3: move/copy actions carry pre_image=None. If we counted only
+        pre_image bytes, a long session of moves/copies could swamp the
+        in-memory list without ever triggering byte-cap eviction. Add the
+        path strings as a floor so move/copy entries take real budget.
+        """
+        base = len(cs.pre_image) if cs.pre_image else 0
+        path_overhead = (
+            len(cs.target_path or "")
+            + len(cs.src or "")
+            + len(cs.dst or "")
+        )
+        return base + path_overhead
+
+    def _enforce_changeset_caps(self) -> None:
+        """LRU eviction when ``len(_changesets)`` exceeds count cap or
+        ``sum(pre_image bytes)`` exceeds byte cap. Reverted changesets
+        are dropped first (they're tombstones); then oldest unreverted.
+        Evicted target paths land in ``_evicted_paths`` so
+        ``revert_changes`` can surface a precise error.
+        """
+        cfg = self.agent.config
+        max_count = getattr(cfg, "changeset_max_count", 200)
+        max_bytes = getattr(cfg, "changeset_max_total_bytes", 50 * 1024 * 1024)
+        if max_count <= 0 and max_bytes <= 0:
+            return
+
+        def _total_bytes() -> int:
+            return sum(self._changeset_bytes(cs) for cs in self._changesets)
+
+        def _over():
+            over_count = max_count > 0 and len(self._changesets) > max_count
+            over_bytes = max_bytes > 0 and _total_bytes() > max_bytes
+            return over_count or over_bytes
+
+        # Pass 1: drop reverted (tombstone) changesets oldest-first,
+        # one at a time, re-checking _over() after each drop. Without
+        # the per-drop re-check we'd over-evict tombstones whenever the
+        # backlog has many of them.
+        if _over():
+            i = 0
+            while i < len(self._changesets) and _over():
+                cs = self._changesets[i]
+                if cs.reverted:
+                    self._evicted_paths.add(cs.target_path)
+                    logger.info(
+                        "changeset evicted (reverted/tombstone): %s",
+                        cs.target_path,
+                    )
+                    self._changesets.pop(i)
+                    # Don't advance i — popped index now points at next.
+                else:
+                    i += 1
+
+        # Pass 2: drop oldest unreverted as needed.
+        while _over() and self._changesets:
+            cs = self._changesets.pop(0)
+            self._evicted_paths.add(cs.target_path)
+            logger.warning(
+                "changeset evicted (cap hit, was unreverted): %s "
+                "(count=%d bytes=%d max_count=%d max_bytes=%d)",
+                cs.target_path, len(self._changesets) + 1, _total_bytes(),
+                max_count, max_bytes,
+            )
+
+    def _was_evicted(self, target_path: str) -> bool:
+        """Whether a path's changeset was previously dropped by the cap."""
+        return target_path in self._evicted_paths
+
+    # ================================================================
     # Path resolution
     # ================================================================
 
@@ -142,10 +263,9 @@ class ProjectSyncService:
         Returns:
             Absolute, symlink-resolved filesystem path.
         """
-        # Accept the 'project:' prefix from read_files' convention so
-        # models that learn the prefix from one tool can reuse it here.
-        if target.startswith("project:"):
-            target = target[len("project:"):]
+        # v3.3: 'project:' prefix removed (B2 decision). Tools now select
+        # between project and playground via the zone parameter; see
+        # workspace._resolve_within for the unified resolver.
         if os.path.isabs(target):
             return os.path.realpath(target)
         return os.path.realpath(os.path.join(self.agent.project_dir, target))
@@ -154,7 +274,8 @@ class ProjectSyncService:
     # Core: apply_patch
     # ================================================================
 
-    def apply_patch(self, target: str, edits: list[dict]) -> dict:
+    def apply_patch(self, target: str, edits: list[dict],
+                    record_changeset: bool = True) -> dict:
         """
         Apply structured search/replace edits to a project file atomically.
 
@@ -164,7 +285,10 @@ class ProjectSyncService:
         every edit succeeds, the result is written via temp file + fsync +
         atomic rename.  If any edit fails, the file is untouched.
 
-        Each successful apply creates a Changeset (decision C1).
+        Each successful apply creates a Changeset (decision C1) by default.
+        Pass ``record_changeset=False`` to skip changeset recording — used
+        by the v3.3 path-classification logic when the resolved target is
+        under ``playground_dir`` (edits there are ephemeral scratch).
 
         Args:
             target: File path (relative to project_dir, or absolute).
@@ -173,10 +297,15 @@ class ProjectSyncService:
                 - ``replace`` (str): Replacement text.
                 - ``expected_count`` (int, optional): Expected number of
                   occurrences of ``match``.  Defaults to 1.
+            record_changeset: When False, skip Changeset registration so
+                the edit cannot be reverted via ``revert_changes``. Used
+                for playground patches in v3.3.
 
         Returns:
             Result dict with ``status`` ("success" or "error") and details.
         """
+        # v3.3 D7: snapshot is captured eagerly at agent init, not here.
+        # See LlamAgent.__init__ -> ensure_snapshot().
         resolved = self.resolve_project_path(target)
         lock = self._get_file_lock(resolved)
 
@@ -186,10 +315,11 @@ class ProjectSyncService:
                 with open(resolved, "r", encoding="utf-8") as f:
                     content = f.read()
             except FileNotFoundError:
+                # v3.3 §3.5: unified file-not-found wording.
                 return {
                     "status": "error",
                     "target": resolved,
-                    "error": f"File not found: {resolved}",
+                    "error": f"file not found: '{target}'",
                 }
             except OSError as e:
                 return {
@@ -258,6 +388,19 @@ class ProjectSyncService:
             # All edits succeeded — atomic write
             self._atomic_write(resolved, content)
 
+            if not record_changeset:
+                # Playground / ephemeral mode: skip changeset registration.
+                logger.info(
+                    "apply_patch succeeded (no changeset): %s (%d edits)",
+                    resolved, len(edits),
+                )
+                return {
+                    "status": "success",
+                    "target": resolved,
+                    "edits_applied": len(edits),
+                    "changeset_id": None,
+                }
+
             # Record changeset
             changeset = Changeset(
                 changeset_id=uuid.uuid4().hex,
@@ -265,8 +408,10 @@ class ProjectSyncService:
                 pre_image=pre_image,
                 ops=ops,
                 timestamp=time.time(),
+                action="patch",
             )
             self._changesets.append(changeset)
+            self._enforce_changeset_caps()
 
             logger.info(
                 "apply_patch succeeded: %s (%d edits, changeset %s)",
@@ -278,6 +423,105 @@ class ProjectSyncService:
                 "edits_applied": len(edits),
                 "changeset_id": changeset.changeset_id,
             }
+
+    # ================================================================
+    # v3.3: write_files changeset registration
+    # ================================================================
+
+    def record_write_changeset(self, target: str, pre_image: str | None) -> str:
+        """Register a Changeset for an out-of-band write performed by
+        ``write_files`` in v3.3.
+
+        ``write_files`` does its own atomic write (it has to support
+        ``mode='binary'`` and ``makedirs(exist_ok=True)`` for nested
+        paths), so this helper just records the pre-image so that
+        ``revert_changes`` can roll back the write.
+
+        Args:
+            target: Absolute path that was written.
+            pre_image: Prior file content as a string, or ``None`` if
+                the file did not exist before the write (revert deletes
+                the file).
+
+        Returns:
+            The newly-registered Changeset id.
+        """
+        resolved = os.path.realpath(target)
+        # Distinguish "create" (no prior content) from "overwrite":
+        # both restore by either deleting (create) or writing back
+        # pre_image (overwrite). The dataclass-level ``action`` lets
+        # revert_changes dispatch without inspecting ``ops``.
+        action = "create" if pre_image is None else "overwrite"
+        changeset = Changeset(
+            changeset_id=uuid.uuid4().hex,
+            target_path=resolved,
+            pre_image=pre_image,
+            ops=[{
+                "action": "write_file",
+                "had_prior_content": pre_image is not None,
+            }],
+            timestamp=time.time(),
+            action=action,
+        )
+        self._changesets.append(changeset)
+        self._enforce_changeset_caps()
+        return changeset.changeset_id
+
+    # ================================================================
+    # v3.3 commit-13a: changeset registration for path-fallback tools
+    # ================================================================
+
+    def record_delete_changeset(self, target: str, pre_image: str) -> str:
+        """Record a delete: target_path holds the deleted file's path,
+        pre_image holds its prior bytes. Inverse rewrites pre_image."""
+        resolved = os.path.realpath(target)
+        changeset = Changeset(
+            changeset_id=uuid.uuid4().hex,
+            target_path=resolved,
+            pre_image=pre_image,
+            ops=[{"action": "delete_file"}],
+            timestamp=time.time(),
+            action="delete",
+        )
+        self._changesets.append(changeset)
+        self._enforce_changeset_caps()
+        return changeset.changeset_id
+
+    def record_move_changeset(self, src: str, dst: str) -> str:
+        """Record a move: inverse is os.rename(dst, src)."""
+        rsrc = os.path.realpath(src)
+        rdst = os.path.realpath(dst)
+        changeset = Changeset(
+            changeset_id=uuid.uuid4().hex,
+            target_path=rdst,
+            pre_image=None,
+            ops=[{"action": "move_file"}],
+            timestamp=time.time(),
+            action="move",
+            src=rsrc,
+            dst=rdst,
+        )
+        self._changesets.append(changeset)
+        self._enforce_changeset_caps()
+        return changeset.changeset_id
+
+    def record_copy_changeset(self, src: str, dst: str) -> str:
+        """Record a copy: inverse is os.unlink(dst). src is unchanged."""
+        rsrc = os.path.realpath(src)
+        rdst = os.path.realpath(dst)
+        changeset = Changeset(
+            changeset_id=uuid.uuid4().hex,
+            target_path=rdst,
+            pre_image=None,
+            ops=[{"action": "copy_file"}],
+            timestamp=time.time(),
+            action="copy",
+            src=rsrc,
+            dst=rdst,
+        )
+        self._changesets.append(changeset)
+        self._enforce_changeset_caps()
+        return changeset.changeset_id
 
     # ================================================================
     # Preview: preview_patch
@@ -304,10 +548,11 @@ class ProjectSyncService:
             with open(resolved, "r", encoding="utf-8") as f:
                 content = f.read()
         except FileNotFoundError:
+            # v3.3 §3.5: unified file-not-found wording.
             return {
                 "status": "error",
                 "target": resolved,
-                "error": f"File not found: {resolved}",
+                "error": f"file not found: '{target}'",
             }
         except OSError as e:
             return {
@@ -393,185 +638,6 @@ class ProjectSyncService:
         return self.apply_patch(file, [{"match": old, "replace": new}])
 
     # ================================================================
-    # Sync: sync_workspace_to_project
-    # ================================================================
-
-    def sync_workspace_to_project(
-        self, paths: list[str] | None, mode: str
-    ) -> dict:
-        """
-        Synchronize files from workspace to project directory.
-
-        Paths are workspace-relative and auto-mapped to the same location
-        in project_dir (e.g. workspace ``src/main.py`` maps to
-        ``<project_dir>/src/main.py``).
-
-        Each file synced creates its own changeset for independent revert.
-
-        Args:
-            paths: List of workspace-relative paths to sync, or None to
-                sync all files in the workspace.
-            mode: Sync mode:
-                - ``"auto"``: file exists in project -> whole-file replace
-                  if different; doesn't exist -> copy.
-                - ``"copy"``: copy file; fail if target exists in project.
-                - ``"patch"``: whole-file preimage/postimage compare; read
-                  project file and workspace file, if different then atomic
-                  replace (decision F1).
-
-        Returns:
-            Result dict with counts of synced, skipped, and failed files.
-        """
-        workspace_root = self.workspace_service.workspace_root
-
-        # Resolve the list of files to sync
-        if paths is None:
-            # Walk the entire workspace to find all files
-            file_list = []
-            for dirpath, _dirnames, filenames in os.walk(workspace_root):
-                for fname in filenames:
-                    abs_path = os.path.join(dirpath, fname)
-                    rel_path = os.path.relpath(abs_path, workspace_root)
-                    file_list.append(rel_path)
-        else:
-            file_list = list(paths)
-
-        synced = 0
-        skipped = 0
-        failed: list[dict] = []
-
-        for rel_path in file_list:
-            ws_abs = os.path.realpath(
-                os.path.join(workspace_root, rel_path)
-            )
-
-            # Source validation: must be inside workspace root (rule B, 10.2)
-            if not self.workspace_service.ensure_in_workspace(ws_abs):
-                failed.append({
-                    "path": rel_path,
-                    "error": "Source path is not inside workspace",
-                })
-                continue
-
-            # Read workspace file content
-            try:
-                with open(ws_abs, "r", encoding="utf-8") as f:
-                    ws_content = f.read()
-            except OSError as e:
-                failed.append({"path": rel_path, "error": str(e)})
-                continue
-            except UnicodeDecodeError:
-                failed.append({
-                    "path": rel_path,
-                    "error": f"Binary file cannot be patched: {ws_abs}",
-                })
-                continue
-
-            # Target path in project (same relative location)
-            project_abs = self.resolve_project_path(rel_path)
-            lock = self._get_file_lock(project_abs)
-
-            with lock:
-                target_exists = os.path.isfile(project_abs)
-
-                # Read project file content if it exists
-                project_content: str | None = None
-                if target_exists:
-                    try:
-                        with open(project_abs, "r", encoding="utf-8") as f:
-                            project_content = f.read()
-                    except OSError as e:
-                        failed.append({
-                            "path": rel_path,
-                            "error": f"Failed to read project file: {e}",
-                        })
-                        continue
-                    except UnicodeDecodeError:
-                        failed.append({
-                            "path": rel_path,
-                            "error": f"Binary file cannot be patched: {project_abs}",
-                        })
-                        continue
-
-                # Mode dispatch
-                if mode == "copy":
-                    if target_exists:
-                        failed.append({
-                            "path": rel_path,
-                            "error": "Target already exists in project (mode=copy)",
-                        })
-                        continue
-                    # New file — pre_image is None
-                    pre_image = None
-
-                elif mode == "patch":
-                    if not target_exists:
-                        failed.append({
-                            "path": rel_path,
-                            "error": "Target does not exist in project (mode=patch)",
-                        })
-                        continue
-                    if project_content == ws_content:
-                        skipped += 1
-                        continue
-                    pre_image = project_content
-
-                elif mode == "auto":
-                    if target_exists:
-                        if project_content == ws_content:
-                            skipped += 1
-                            continue
-                        pre_image = project_content
-                    else:
-                        pre_image = None
-
-                else:
-                    failed.append({
-                        "path": rel_path,
-                        "error": f"Unknown sync mode: {mode}",
-                    })
-                    continue
-
-                # Ensure parent directory exists
-                parent_dir = os.path.dirname(project_abs)
-                os.makedirs(parent_dir, exist_ok=True)
-
-                # Atomic write
-                self._atomic_write(project_abs, ws_content)
-
-                # Record changeset
-                changeset = Changeset(
-                    changeset_id=uuid.uuid4().hex,
-                    target_path=project_abs,
-                    pre_image=pre_image,
-                    ops=[{
-                        "action": "sync",
-                        "mode": mode,
-                        "source": ws_abs,
-                        "target": project_abs,
-                    }],
-                    timestamp=time.time(),
-                )
-                self._changesets.append(changeset)
-
-                logger.info(
-                    "sync_workspace_to_project: %s -> %s (mode=%s, changeset %s)",
-                    ws_abs, project_abs, mode, changeset.changeset_id,
-                )
-                synced += 1
-
-        logger.info(
-            "sync_workspace_to_project completed: synced=%d, skipped=%d, failed=%d",
-            synced, skipped, len(failed),
-        )
-        return {
-            "status": "success",
-            "synced": synced,
-            "skipped": skipped,
-            "failed": failed,
-        }
-
-    # ================================================================
     # Revert: revert_changes
     # ================================================================
 
@@ -612,10 +678,20 @@ class ProjectSyncService:
             for resolved_target in resolved_targets:
                 changeset = self._find_revert_candidate([resolved_target])
                 if changeset is None:
-                    errors.append({
-                        "path": resolved_target,
-                        "error": "No unreverted changeset found",
-                    })
+                    if self._was_evicted(resolved_target):
+                        errors.append({
+                            "path": resolved_target,
+                            "error": (
+                                f"Changeset for '{resolved_target}' was evicted "
+                                f"(LRU cap hit). Older edits to this file are "
+                                f"no longer revertable."
+                            ),
+                        })
+                    else:
+                        errors.append({
+                            "path": resolved_target,
+                            "error": "No unreverted changeset found",
+                        })
                     continue
 
                 error = self._revert_single_changeset(changeset)
@@ -666,53 +742,99 @@ class ProjectSyncService:
 
     def _revert_single_changeset(self, changeset: Changeset) -> str | None:
         """
-        Revert a single changeset by restoring its pre-image.
+        Revert a single changeset, dispatching by action type.
 
-        Acquires the file lock, performs the revert, and marks the changeset
-        as reverted inside the lock.
+        Action handlers (v3.3 commit-13a):
 
-        Args:
-            changeset: The Changeset to revert.
+        - ``"create"``: pre_image is None → unlink target_path.
+        - ``"overwrite"`` / ``"patch"``: rewrite pre_image to target_path.
+        - ``"delete"``: rewrite pre_image to target_path (resurrect file).
+        - ``"move"``: rename dst back to src.
+        - ``"copy"``: unlink dst (src is unchanged).
+
+        Acquires the file lock, performs the revert, and marks the
+        changeset as reverted inside the lock.
 
         Returns:
             None on success, or an error message string on failure.
         """
-        resolved = changeset.target_path
-        lock = self._get_file_lock(resolved)
+        # Lock by primary path: target_path for non-move/copy, dst for
+        # move/copy (the path that has new content).
+        lock_path = (
+            changeset.dst
+            if changeset.action in ("move", "copy") and changeset.dst
+            else changeset.target_path
+        )
+        lock = self._get_file_lock(lock_path)
 
         with lock:
-            if changeset.pre_image is None:
-                # File did not exist before — delete it
-                try:
-                    os.remove(resolved)
-                    logger.info(
-                        "revert_changes: deleted %s (file was newly created, "
-                        "changeset %s)",
-                        resolved, changeset.changeset_id,
-                    )
-                except FileNotFoundError:
-                    logger.warning(
-                        "revert_changes: file already gone %s (changeset %s)",
-                        resolved, changeset.changeset_id,
-                    )
-                except OSError as e:
-                    return f"Failed to delete file during revert: {e}"
-            else:
-                # Restore pre-image via atomic write
-                try:
-                    self._atomic_write(resolved, changeset.pre_image)
-                    logger.info(
-                        "revert_changes: restored %s from pre-image "
-                        "(changeset %s)",
-                        resolved, changeset.changeset_id,
-                    )
-                except OSError as e:
-                    return f"Failed to write pre-image during revert: {e}"
+            try:
+                self._dispatch_revert(changeset)
+            except OSError as e:
+                return f"Failed to revert ({changeset.action}): {e}"
 
             # Mark changeset as reverted inside the lock (decision C2)
             changeset.reverted = True
 
         return None
+
+    def _dispatch_revert(self, changeset: Changeset) -> None:
+        """Execute the inverse operation for a Changeset.
+
+        May raise OSError; the caller (``_revert_single_changeset``)
+        wraps that into a user-visible error string.
+        """
+        action = changeset.action
+        cid = changeset.changeset_id
+
+        if action in ("patch", "overwrite", "delete"):
+            # Rewrite pre_image to target_path.
+            if changeset.pre_image is None:
+                # Defensive: shouldn't happen for these actions, but
+                # tolerate by treating as "create"-style cleanup.
+                self._unlink_if_exists(changeset.target_path, cid)
+                return
+            self._atomic_write(changeset.target_path, changeset.pre_image)
+            logger.info(
+                "revert_changes: restored %s from pre-image (action=%s, changeset %s)",
+                changeset.target_path, action, cid,
+            )
+
+        elif action == "create":
+            # File didn't exist before — unlink whatever's there now.
+            self._unlink_if_exists(changeset.target_path, cid)
+
+        elif action == "move":
+            # Inverse: rename dst back to src.
+            if not (changeset.src and changeset.dst):
+                raise OSError("move changeset missing src/dst")
+            os.rename(changeset.dst, changeset.src)
+            logger.info(
+                "revert_changes: moved back %s -> %s (changeset %s)",
+                changeset.dst, changeset.src, cid,
+            )
+
+        elif action == "copy":
+            # Inverse: unlink the new copy. src is unchanged.
+            if not changeset.dst:
+                raise OSError("copy changeset missing dst")
+            self._unlink_if_exists(changeset.dst, cid)
+
+        else:
+            raise OSError(f"unknown changeset action: {action}")
+
+    def _unlink_if_exists(self, path: str, cid: str) -> None:
+        """Best-effort unlink; not finding the file is logged but not raised."""
+        try:
+            os.remove(path)
+            logger.info(
+                "revert_changes: removed %s (changeset %s)", path, cid,
+            )
+        except FileNotFoundError:
+            logger.warning(
+                "revert_changes: file already gone %s (changeset %s)",
+                path, cid,
+            )
 
     # ================================================================
     # Internal helpers
@@ -743,11 +865,13 @@ class ProjectSyncService:
 
     @staticmethod
     def _atomic_write(path: str, content: str) -> None:
-        """
-        Write content to a file atomically using temp file + fsync + rename.
+        """Write text content to a file atomically using temp file + fsync + rename.
 
-        Creates a temporary file in the same directory as the target, writes
-        content, calls fsync, then renames (atomic on POSIX).
+        v3.3: text-mode only. Binary writes never reach this path because
+        write_files refuses to overwrite binaries via text mode and
+        delete_path refuses to remove binary files (changeset can't
+        record their bytes for revert). If binary revert support is ever
+        added, this is the place to grow a `mode` parameter.
 
         Args:
             path: Absolute path of the target file.

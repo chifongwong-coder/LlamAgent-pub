@@ -1,12 +1,10 @@
 """
-WorkspaceService: logical workspace management for the v1.5 tool system.
+WorkspaceService: framework scratch directory management.
 
-WorkspaceService is a plain service class (not a Module), instantiated by
-ToolsModule.on_attach(). It provides:
-
-- Workspace directory management (session-based, task-aware)
-- Path resolution with ``project:`` prefix support
-- Security boundary enforcement via os.path.realpath()
+Plain service class (not a Module), instantiated by
+ToolsModule.on_attach(). Owns the per-session scratch tree under
+playground_dir for framework-internal callers (child agents,
+sandbox subprocesses, async tool persistence).
 
 Directory layout under playground_dir::
 
@@ -17,8 +15,11 @@ Directory layout under playground_dir::
           tasks/
             <task_id>/       <-- task-level isolation (PlanReAct / ChildAgent)
 
-The workspace always resides inside playground_dir (Zone 1), so all
-workspace-internal operations are unrestricted by the zone system.
+v3.3: the model-facing path resolution lives at module scope as
+:func:`_resolve_path` + :func:`classify_write` (no ``project:`` prefix,
+no ``zone`` parameter). The legacy ``WorkspaceService.resolve_path``
+remains as an internal helper used by framework code that writes
+into per-session scratch dirs directly.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sys
 import uuid
 from typing import TYPE_CHECKING
 
@@ -35,12 +37,99 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class WorkspaceService:
-    """
-    Logical workspace manager for a single LlamAgent instance.
+def _resolve_within(raw: str, *, base: str, allow_absolute: bool = True) -> str:
+    """Resolve ``raw`` against ``base``; reject if it escapes ``base``.
 
-    Provides session-scoped workspace directories, path resolution with
-    ``project:`` prefix support, and workspace boundary checks.
+    Used by v3.3 file-tool path_extractors as the single, simple
+    write-boundary primitive. Distinct from
+    :meth:`WorkspaceService.resolve_path` which still understands the
+    legacy ``project:`` prefix for backward compatibility.
+
+    Args:
+        raw: Caller-supplied raw path string.
+        base: Absolute base directory to resolve against.
+        allow_absolute: If False, reject absolute paths in ``raw``
+            (used in playground mode where the caller must always
+            stay relative to the playground root).
+
+    Raises:
+        ValueError: If absolute paths are disallowed and ``raw`` is
+            absolute, or if the resolved path escapes ``base``.
+    """
+    if not allow_absolute and os.path.isabs(raw):
+        raise ValueError(f"Absolute paths not allowed: {raw}")
+    base_real = os.path.realpath(base)
+    resolved = os.path.realpath(os.path.join(base_real, raw))
+    if not (resolved == base_real or resolved.startswith(base_real + os.sep)):
+        raise ValueError(f"Path '{raw}' escapes base directory")
+    return resolved
+
+
+def _resolve_path(raw: str, *, base: str) -> str:
+    """Resolve ``raw`` to an absolute realpath. Absolute paths are kept;
+    relative paths are joined with ``base``.
+
+    Unlike :func:`_resolve_within` this does **not** reject paths that
+    escape ``base`` — the caller (typically :func:`classify_write`)
+    decides routing based on the resolved location. macOS HFS+/APFS
+    case-insensitivity is handled by the canonical case ``realpath``
+    returns when the parent directory exists.
+    """
+    if os.path.isabs(raw):
+        return os.path.realpath(raw)
+    return os.path.realpath(os.path.join(base, raw))
+
+
+def _normcase_path(p: str) -> str:
+    """Case-fold a path for prefix comparison.
+
+    ``os.path.normcase`` already lowercases on Windows. On macOS the
+    default APFS / HFS+ filesystem is case-insensitive but Python's
+    ``normcase`` is a no-op there, so realpath of a mixed-case input
+    keeps the input's lexical case (it only canonicalizes when the
+    target inode actually exists with a known canonical case). We
+    explicitly ``.lower()`` on Darwin so classify_write routes
+    ``Llama_Playground/x.txt`` and ``llama_playground/x.txt`` to the
+    same zone.
+    """
+    p = os.path.normcase(p)
+    if sys.platform == "darwin":
+        p = p.lower()
+    return p
+
+
+def classify_write(resolved_path: str, agent: LlamAgent) -> str:
+    """Classify a resolved write path into one of three zones.
+
+    Returns one of:
+    - ``"playground"`` — path is under ``agent.playground_dir``. Write
+      is allowed but **not** tracked by changeset (ephemeral scratch).
+    - ``"project"`` — path is under ``agent.write_root`` and not under
+      ``playground_dir``. Write is allowed and tracked.
+    - ``"rejected"`` — path is outside both. Caller must reject.
+
+    Order matters: playground is checked first because it physically
+    lives inside ``write_root`` (default ``write_root == project_dir``).
+    Prefix comparison is case-folded via :func:`_normcase_path` so
+    macOS HFS+/APFS case-insensitivity is respected.
+    """
+    p = _normcase_path(resolved_path)
+    pg = _normcase_path(os.path.realpath(agent.playground_dir))
+    if p == pg or p.startswith(pg + os.sep):
+        return "playground"
+    wr = _normcase_path(os.path.realpath(agent.write_root))
+    if p == wr or p.startswith(wr + os.sep):
+        return "project"
+    return "rejected"
+
+
+class WorkspaceService:
+    """Framework scratch directory manager for one LlamAgent instance.
+
+    Provides session-scoped scratch directories under
+    ``agent.playground_dir`` for framework-internal use. Model-facing
+    path resolution does NOT go through this service; see module-level
+    :func:`_resolve_path` and :func:`classify_write` instead.
 
     Attributes:
         agent: The LlamAgent instance this service is attached to.
@@ -125,16 +214,19 @@ class WorkspaceService:
 
     def resolve_path(self, raw_path: str) -> str:
         """
-        Resolve a raw path string to an absolute, real filesystem path.
+        Resolve a raw path string to an absolute, real filesystem path,
+        relative to ``workspace_root`` by default.
+
+        v3.3: legacy ``project:`` prefix support has been removed (B2
+        decision); the model-facing tools auto-classify paths via
+        :func:`classify_write` instead of selecting via a ``zone``
+        kwarg. This method is retained only for framework-internal
+        callers writing into per-session scratch directories. New
+        code should prefer ``_resolve_path`` or ``_resolve_within``.
 
         Resolution rules:
-        - ``project:`` prefix -> relative to ``agent.project_dir``
         - Absolute path -> used as-is (after realpath)
         - Relative path -> relative to ``workspace_root``
-
-        Security: **always** applies ``os.path.realpath()`` to the final
-        result, resolving symlinks and ``..`` components.  This prevents
-        path-traversal attacks such as ``project:../../etc/passwd``.
 
         Args:
             raw_path: The raw path string from a tool argument.
@@ -142,16 +234,8 @@ class WorkspaceService:
         Returns:
             Absolute, symlink-resolved filesystem path.
         """
-        if raw_path.startswith("project:"):
-            relative = raw_path[len("project:"):]
-            return os.path.realpath(
-                os.path.join(self.agent.project_dir, relative)
-            )
-
         if os.path.isabs(raw_path):
             return os.path.realpath(raw_path)
-
-        # Relative path -> resolve against workspace root
         return os.path.realpath(
             os.path.join(self.workspace_root, raw_path)
         )
@@ -177,7 +261,7 @@ class WorkspaceService:
         Check whether a resolved path is inside the current workspace root.
 
         This is used by tools that require source paths to stay within the
-        workspace (e.g. ``sync_workspace_to_project`` source validation).
+        workspace (used by other tools that gate paths to the playground area).
 
         Args:
             resolved_path: An already-resolved absolute path (typically the
@@ -194,26 +278,11 @@ class WorkspaceService:
     # Workspace-only restriction
     # ================================================================
 
-    def resolve_path_workspace_only(self, raw_path: str) -> str:
-        """
-        Resolve a path and verify it stays within workspace root.
-
-        Like resolve_path(), but rejects paths that resolve outside the
-        workspace (including project: prefix, project dir absolute paths,
-        and external paths). Used by write operations to enforce
-        workspace-first workflow.
-
-        Raises:
-            ValueError: If the resolved path is outside workspace root.
-        """
-        resolved = self.resolve_path(raw_path)
-        if not self.ensure_in_workspace(resolved):
-            raise ValueError(
-                f"Write operations are restricted to workspace. "
-                f"Path '{raw_path}' resolves outside workspace root. "
-                f"Use apply_patch or sync_workspace_to_project for project modifications."
-            )
-        return resolved
+    # v3.3 commit-13b: resolve_path_workspace_only deleted. Path-fallback
+    # tools now share the core 5's resolution: _resolve_path against
+    # project_dir + classify_write decides routing. This helper had
+    # workspace-first semantics that v3.3 rejects (the model writes to
+    # project_dir, not workspace).
 
     # ================================================================
     # Lifecycle

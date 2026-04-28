@@ -18,7 +18,31 @@ logger = logging.getLogger(__name__)
 
 
 class CompressionModule(Module):
-    """Context compression: summarizes old conversation history to save tokens."""
+    """Context compression: summarizes old conversation history to save tokens.
+
+    Note: The Tools module's _truncate_observation may add a persistence
+    hint of the form
+      "Output truncated. Full result saved to <rel_path> (<size> bytes, <lines>
+       lines). Use read_files(['<rel_path>']) to read it."
+    to long tool results.
+
+    Two known interactions with this module:
+
+    1. _compress_tool_result strategies 'head' / 'placeholder' / 'llm_summary'
+       may strip the trailing hint line when compressing tool messages.
+       Mitigation: the path also lives in the subsequent assistant message's
+       tool_calls[].arguments, so multi-turn access is usually preserved
+       without coupling Compression to the Tools hint format.
+
+    2. compress_conversation (full-history summarization) replaces history
+       prefix with a summary, dropping the assistant tool_call message that
+       carried the path argument. After such compression the model can no
+       longer discover the persisted-file path from history. The in-memory
+       _persisted_files set is unaffected, but the model has no way to ask.
+       This is an accepted limitation; users with long-context workflows
+       should raise compression_threshold or rely on same-turn read_files
+       follow-up before history compression triggers.
+    """
 
     name = "compression"
     description = "Context compression via LLM summarization"

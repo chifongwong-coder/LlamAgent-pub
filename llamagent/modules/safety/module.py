@@ -4,8 +4,10 @@ SafetyModule: safety module providing two-layer security mechanism.
 1. Input filtering (on_input): intercept injection attacks and harmful content
 2. Output sanitization (on_output): redact API keys, credentials, personal information, and other sensitive content
 
-Tool execution safety is handled by the core zone system (v1.3), not by this module.
-SafetyModule is an optional enhancement that provides on_input and on_output callbacks.
+Tool execution safety is handled by the core authorization engine (zone evaluation +
+mode policies, since v1.9; model-facing path classification via classify_write
+since v3.3), not by this module. SafetyModule is an optional enhancement that
+provides on_input and on_output callbacks.
 
 Design principles:
 - Interface layers (CLI / Web / API) automatically load the safety module
