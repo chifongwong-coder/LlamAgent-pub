@@ -128,7 +128,7 @@ These tool packs are hidden by default but can be activated when needed:
 - toolsmith: Create and manage custom tools (when explicitly requested)
 - multi-agent: Lightweight role-based delegation (when collaboration is needed)
 - job-followup: Inspect/wait/cancel running jobs (auto-activated when jobs exist)
-- path-fallback: glob/move/copy/delete/stat files (auto-activated when no shell tool is available)"""
+- path-fallback: rename/move/copy/delete/glob/stat files (auto-activated when no shell tool is available)"""
 
 
 class ToolsModule(Module):
@@ -742,8 +742,17 @@ class ToolsModule(Module):
                     "status": "error",
                     "error": _writable_root_hint(target),
                 }, ensure_ascii=False)
-            rdst = os.path.join(os.path.dirname(rsrc), new_name)
-            rdst = os.path.realpath(rdst)
+            rdst = os.path.realpath(os.path.join(os.path.dirname(rsrc), new_name))
+            # Post-realpath guard: new_name must not escape the source directory
+            # (e.g. new_name=".." passes the separator check but shifts the dir).
+            if os.path.dirname(rdst) != os.path.dirname(rsrc):
+                return json.dumps({
+                    "status": "error",
+                    "error": (
+                        f"rename_path: new_name '{new_name}' would move the file "
+                        f"outside its directory. Use move_path to change directories."
+                    ),
+                }, ensure_ascii=False)
             try:
                 shutil.move(rsrc, rdst)
                 if classify_write(rdst, agent) == "project":
