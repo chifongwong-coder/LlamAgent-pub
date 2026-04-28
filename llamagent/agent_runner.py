@@ -61,26 +61,28 @@ def main():
         # Create agent
         agent = LlamAgent(config)
 
-        # Set project_dir and playground_dir from spec config (workspace isolation)
+        # Set project_dir and playground_dir from spec config (FS isolation).
+        # v3.4 R3: dict key + default flipped from workspace_mode="sandbox"
+        # to share_parent_project_dir=False (False = isolated, True = shared).
         import os
-        workspace_mode = spec_config.get("workspace_mode", "sandbox")
-        if workspace_mode == "project":
+        share_parent_project_dir = spec_config.get("share_parent_project_dir", False)
+        if share_parent_project_dir:
             if spec_config.get("project_dir"):
                 agent.project_dir = spec_config["project_dir"]
             if spec_config.get("playground_dir"):
                 agent.playground_dir = spec_config["playground_dir"]
         else:
-            # Sandbox: create isolated workspace under parent's playground
+            # Isolated: child gets its own project_dir under parent's playground
             parent_playground = spec_config.get("parent_playground_dir") or spec_config.get("playground_dir")
             if parent_playground:
                 task_id = os.path.splitext(os.path.basename(args.spec))[0]
-                workspace_dir = os.path.join(parent_playground, "children", task_id)
-                os.makedirs(workspace_dir, exist_ok=True)
-                agent.project_dir = workspace_dir
-                agent.playground_dir = os.path.join(workspace_dir, "llama_playground")
+                child_root = os.path.join(parent_playground, "children", task_id)
+                os.makedirs(child_root, exist_ok=True)
+                agent.project_dir = child_root
+                agent.playground_dir = os.path.join(child_root, "llama_playground")
                 os.makedirs(agent.playground_dir, exist_ok=True)
 
-        # v2.7: import parent scopes for project mode scope inheritance
+        # v2.7: import parent scopes when sharing parent project_dir
         parent_scopes = spec.get("parent_scopes")
         if parent_scopes:
             agent._authorization_engine.import_scopes(parent_scopes)

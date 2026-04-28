@@ -125,11 +125,11 @@ class ChildAgentController:
                 "max_time_seconds": spec.policy.budget.max_time_seconds if spec.policy.budget else None,
                 "max_steps": spec.policy.budget.max_steps if spec.policy.budget else None,
             }
-            # Record workspace path for sandbox mode children
-            if spec.policy.workspace_mode != "project":
+            # Record child_root path for isolated children (share_parent_project_dir=False)
+            if not spec.policy.share_parent_project_dir:
                 import os
-                # workspace_dir is derived from parent playground_dir (set by module)
-                input_snapshot["workspace_dir"] = os.path.join(
+                # child_root is derived from parent playground_dir (set by module)
+                input_snapshot["child_root"] = os.path.join(
                     "children", task_id
                 )
 
@@ -561,16 +561,16 @@ class ChildAgentModule(Module):
         return context
 
     def on_shutdown(self):
-        """Shutdown the runner backend, cleanup messaging, and sandbox workspace directories."""
+        """Shutdown the runner backend, cleanup messaging, and isolated child roots."""
         if self.controller:
             self.controller.runner.shutdown()
         # Unregister from messaging infrastructure
         if self._registry and self._agent_id:
             self._registry.unregister(self._agent_id)
-        self._cleanup_workspaces()
+        self._cleanup_child_roots()
 
-    def _cleanup_workspaces(self):
-        """Remove sandbox workspace directories for completed children."""
+    def _cleanup_child_roots(self):
+        """Remove isolated project_dirs for completed children (share_parent_project_dir=False)."""
         import os
         children_dir = os.path.join(self.agent.playground_dir, "children")
         if os.path.isdir(children_dir):
@@ -578,7 +578,7 @@ class ChildAgentModule(Module):
             try:
                 shutil.rmtree(children_dir)
             except OSError as e:
-                logger.warning("Failed to cleanup children workspaces: %s", e)
+                logger.warning("Failed to cleanup child root directories: %s", e)
 
     # ============================================================
     # Tool implementations
@@ -639,13 +639,13 @@ class ChildAgentModule(Module):
             result = f"Result: {result}\n\nFull history:\n{history_text}"
         if include_logs and record.logs:
             result += f"\n\nChild logs:\n{record.logs[:2000]}"
-        # Include workspace path for sandbox mode children
-        if record.input_snapshot and record.input_snapshot.get("workspace_dir"):
+        # Include child_root path for isolated children (share_parent_project_dir=False)
+        if record.input_snapshot and record.input_snapshot.get("child_root"):
             import os
-            workspace_dir = os.path.join(
-                self.agent.playground_dir, record.input_snapshot["workspace_dir"]
+            child_root = os.path.join(
+                self.agent.playground_dir, record.input_snapshot["child_root"]
             )
-            result += f"\n\nWorkspace: {workspace_dir}"
+            result += f"\n\nChild root: {child_root}"
         return result
 
     def _list_children(self) -> str:
@@ -772,33 +772,36 @@ class ChildAgentModule(Module):
         child.summary = None
         child.conversation = child.history
         child._execution_strategy = SimpleReAct()
-        # Workspace isolation: sandbox mode gets an isolated workspace,
-        # project mode inherits parent's full project access.
-        # When policy is None (backward compat), default to project mode.
+        # FS isolation: when share_parent_project_dir=False, child gets an
+        # isolated project_dir under the parent's playground; True means
+        # the child shares the parent's project_dir + scopes.
+        # When policy is None (backward compat), default to True (share).
         import os
         import uuid as _uuid
-        workspace_mode = spec.policy.workspace_mode if spec.policy else "project"
-        if workspace_mode == "project":
+        share_parent_project_dir = (
+            spec.policy.share_parent_project_dir if spec.policy else True
+        )
+        if share_parent_project_dir:
             # Trusted role or no policy: full project access
             child.project_dir = parent.project_dir
             child.playground_dir = parent.playground_dir
         else:
-            # Sandbox mode: isolated workspace under parent's playground
+            # Isolated: child gets its own project_dir under parent's playground
             child_task_id = spec.task_id or _uuid.uuid4().hex[:12]
-            workspace_dir = os.path.join(
+            child_root = os.path.join(
                 parent.playground_dir, "children", child_task_id
             )
-            os.makedirs(workspace_dir, exist_ok=True)
-            child.project_dir = workspace_dir
-            child.playground_dir = os.path.join(workspace_dir, "llama_playground")
+            os.makedirs(child_root, exist_ok=True)
+            child.project_dir = child_root
+            child.playground_dir = os.path.join(child_root, "llama_playground")
             os.makedirs(child.playground_dir, exist_ok=True)
         child.confirm_handler = parent.confirm_handler
         child.interaction_handler = getattr(parent, "interaction_handler", None)
         child.mode = "interactive"  # Short-task children always use interactive mode
 
-        # v2.7: scope inheritance — project mode inherits parent scopes,
-        # sandbox mode gets empty scopes (project writes denied)
-        if workspace_mode == "project":
+        # v2.7: scope inheritance — share_parent inherits parent scopes,
+        # isolated mode gets empty scopes (project writes denied)
+        if share_parent_project_dir:
             parent_scopes = parent._authorization_engine.export_scopes()
             if parent_scopes:
                 child._authorization_engine.import_scopes(parent_scopes)
@@ -900,19 +903,21 @@ class ChildAgentModule(Module):
         child._execution_strategy = SimpleReAct()
 
         # 3. Set project_dir/playground_dir
-        workspace_mode = spec.policy.workspace_mode if spec.policy else "project"
-        if workspace_mode == "project":
+        share_parent_project_dir = (
+            spec.policy.share_parent_project_dir if spec.policy else True
+        )
+        if share_parent_project_dir:
             child.project_dir = parent.project_dir
             child.playground_dir = parent.playground_dir
         else:
             import uuid as _uuid
             child_task_id = spec.task_id or _uuid.uuid4().hex[:12]
-            workspace_dir = os.path.join(
+            child_root = os.path.join(
                 parent.playground_dir, "children", child_task_id
             )
-            os.makedirs(workspace_dir, exist_ok=True)
-            child.project_dir = workspace_dir
-            child.playground_dir = os.path.join(workspace_dir, "llama_playground")
+            os.makedirs(child_root, exist_ok=True)
+            child.project_dir = child_root
+            child.playground_dir = os.path.join(child_root, "llama_playground")
             os.makedirs(child.playground_dir, exist_ok=True)
 
         # 4. No user interaction for continuous children
@@ -933,8 +938,9 @@ class ChildAgentModule(Module):
         config.max_observation_tokens = 1500
         config.context_window_size = 20
 
-        # 7. Import parent scopes (project mode only, consistent with short child)
-        if workspace_mode == "project":
+        # 7. Import parent scopes (only when sharing the parent's project,
+        #    consistent with short child)
+        if share_parent_project_dir:
             parent_scopes = parent._authorization_engine.export_scopes()
             if parent_scopes:
                 child._authorization_engine.import_scopes(parent_scopes)
