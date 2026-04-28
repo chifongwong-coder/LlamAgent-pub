@@ -70,9 +70,9 @@ class JobModule(Module):
                 "Execute a shell command as a managed job. "
                 "wait=True (default) blocks until completion and returns stdout/stderr. "
                 "wait=False starts the job asynchronously and returns a job_id for later polling. "
-                "cwd controls the working directory: \"workspace\" (default) uses the workspace root, "
-                "\"project\" uses the project directory, relative paths resolve from workspace, "
-                "absolute paths are used as-is."
+                "cwd controls the working directory: \"workspace\" (default) uses the per-session "
+                "scratch directory under llama_playground/, \"project\" uses the project directory, "
+                "relative paths resolve from the scratch dir, absolute paths are used as-is."
             ),
             parameters={
                 "type": "object",
@@ -83,7 +83,7 @@ class JobModule(Module):
                     },
                     "cwd": {
                         "type": "string",
-                        "description": "Working directory: \"workspace\" (default), \"project\", relative path, or absolute path",
+                        "description": "Working directory: \"workspace\" (default, per-session scratch under llama_playground/), \"project\", relative path, or absolute path",
                     },
                     "wait": {
                         "type": "boolean",
@@ -260,11 +260,9 @@ class JobModule(Module):
                     "reason": str(e),
                 }, ensure_ascii=False)
 
-            # Truncate overly long output
-            max_len = 5000
-            orig_len = len(result)
-            if orig_len > max_len:
-                result = result[:max_len] + f"\n...(output truncated, total {orig_len} characters)"
+            # v3.3 P2: no internal char truncation here. Long outputs flow
+            # through _truncate_observation (contract A) which persists to
+            # disk and emits a uniform hint pointing at read_files.
 
             self.agent._active_packs.add("job-followup")
             return json.dumps({
@@ -336,10 +334,8 @@ class JobModule(Module):
         output = handle.read_output()
         status = handle.poll()
 
-        max_len = 5000
-        orig_len = len(output)
-        if orig_len > max_len:
-            output = output[:max_len] + f"\n...(output truncated, total {orig_len} characters)"
+        # v3.3 P2: no internal char truncation. Long outputs flow through
+        # _truncate_observation (contract A) for persistence + uniform hint.
 
         return json.dumps({
             "status": status,

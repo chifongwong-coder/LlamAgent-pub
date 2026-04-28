@@ -18,10 +18,17 @@ from llamagent.modules.tools.module import ToolsModule, WORKSPACE_GUIDE, CAPABIL
 # ============================================================
 
 def _make_agent_with_tools(bare_agent, tmp_path):
-    """Set up bare_agent with playground_dir and project_dir, then register ToolsModule."""
-    project_dir = os.path.join(str(tmp_path), "project")
-    playground_dir = os.path.join(str(tmp_path), "llama_playground")
-    os.makedirs(project_dir, exist_ok=True)
+    """Set up bare_agent with project_dir + playground_dir (production
+    layout: playground INSIDE project), then register ToolsModule.
+
+    v3.3 routes file-tool paths via classify_write, which checks the
+    playground prefix relative to project_dir. The pre-v3.3 sibling
+    layout (playground at tmp_path/llama_playground) only worked while
+    zone="playground" routed explicitly; with the kwarg gone, playground
+    must physically live under project_dir for the model-supplied
+    "llama_playground/..." path to land in the correct zone."""
+    project_dir = os.path.realpath(os.path.join(str(tmp_path), "project"))
+    playground_dir = os.path.realpath(os.path.join(project_dir, "llama_playground"))
     os.makedirs(playground_dir, exist_ok=True)
 
     bare_agent.project_dir = project_dir
@@ -56,7 +63,7 @@ class TestToolRegistrationAndPackFiltering:
 
         # -- Default surface tools registered without pack (v3.3: 5 core tools) --
         default_tools = [
-            "list_tree", "search_text", "read_files", "write_files",
+            "list_tree", "read_files", "write_files",
             "apply_patch", "revert_changes",
         ]
         for tool_name in default_tools:
@@ -67,9 +74,12 @@ class TestToolRegistrationAndPackFiltering:
         # -- v3.3: sync_workspace_to_project deleted --
         assert "sync_workspace_to_project" not in bare_agent._tools
 
-        # -- path-fallback tools registered (auto-load when no shell tool) --
+        # -- path-fallback tools registered (auto-load when no shell tool).
+        #    v3.3 includes search_text in this pack (B1 decision); shell
+        #    `grep -rn pattern .` is the v3.3 preferred path. --
         pack_expectations = {
             "glob_files": "path-fallback",
+            "search_text": "path-fallback",
             "stat_paths": "path-fallback",
             "create_temp_file": "path-fallback",
             "move_path": "path-fallback",
@@ -221,17 +231,17 @@ class TestWorkspaceExplorationAndFileTypes:
         assert "content" in file_info
         assert "echo hello" in file_info["content"]
 
-        # -- zone='playground' reads/writes from the playground (scratch) --
+        # -- v3.3: writes/reads under llama_playground/ route to playground
+        #    semantic via classify_write (write succeeds, no changeset). --
         result = _call_tool_json(bare_agent, "write_files",
-            files={"scratch.txt": "scratch contents"}, zone="playground")
+            files={"llama_playground/scratch.txt": "scratch contents"})
         assert result["status"] == "success"
-        ws_root = bare_agent.modules["tools"].workspace_service.workspace_root
-        scratch_path = os.path.join(ws_root, "scratch.txt")
+        scratch_path = os.path.join(bare_agent.playground_dir, "scratch.txt")
         assert os.path.isfile(scratch_path)
         assert open(scratch_path).read() == "scratch contents"
 
         result = _call_tool_json(bare_agent, "read_files",
-            paths=["scratch.txt"], zone="playground")
+            paths=["llama_playground/scratch.txt"])
         assert result["status"] == "success"
         assert "scratch contents" in result["files"][0]["content"]
 
@@ -280,13 +290,14 @@ class TestWriteFilesAndRestrictions:
         assert result["status"] == "success"
         assert "normal.txt" in result["written"]
 
-        # -- zone='playground' writes to playground, not project --
-        ws_root = bare_agent.modules["tools"].workspace_service.workspace_root
+        # -- v3.3: paths under llama_playground/ route to playground (no
+        #    changeset), not project. Same-named file at project root is
+        #    a separate path. --
         result = _call_tool_json(bare_agent, "write_files",
-            files={"scratch.json": "{\"x\": 1}"}, zone="playground")
+            files={"llama_playground/scratch.json": "{\"x\": 1}"})
         assert result["status"] == "success"
-        assert os.path.isfile(os.path.join(ws_root, "scratch.json"))
-        # Project file with same name was NOT created.
+        assert os.path.isfile(os.path.join(bare_agent.playground_dir, "scratch.json"))
+        # Project root file with same basename was NOT created.
         assert not os.path.isfile(os.path.join(project_dir, "scratch.json"))
 
 
@@ -383,28 +394,34 @@ class TestWriteRootBoundary:
         assert bare_agent.write_root == os.path.realpath(bare_agent.project_dir)
 
     def test_edit_root_narrows_write_root(self, bare_agent, tmp_path):
-        project_dir = os.path.join(str(tmp_path), "project")
+        # Production layout: playground inside project (matches v3.3
+        # classify_write expectations).
+        project_dir = os.path.realpath(os.path.join(str(tmp_path), "project"))
         os.makedirs(os.path.join(project_dir, "src"), exist_ok=True)
+        playground_dir = os.path.realpath(os.path.join(project_dir, "llama_playground"))
+        os.makedirs(playground_dir, exist_ok=True)
         bare_agent.config.edit_root = "src"
         bare_agent.project_dir = project_dir
-        bare_agent.playground_dir = os.path.join(str(tmp_path), "llama_playground")
-        os.makedirs(bare_agent.playground_dir, exist_ok=True)
+        bare_agent.playground_dir = playground_dir
         bare_agent.register_module(ToolsModule())
 
         # write_root is now project/src; writes outside src are rejected.
         assert bare_agent.write_root.endswith("/src")
 
-        # Write inside edit_root → succeeds
+        # v3.3: paths are relative to project_dir (not write_root). Write
+        # 'src/main.py' to land inside the narrowed write_root.
         result = _call_tool_json(bare_agent, "write_files",
-            files={"main.py": "x"})
+            files={"src/main.py": "x"})
         assert result["status"] == "success"
         assert os.path.isfile(os.path.join(project_dir, "src", "main.py"))
 
-        # Write outside edit_root via "../README.md" → rejected (escape)
+        # Writing a path outside write_root (project root, not under src/)
+        # → rejected.
         result = _call_tool_json(bare_agent, "write_files",
-            files={"../README.md": "y"})
+            files={"README.md": "y"})
         assert result["status"] == "partial"
         assert len(result["errors"]) == 1
+        assert "outside writable root" in result["errors"][0]["error"]
 
     def test_invalid_edit_root_falls_back_with_warning(self, bare_agent, tmp_path, caplog):
         project_dir = os.path.join(str(tmp_path), "project")
@@ -461,7 +478,7 @@ class TestWriteFilesChangesetTracking:
         _make_agent_with_tools(bare_agent, tmp_path)
 
         _call_tool_json(bare_agent, "write_files",
-            files={"scratch.txt": "ephemeral"}, zone="playground")
+            files={"llama_playground/scratch.txt": "ephemeral"})
 
         # No changeset created → revert finds nothing.
         result = _call_tool_json(bare_agent, "revert_changes")
@@ -662,6 +679,29 @@ class TestChangesetLRU:
             files={"y.txt": "2"})
 
         assert bare_agent._snapshot_service._snapshot_dir is not None
+
+    def test_snapshot_excludes_playground_subdir(self, bare_agent, tmp_path):
+        """v3.3 commit-14: snapshot copies write_root but skips the
+        playground subtree (ephemeral framework scratch). Without this
+        exclusion, snapshots inflate with tool_results/ files that
+        provide no recovery value."""
+        _make_agent_with_tools(bare_agent, tmp_path)
+        bare_agent.config.snapshot_enabled = True
+        # Seed a project file (should snapshot) and a playground file
+        # (should NOT snapshot).
+        with open(os.path.join(bare_agent.project_dir, "main.py"), "w") as f:
+            f.write("project content\n")
+        with open(os.path.join(bare_agent.playground_dir, "scratch.txt"), "w") as f:
+            f.write("ephemeral content\n")
+
+        bare_agent.ensure_snapshot()
+        snap_dir = bare_agent._snapshot_service._snapshot_dir
+        assert snap_dir is not None and os.path.isdir(snap_dir)
+        tree = os.path.join(snap_dir, "tree")
+        # Project file is captured
+        assert os.path.isfile(os.path.join(tree, "main.py"))
+        # Playground subtree is NOT captured
+        assert not os.path.exists(os.path.join(tree, "llama_playground"))
 
     def test_byte_cap_evicts_when_pre_image_total_too_large(self, bare_agent, tmp_path):
         """v3.3 §五: changeset_max_total_bytes triggers eviction even

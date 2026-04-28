@@ -1,15 +1,25 @@
 """
-09 -- Workspace & Jobs: The v1.6 Tool System
+09 -- Workspace & Jobs: The v3.3 Tool System
 
-v1.6 workspace-centric tool system with pack-based conditional exposure.
-Default surface has 12 tools; additional tools are in packs activated by
-skills or runtime state.
+v3.3 path-classifying tool system. The default surface is 5 core
+file tools (read/write/patch/list/revert) plus the `command` shell
+escape hatch (when SandboxModule is loaded) — small models see a
+clean tool list, not 13+ overlapping options.
 
 Key concepts:
-- Workspace: agent's sandbox area under playground_dir, Zone 1 (free zone)
-- Project sync: apply_patch / sync_workspace_to_project for safe project modifications
-- Jobs: start_job with wait=True (sync) or wait=False (async lifecycle)
-- Packs: conditional tool groups activated by skills or state (e.g., job-followup)
+- Path classification: writes auto-route to playground (no Changeset),
+  project (Changeset-tracked), or rejected. The model only gives a
+  path, never a `zone` parameter.
+- Persistence round-trip: long tool outputs (web_fetch, wait_job,
+  large read_files) flow into llama_playground/tool_results/; the
+  model reads them back via read_files (cap'd to fit context).
+- Changeset journal: every typed write (write_files / apply_patch /
+  move_path / copy_path / delete_path) is reversible via
+  revert_changes.
+- Jobs: start_job with wait=True (sync) or wait=False (async lifecycle).
+- Packs: conditional tool groups (path-fallback auto-activates when
+  no shell tool is registered; toolsmith / web / multi-agent activate
+  by skill or state).
 
 Prerequisites:
     pip install -e .
@@ -40,18 +50,20 @@ def call_tool(agent, name, **kwargs):
 
 
 # =============================================================
-# Part 1: Workspace Tools
+# Part 1: Core file tools (path-classified)
 # =============================================================
 
 def part1_workspace_tools():
     print("=" * 60)
-    print("Part 1: Workspace Tools")
+    print("Part 1: Core file tools")
     print("=" * 60)
 
     # Create an isolated temp directory as the project root
     tmp_project = tempfile.mkdtemp(prefix="llamagent_ws_demo_")
 
-    # Set up agent with ToolsModule
+    # Set up agent with ToolsModule. v3.3 layout:
+    #   tmp_project/                <-- project_dir (write_root by default)
+    #     llama_playground/         <-- playground_dir (framework scratch)
     config = Config()
     agent = LlamAgent(config)
     agent.project_dir = tmp_project
@@ -61,13 +73,13 @@ def part1_workspace_tools():
     tools_mod = ToolsModule()
     agent.register_module(tools_mod)
 
-    # Show workspace root path
-    ws_root = tools_mod.workspace_service.workspace_root
-    print(f"\nWorkspace root: {ws_root}")
-    print(f"Project dir:    {agent.project_dir}")
+    print(f"\nProject dir:    {agent.project_dir}")
+    print(f"Playground dir: {agent.playground_dir}")
 
-    # --- write_files: create files in the workspace ---
-    print("\n-- write_files: create hello.py in workspace --")
+    # --- write_files: paths resolve relative to project_dir ---
+    # classify_write routes the path: under llama_playground/ => ephemeral,
+    # else under write_root => tracked by changeset, else rejected.
+    print("\n-- write_files: tracked write under project_dir --")
     result = call_tool(agent, "write_files", files={
         "hello.py": 'def greet(name):\n    return f"Hello, {name}!"\n',
         "data/config.json": '{"version": "1.5", "debug": false}\n',
@@ -75,33 +87,31 @@ def part1_workspace_tools():
     print(f"  Status: {result['status']}")
     print(f"  Written: {result['written']}")
 
-    # --- list_tree: show workspace structure ---
-    print("\n-- list_tree: workspace directory tree --")
+    # --- write_files into playground: ephemeral, not tracked ---
+    print("\n-- write_files: ephemeral write under llama_playground/ --")
+    result = call_tool(agent, "write_files", files={
+        "llama_playground/scratch.txt": "draft notes\n",
+    })
+    print(f"  Status: {result['status']}")
+    print(f"  Written: {result['written']}")
+
+    # --- list_tree: show project_dir structure ---
+    print("\n-- list_tree: project directory tree --")
     result = call_tool(agent, "list_tree")
     print(f"  {result['tree']}")
 
-    # --- read_files: read back the file ---
-    print("\n-- read_files: read hello.py from workspace --")
+    # --- read_files: read back a file (relative to project_dir) ---
+    print("\n-- read_files: read hello.py --")
     result = call_tool(agent, "read_files", paths=["hello.py"])
     print(f"  Content:\n{result['files'][0]['content']}")
 
-    # --- read_files with project: prefix ---
-    # First create a file in the project directory to read
-    project_file = os.path.join(tmp_project, "README.txt")
-    with open(project_file, "w") as f:
-        f.write("This is the project README.\nVersion: 1.5\n")
-
-    print("\n-- read_files: read a project file with 'project:' prefix --")
-    result = call_tool(agent, "read_files", paths=["project:README.txt"])
-    print(f"  Content:\n{result['files'][0]['content']}")
-
-    # --- glob_files: search workspace by pattern ---
-    print("\n-- glob_files: find all .py files in workspace --")
+    # --- glob_files: pattern search across project_dir ---
+    print("\n-- glob_files: find all .py files --")
     result = call_tool(agent, "glob_files", pattern="**/*.py")
     print(f"  Found {result['count']} file(s): {result['files']}")
 
-    # --- search_text: search file content in workspace ---
-    print("\n-- search_text: search for 'greet' in workspace --")
+    # --- search_text: full-text search across project_dir ---
+    print("\n-- search_text: search for 'greet' --")
     result = call_tool(agent, "search_text", query="greet")
     for match in result["matches"]:
         print(f"  {match['file']}:{match['line']} -> {match['content']}")
@@ -256,8 +266,8 @@ if __name__ == "__main__":
     part4_workspace_lifecycle(agent, tools_mod)
 
     print("\n" + "=" * 60)
-    print("Done! v1.6 workspace-first tools with pack-based exposure:")
-    print("  - Default surface: read_files, write_files, list_tree, search_text, ...")
-    print("  - Project sync:    apply_patch (with preview), revert_changes")
-    print("  - Job system:      start_job, inspect_job, wait_job, cancel_job")
+    print("Done! v3.3 path-classifying tools with pack-based exposure:")
+    print("  - Core 5:       read_files, write_files, apply_patch, list_tree, revert_changes")
+    print("  - Path-fallback: glob_files, search_text, move/copy/delete_path, ...")
+    print("  - Job system:   start_job, inspect_job, wait_job, cancel_job")
     print("=" * 60)

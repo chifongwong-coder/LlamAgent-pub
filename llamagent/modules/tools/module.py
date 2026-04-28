@@ -1,14 +1,29 @@
 """
-ToolsModule: four-tier tool system + role-based permission management + v1.5 workspace tools.
+ToolsModule: four-tier tool system + role-based permission management + v3.3 file tool surface.
 
 Responsibilities:
-- Tool registration management: maintains global_registry and agent_registry
-- Meta-tools: create_tool / list_my_tools / delete_tool / query_toolbox
-- Admin tools: create_common_tool / list_all_agent_tools / promote_tool
-- Tool persistence: JSON persistence for role custom tools and admin common tools
-- v1.6 workspace tools: WorkspaceService + ProjectSyncService (default + pack)
-- v1.6 pack mechanism: state-driven + skill-driven conditional tool exposure
-- v1.6 workspace guidelines + capability hint block injection via on_context
+- Tool registration management: maintains global_registry and
+  agent_registry; exposes the four-tier visibility model (default /
+  common / admin / agent).
+- Meta-tools (toolsmith pack): create_tool / list_my_tools /
+  delete_tool, plus admin-only create_common_tool and promote_tool.
+- Tool persistence: JSON persistence for role custom tools and
+  admin common tools.
+- v3.3 file tool surface (5 model-facing core tools + 7 path-fallback
+  pack tools):
+    * Default: read_files, write_files, apply_patch, list_tree,
+      revert_changes — paths resolve relative to project_dir; the
+      framework's classify_write helper routes each write to
+      playground (no changeset), project (changeset-tracked), or
+      rejected (outside writable root). No `zone` parameter.
+    * Pack `path-fallback` (auto-activated when neither `command`
+      nor `start_job` is registered): move_path, copy_path,
+      delete_path, glob_files, search_text, stat_paths,
+      create_temp_file. Destructive 3 (move/copy/delete) register
+      changesets when targeting write_root; delete_path rejects
+      directories and binary files. Other packs (web / toolsmith /
+      multi-agent / job-followup) follow the same pack mechanism.
+- WORKSPACE_GUIDE + CAPABILITY_HINT_BLOCK injection via on_context.
 """
 
 import base64
@@ -23,23 +38,39 @@ import tempfile
 from llamagent.core.agent import Module
 from llamagent.modules.tools.registry import ToolRegistry, global_registry
 from llamagent.modules.tools.agent_tools import AgentToolManager
-from llamagent.modules.tools.workspace import _resolve_within
+from llamagent.modules.tools.workspace import _resolve_within, _resolve_path, classify_write
 
 logger = logging.getLogger(__name__)
 
 # Storage ID for admin-created common tools
 COMMON_STORE_ID = "__common__"
 
-# File-tool behavioral guidelines injected via on_context (v3.3 surface)
+# File-tool behavioral guidelines injected via on_context (v3.3 surface).
+# This block is the model's primary reference for file-tool semantics; mock
+# tests in tests/test_workspace.py assert exact substrings — change carefully.
 WORKSPACE_GUIDE = """\
-[File Tool Guidelines]
-- File tool paths default to the project directory.
-- Project writes (write_files / apply_patch) are tracked by changeset; use
-  revert_changes to undo a recent edit.
-- For ephemeral scratch (intermediate computation, system cache lookups),
-  set zone='playground'. Playground writes are NOT tracked by revert_changes.
-- For shell command execution (move / copy / delete / glob / grep), use
-  start_job. Set wait=True for quick commands, wait=False for long tasks."""
+You can read and write files in the project directory using:
+  - read_files(paths)         # read one or more files (relative to project root)
+  - write_files(files)        # create or overwrite (relative to project root)
+  - apply_patch(target, edits) # surgical match/replace edits
+  - list_tree(root)           # browse project structure
+  - revert_changes(targets)   # undo recent typed writes (within the project)
+
+Path conventions:
+  - All paths are relative to the project root unless absolute. No prefixes.
+  - Some async tools persist large outputs under `llama_playground/...`. When you
+    see a path like that in a tool result, read it back with read_files just like
+    any other file — it's a real file under the project tree.
+  - Symbolic links resolving outside the project root are rejected at write time.
+
+Reading large files:
+  read_files truncates per-call to fit context. If a file is too long, the
+  result tells you which lines were returned and how to fetch more, e.g.:
+    read_files(['big.py'], ranges={'big.py': '200-400'})    # next chunk
+    read_files(['llama_playground/tool_results/x.txt'],
+               ranges={'llama_playground/tool_results/x.txt': '15000-30000'})  # jump to a section
+
+revert_changes undoes recent writes in reverse order."""
 
 # Known text file extensions for automatic type detection in read_files
 _TEXT_EXTENSIONS = frozenset({
@@ -89,7 +120,7 @@ These tool packs are hidden by default but can be activated when needed:
 - toolsmith: Create and manage custom tools (when explicitly requested)
 - multi-agent: Lightweight role-based delegation (when collaboration is needed)
 - job-followup: Inspect/wait/cancel running jobs (auto-activated when jobs exist)
-- path-fallback: glob/move/copy/delete/stat workspace files (auto-activated when no shell tool is available)"""
+- path-fallback: glob/move/copy/delete/stat files (auto-activated when no shell tool is available)"""
 
 
 class ToolsModule(Module):
@@ -258,46 +289,44 @@ class ToolsModule(Module):
     def _register_workspace_tools(self):
         """Register workspace exploration and modification tools."""
         ws = self.workspace_service
-        # v3.3 path resolution helpers — all 5 core tools route through these.
-        #
-        #   _read_base(args)  -> (base, allow_absolute)  for read tools
-        #   _write_base(args) -> (base, allow_absolute)  for write tools
-        #
-        # zone="playground"  -> base = ws.workspace_root, abs paths rejected
-        # zone="project"     -> reads against project_dir, writes against write_root
-        def _read_base(args):
-            if args.get("zone") == "playground":
-                return ws.workspace_root, False
-            return self.agent.project_dir, True
+        # v3.3: paths from the model are always resolved against project_dir.
+        # classify_write decides the routing for writes (playground / project /
+        # rejected). Reads default to project_dir; the authorization engine's
+        # _evaluate_zone handles requests for paths outside the project.
+        agent = self.agent
 
-        def _write_base(args):
-            if args.get("zone") == "playground":
-                return ws.workspace_root, False
-            return self.agent.write_root, True
+        def _read_resolve(raw_path: str) -> str:
+            """Resolve a read path against project_dir without an escape
+            check. Authorization engine evaluates external reads."""
+            return _resolve_path(raw_path, base=agent.project_dir)
 
-        def _resolve_for(args, *, write: bool, raw_path: str) -> str:
-            base, allow_abs = (_write_base(args) if write else _read_base(args))
-            return _resolve_within(raw_path, base=base, allow_absolute=allow_abs)
-
-        def _safe_extract(args, *, write: bool, raw_paths) -> list[str]:
-            """path_extractor-safe wrapper: rejected paths are dropped from
-            the auth engine's view; the tool body re-resolves and surfaces
-            the error to the model. Prevents auth-layer crashes on
-            malformed input (nul bytes, escape attempts)."""
+        def _safe_extract_paths(raw_paths: list[str]) -> list[str]:
+            """path_extractor-safe wrapper: drop paths that fail to resolve
+            (e.g. NUL bytes raise ValueError on POSIX). The tool body
+            re-resolves and surfaces the error to the model."""
             out = []
             for p in raw_paths:
+                if not isinstance(p, str):
+                    continue
                 try:
-                    out.append(_resolve_for(args, write=write, raw_path=p))
+                    out.append(_resolve_path(p, base=agent.project_dir))
                 except (ValueError, OSError):
                     continue
             return out
 
+        def _writable_root_hint(p: str) -> str:
+            """v3.3 §3.5 — uniform error for paths outside writable boundary."""
+            return (
+                f"Path '{p}' is outside writable root "
+                f"'{agent.write_root}'. Choose a path within "
+                f"'{agent.write_root}'."
+            )
+
         # --- Exploration tools (safety_level=1) ---
 
-        def _list_tree(root: str = ".", max_depth: int = 3, zone: str = "project") -> str:
-            args = {"root": root, "zone": zone}
+        def _list_tree(root: str = ".", max_depth: int = 3) -> str:
             try:
-                resolved = _resolve_for(args, write=False, raw_path=root)
+                resolved = _read_resolve(root)
             except ValueError as e:
                 return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
             lines = []
@@ -315,48 +344,47 @@ class ToolsModule(Module):
         self.agent.register_tool(
             name="list_tree", func=_list_tree,
             description=(
-                "List directory tree structure. Paths default to the project. "
-                "Set zone='playground' to list the framework's scratch cache."
+                "List directory structure relative to the project root. "
+                "Common build/cache dirs are filtered by default."
             ),
             parameters={"type": "object", "properties": {
                 "root": {"type": "string", "description": "Root directory (relative to project)", "default": "."},
                 "max_depth": {"type": "integer", "description": "Maximum depth (default: 3)", "default": 3},
-                "zone": {"type": "string", "enum": ["project", "playground"], "default": "project",
-                          "description": "Where to list. 'project' (default) | 'playground' (scratch cache)."},
             }},
             tier="common", safety_level=1,
-            path_extractor=lambda args: _safe_extract(args, write=False, raw_paths=[args.get("root", ".")]),
+            path_extractor=lambda args: _safe_extract_paths([args.get("root", ".")]),
         )
 
         def _glob_files(pattern: str, root: str = ".") -> str:
-            resolved = ws.resolve_path(root)
+            try:
+                resolved = _resolve_path(root, base=agent.project_dir)
+            except (ValueError, OSError) as e:
+                return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
             matches = glob.glob(os.path.join(resolved, pattern), recursive=True)
             rel = [os.path.relpath(m, resolved) for m in matches]
             return json.dumps({"status": "success", "files": sorted(rel), "count": len(rel)}, ensure_ascii=False)
 
         self.agent.register_tool(
             name="glob_files", func=_glob_files,
-            description="Search files by glob pattern. Paths relative to the playground (scratch cache) — only auto-loaded when no shell tool is available.",
+            description="Search files by glob pattern relative to the project root.",
             parameters={"type": "object", "properties": {
                 "pattern": {"type": "string", "description": "Glob pattern (e.g., '**/*.py')"},
-                "root": {"type": "string", "description": "Root directory (default: workspace root)", "default": "."},
+                "root": {"type": "string", "description": "Root directory relative to project (default: project root)", "default": "."},
             }, "required": ["pattern"]},
             tier="common", safety_level=1,
             pack="path-fallback",
-            path_extractor=lambda args: [ws.resolve_path(args.get("root", "."))],
+            path_extractor=lambda args: _safe_extract_paths([args.get("root", ".")]),
         )
 
         def _search_text(query: str, paths: list = None, regex: bool = False,
-                         case_sensitive: bool = False, zone: str = "project") -> str:
+                         case_sensitive: bool = False) -> str:
             import re as _re
-            args = {"zone": zone}
-            search_root, allow_abs = _read_base(args)
+            search_root = agent.project_dir
             target_files = []
             if paths:
                 try:
-                    target_files = [_resolve_within(p, base=search_root, allow_absolute=allow_abs)
-                                    for p in paths]
-                except ValueError as e:
+                    target_files = [_resolve_path(p, base=search_root) for p in paths]
+                except (ValueError, OSError) as e:
                     return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
             else:
                 for dirpath, _, filenames in os.walk(search_root):
@@ -379,37 +407,32 @@ class ToolsModule(Module):
 
         self.agent.register_tool(
             name="search_text", func=_search_text,
-            description=(
-                "Search files for text content. Default scope is the project. "
-                "Set zone='playground' to search the framework's scratch cache."
-            ),
+            description="Search files for text content within the project root.",
             parameters={"type": "object", "properties": {
                 "query": {"type": "string", "description": "Search query string"},
                 "paths": {"type": "array", "items": {"type": "string"}, "description": "Paths to search (default: entire project)"},
                 "regex": {"type": "boolean", "description": "Use regex matching", "default": False},
                 "case_sensitive": {"type": "boolean", "description": "Case sensitive search", "default": False},
-                "zone": {"type": "string", "enum": ["project", "playground"], "default": "project",
-                          "description": "Where to search. 'project' (default) | 'playground' (scratch cache)."},
             }, "required": ["query"]},
             tier="common", safety_level=1,
-            path_extractor=lambda args: _safe_extract(args, write=False, raw_paths=args.get("paths") or []),
+            pack="path-fallback",  # v3.3: shell `command: grep -rn pattern .` is preferred
+            path_extractor=lambda args: _safe_extract_paths(args.get("paths") or []),
         )
 
         def _read_files(paths: list, ranges: dict = None, with_line_numbers: bool = True,
-                        mode: str = "auto", zone: str = "project") -> str:
+                        mode: str = "auto") -> str:
             """Read files with automatic text/binary detection.
 
             mode: "auto" (detect by extension/content), "text" (force text), "binary" (return base64).
-            zone: "project" (default, relative to project_dir) or "playground" (scratch cache).
+            Paths resolve relative to the project root; absolute paths are kept.
             """
-            args = {"zone": zone}
             budget = getattr(self.agent.config, "max_observation_tokens", 2000)
             per_file = max(200, budget // max(len(paths), 1))
             results = []
             for p in paths:
                 try:
-                    resolved = _resolve_for(args, write=False, raw_path=p)
-                except ValueError as e:
+                    resolved = _resolve_path(p, base=agent.project_dir)
+                except (ValueError, OSError) as e:
                     results.append({"path": p, "error": str(e)})
                     continue
                 try:
@@ -447,8 +470,20 @@ class ToolsModule(Module):
                         with open(resolved, "r", encoding="utf-8", errors="replace") as f:
                             all_lines = f.readlines()
 
-                        # Check if a specific range is requested for this file
+                        # Check if a specific range is requested for this file.
+                        # Schema is dict[str, "start-end"] line-range strings.
+                        # Reject non-string values (e.g. tuple/list from a
+                        # confused model) cleanly instead of crashing on .split.
                         range_spec = (ranges or {}).get(p)
+                        if range_spec is not None and not isinstance(range_spec, str):
+                            results.append({
+                                "path": p,
+                                "error": (
+                                    f"ranges value must be a 'start-end' line-range "
+                                    f"string (e.g. '10-50'); got {type(range_spec).__name__}"
+                                ),
+                            })
+                            continue
                         if range_spec:
                             parts = range_spec.split("-", 1)
                             start = int(parts[0])
@@ -481,13 +516,20 @@ class ToolsModule(Module):
                                 "lines": len(all_lines), "truncated": truncated,
                             }
                             if truncated:
+                                # v3.3 contract B: cap suffix tells the model how
+                                # to read more. Format is locked — see plan §3.4.
+                                next_end = min(last_line_shown + max(per_file // 50, 50),
+                                               len(all_lines))
                                 entry["hint"] = (
-                                    f"Output stopped at line {last_line_shown} of {len(all_lines)} "
-                                    f"due to size limit. To read the remainder, call read_files again "
-                                    f"with ranges={{'{p}': '{last_line_shown + 1}-{len(all_lines)}'}} "
-                                    f"(or any sub-range you need)."
+                                    f"(content truncated at line {last_line_shown} "
+                                    f"of {len(all_lines)}; use ranges="
+                                    f"{{'{p}': '{last_line_shown + 1}-{next_end}'}} "
+                                    f"to read more)"
                                 )
                             results.append(entry)
+                except FileNotFoundError:
+                    # v3.3 §3.5: unified file-not-found wording with quoted user path.
+                    results.append({"path": p, "error": f"file not found: '{p}'"})
                 except Exception as e:
                     results.append({"path": p, "error": str(e)})
             return json.dumps({"status": "success", "files": results}, ensure_ascii=False)
@@ -495,34 +537,33 @@ class ToolsModule(Module):
         self.agent.register_tool(
             name="read_files", func=_read_files,
             description=(
-                "Read one or more files. Text files return content with line numbers; "
-                "binary files return metadata (size, mime type). "
-                "Paths default to the project directory. Set zone='playground' to "
-                "read from the framework's scratch cache. "
-                "Use 'ranges' to read specific line ranges. "
-                "Use mode='binary' to get base64 content of binary files."
+                "Read one or more files relative to the project root. "
+                "Supports byte/line ranges and binary mode."
             ),
             parameters={"type": "object", "properties": {
                 "paths": {"type": "array", "items": {"type": "string"}, "description": "File paths to read"},
                 "ranges": {"type": "object", "description": "Optional mapping of file path to 'start-end' line range string (e.g., {'main.py': '10-50'})"},
                 "with_line_numbers": {"type": "boolean", "description": "Include line numbers for text files", "default": True},
                 "mode": {"type": "string", "description": "Read mode: 'auto' (detect type), 'text' (force text), 'binary' (return base64)", "default": "auto"},
-                "zone": {"type": "string", "enum": ["project", "playground"], "default": "project",
-                          "description": "Where to read. 'project' (default) | 'playground' (scratch cache)."},
             }, "required": ["paths"]},
             tier="common", safety_level=1,
-            path_extractor=lambda args: _safe_extract(args, write=False, raw_paths=args.get("paths") or []),
+            path_extractor=lambda args: _safe_extract_paths(args.get("paths") or []),
         )
 
         def _stat_paths(paths: list) -> str:
             results = []
             for p in paths:
-                resolved = ws.resolve_path(p)
+                try:
+                    resolved = _resolve_path(p, base=agent.project_dir)
+                except (ValueError, OSError) as e:
+                    results.append({"path": p, "error": str(e)})
+                    continue
                 try:
                     st = os.stat(resolved)
                     results.append({
                         "path": p, "size": st.st_size,
-                        "mtime": st.st_mtime, "type": "dir" if os.path.isdir(resolved) else "file",
+                        "mtime": st.st_mtime,
+                        "type": "dir" if os.path.isdir(resolved) else "file",
                     })
                 except Exception as e:
                     results.append({"path": p, "error": str(e)})
@@ -530,34 +571,41 @@ class ToolsModule(Module):
 
         self.agent.register_tool(
             name="stat_paths", func=_stat_paths,
-            description="Get file/directory metadata (size, modification time, type).",
+            description="Get file/directory metadata (size, modification time, type). Paths relative to project root.",
             parameters={"type": "object", "properties": {
                 "paths": {"type": "array", "items": {"type": "string"}, "description": "Paths to stat"},
             }, "required": ["paths"]},
             tier="common", safety_level=1,
             pack="path-fallback",
-            path_extractor=lambda args: ws.resolve_paths(args.get("paths", [])),
+            truncatable=False,  # short metadata; bypass _truncate_observation
+            path_extractor=lambda args: _safe_extract_paths(args.get("paths", [])),
         )
 
         # --- Modification tools (safety_level=2) ---
 
-        def _write_files(files: dict, mode: str = "text", zone: str = "project") -> str:
-            """Write files. Default zone is the project (write_root); set
-            zone='playground' for the framework's scratch cache.
+        def _write_files(files: dict, mode: str = "text") -> str:
+            """Write files relative to the project root.
 
-            Project writes are tracked by changeset for revert; playground
-            writes are ephemeral and not tracked.
+            Path classification (via classify_write):
+            - Inside playground (e.g. llama_playground/...): write succeeds,
+              not tracked (ephemeral scratch).
+            - Inside write_root but not playground: write succeeds and is
+              tracked by changeset for revert.
+            - Outside both: rejected with the §3.5 outside-writable-root error.
             """
-            args = {"zone": zone}
             written = []
             errors = []
-            track_changeset = (zone != "playground")
             for path, content in files.items():
                 try:
-                    resolved = _resolve_for(args, write=True, raw_path=path)
-                except ValueError as e:
+                    resolved = _resolve_path(path, base=agent.project_dir)
+                except (ValueError, OSError) as e:
                     errors.append({"path": path, "error": str(e)})
                     continue
+                zone_class = classify_write(resolved, agent)
+                if zone_class == "rejected":
+                    errors.append({"path": path, "error": _writable_root_hint(path)})
+                    continue
+                track_changeset = (zone_class == "project")
                 # Capture pre-image for changeset if writing to project zone.
                 # If the existing file isn't readable as UTF-8 text (i.e. it's
                 # binary), refuse to overwrite it via text mode — the changeset
@@ -621,53 +669,43 @@ class ToolsModule(Module):
                 "written": written,
                 "errors": errors,
             }
-            if errors:
-                sample = errors[0].get("path", "")
-                basename = os.path.basename(sample.rstrip("/")) or "newfile.txt"
-                if zone == "playground":
-                    response["hint"] = (
-                        f"Some paths were rejected because they resolve outside "
-                        f"the playground (or were absolute paths). Retry with a "
-                        f"playground-relative path like '{basename}'."
-                    )
-                else:
-                    response["hint"] = (
-                        f"Some paths were rejected because they resolve outside "
-                        f"the project's write boundary. Retry with a project-"
-                        f"relative path like '{basename}'. If you need to write "
-                        f"into the framework's scratch cache, set zone='playground'."
-                    )
             return json.dumps(response, ensure_ascii=False)
 
         self.agent.register_tool(
             name="write_files", func=_write_files,
             description=(
-                "Write one or more files. Default zone is the project; writes are "
-                "tracked by changeset for revert. Set zone='playground' for the "
-                "framework's scratch cache (writes there are ephemeral, not tracked). "
-                "Use mode='binary' to write base64-encoded binary content."
+                "Create or overwrite files relative to the project root. Each "
+                "successful write is tracked for revert. Use mode='binary' for "
+                "non-text content."
             ),
             parameters={"type": "object", "properties": {
                 "files": {"type": "object", "description": "Mapping of file path -> content string (or base64 for binary mode)"},
                 "mode": {"type": "string", "description": "Write mode: 'text' (default) or 'binary' (base64-encoded)", "default": "text"},
-                "zone": {"type": "string", "enum": ["project", "playground"], "default": "project",
-                          "description": "Where to write. 'project' (default, changeset-tracked) | 'playground' (scratch, ephemeral)."},
             }, "required": ["files"]},
             tier="common", safety_level=2,
-            path_extractor=lambda args: _safe_extract(args, write=True, raw_paths=list((args.get("files") or {}).keys())),
+            path_extractor=lambda args: _safe_extract_paths(list((args.get("files") or {}).keys())),
         )
 
+        # v3.3 commit-13b: path-fallback tools share the core 5's path
+        # resolution. Destructive ones (move/copy/delete) register
+        # changesets via ProjectSyncService when targeting write_root;
+        # writes to playground are ephemeral (not tracked).
+
         def _create_temp_file(prefix: str = "", suffix: str = "", content: str = "") -> str:
-            ws_root = ws.workspace_root
-            fd, path = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=ws_root)
-            # os.fdopen takes ownership of fd; do NOT os.close(fd) after fdopen succeeds
+            # Always write under playground_dir (framework scratch), no
+            # model-supplied path. Returns a path relative to project_dir
+            # so the model can read it back via read_files.
+            results_dir = agent.playground_dir
+            os.makedirs(results_dir, exist_ok=True)
+            fd, path = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=results_dir)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(content)
-            return json.dumps({"status": "success", "path": os.path.relpath(path, ws_root)}, ensure_ascii=False)
+            rel = os.path.relpath(path, agent.project_dir)
+            return json.dumps({"status": "success", "path": rel}, ensure_ascii=False)
 
         self.agent.register_tool(
             name="create_temp_file", func=_create_temp_file,
-            description="Create a temporary file in the workspace.",
+            description="Create a temporary file under llama_playground/. Returns its project-relative path.",
             parameters={"type": "object", "properties": {
                 "prefix": {"type": "string", "description": "Filename prefix", "default": ""},
                 "suffix": {"type": "string", "description": "Filename suffix", "default": ""},
@@ -679,81 +717,138 @@ class ToolsModule(Module):
 
         def _move_path(src: str, dst: str) -> str:
             try:
-                resolved_src = ws.resolve_path_workspace_only(src)
-                resolved_dst = ws.resolve_path_workspace_only(dst)
-            except ValueError as e:
+                rsrc = _resolve_path(src, base=agent.project_dir)
+                rdst = _resolve_path(dst, base=agent.project_dir)
+            except (ValueError, OSError) as e:
                 return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
+            for raw, resolved in (("src", rsrc), ("dst", rdst)):
+                if classify_write(resolved, agent) == "rejected":
+                    return json.dumps({
+                        "status": "error",
+                        "error": _writable_root_hint(src if raw == "src" else dst),
+                    }, ensure_ascii=False)
             try:
-                shutil.move(resolved_src, resolved_dst)
+                shutil.move(rsrc, rdst)
+                # Track changeset only when dst is in write_root (project zone).
+                if classify_write(rdst, agent) == "project":
+                    self.project_sync_service.record_move_changeset(rsrc, rdst)
                 return json.dumps({"status": "success", "src": src, "dst": dst}, ensure_ascii=False)
             except Exception as e:
                 return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
 
         self.agent.register_tool(
             name="move_path", func=_move_path,
-            description="Move a file or directory within workspace.",
+            description="Move a file or directory within the project.",
             parameters={"type": "object", "properties": {
                 "src": {"type": "string", "description": "Source path"},
                 "dst": {"type": "string", "description": "Destination path"},
             }, "required": ["src", "dst"]},
             tier="common", safety_level=2,
             pack="path-fallback",
-            path_extractor=lambda args: [ws.resolve_path(args.get("src", "")), ws.resolve_path(args.get("dst", ""))],
+            path_extractor=lambda args: _safe_extract_paths([args.get("src", ""), args.get("dst", "")]),
         )
 
         def _copy_path(src: str, dst: str) -> str:
             try:
-                resolved_src = ws.resolve_path_workspace_only(src)
-                resolved_dst = ws.resolve_path_workspace_only(dst)
-            except ValueError as e:
+                rsrc = _resolve_path(src, base=agent.project_dir)
+                rdst = _resolve_path(dst, base=agent.project_dir)
+            except (ValueError, OSError) as e:
                 return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
+            for raw, resolved in (("src", rsrc), ("dst", rdst)):
+                if classify_write(resolved, agent) == "rejected":
+                    return json.dumps({
+                        "status": "error",
+                        "error": _writable_root_hint(src if raw == "src" else dst),
+                    }, ensure_ascii=False)
             try:
-                if os.path.isdir(resolved_src):
-                    shutil.copytree(resolved_src, resolved_dst)
+                if os.path.isdir(rsrc):
+                    shutil.copytree(rsrc, rdst)
                 else:
-                    os.makedirs(os.path.dirname(resolved_dst), exist_ok=True)
-                    shutil.copy2(resolved_src, resolved_dst)
+                    os.makedirs(os.path.dirname(rdst), exist_ok=True)
+                    shutil.copy2(rsrc, rdst)
+                if classify_write(rdst, agent) == "project":
+                    self.project_sync_service.record_copy_changeset(rsrc, rdst)
                 return json.dumps({"status": "success", "src": src, "dst": dst}, ensure_ascii=False)
             except Exception as e:
                 return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
 
         self.agent.register_tool(
             name="copy_path", func=_copy_path,
-            description="Copy a file or directory within workspace.",
+            description="Copy a file or directory within the project.",
             parameters={"type": "object", "properties": {
                 "src": {"type": "string", "description": "Source path"},
                 "dst": {"type": "string", "description": "Destination path"},
             }, "required": ["src", "dst"]},
             tier="common", safety_level=2,
             pack="path-fallback",
-            path_extractor=lambda args: [ws.resolve_path(args.get("src", "")), ws.resolve_path(args.get("dst", ""))],
+            path_extractor=lambda args: _safe_extract_paths([args.get("src", ""), args.get("dst", "")]),
         )
 
         def _delete_path(path: str) -> str:
+            # MF2: delete_path rejects directories. Pre-13a it would
+            # rmtree any directory; v3.3 only accepts file paths so the
+            # changeset journal can record per-file pre_image bytes.
             try:
-                resolved = ws.resolve_path_workspace_only(path)
-            except ValueError as e:
+                resolved = _resolve_path(path, base=agent.project_dir)
+            except (ValueError, OSError) as e:
                 return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
+            if classify_write(resolved, agent) == "rejected":
+                return json.dumps({
+                    "status": "error",
+                    "error": _writable_root_hint(path),
+                }, ensure_ascii=False)
+            if os.path.isdir(resolved):
+                return json.dumps({
+                    "status": "error",
+                    "error": (
+                        f"delete_path cannot remove a directory ('{path}'). "
+                        f"Pass a list of file paths instead. Use list_tree('{path}') "
+                        f"to enumerate files first."
+                    ),
+                }, ensure_ascii=False)
+            if not os.path.exists(resolved):
+                return json.dumps({
+                    "status": "error",
+                    "error": f"file not found: '{path}'",
+                }, ensure_ascii=False)
             try:
-                if os.path.isdir(resolved):
-                    shutil.rmtree(resolved)
-                elif os.path.exists(resolved):
-                    os.remove(resolved)
-                else:
-                    return json.dumps({"status": "error", "error": f"Path not found: {path}"}, ensure_ascii=False)
+                # Capture pre_image for changeset (project zone only).
+                track = (classify_write(resolved, agent) == "project")
+                pre_image = None
+                if track:
+                    try:
+                        with open(resolved, "r", encoding="utf-8") as f:
+                            pre_image = f.read()
+                    except UnicodeDecodeError:
+                        # Binary file: changeset can't faithfully record bytes
+                        # in the string-based pre_image. Refuse to delete via
+                        # this tool — the model should use the command tool
+                        # for binary deletes (which won't be revertable anyway).
+                        return json.dumps({
+                            "status": "error",
+                            "error": (
+                                f"delete_path refuses to remove binary file "
+                                f"'{path}' because the changeset journal cannot "
+                                f"record its bytes for revert. Use the command "
+                                f"tool if you accept the no-revert trade-off."
+                            ),
+                        }, ensure_ascii=False)
+                os.remove(resolved)
+                if track and pre_image is not None:
+                    self.project_sync_service.record_delete_changeset(resolved, pre_image)
                 return json.dumps({"status": "success", "path": path}, ensure_ascii=False)
             except Exception as e:
                 return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
 
         self.agent.register_tool(
             name="delete_path", func=_delete_path,
-            description="Delete a file or directory in workspace.",
+            description="Delete a single file relative to the project root. Directories are rejected.",
             parameters={"type": "object", "properties": {
-                "path": {"type": "string", "description": "Path to delete"},
+                "path": {"type": "string", "description": "File path to delete (directories rejected)"},
             }, "required": ["path"]},
             tier="common", safety_level=2,
             pack="path-fallback",
-            path_extractor=lambda args: [ws.resolve_path(args.get("path", ""))],
+            path_extractor=lambda args: _safe_extract_paths([args.get("path", "")]),
         )
 
     # ============================================================
@@ -761,22 +856,27 @@ class ToolsModule(Module):
     # ============================================================
 
     def _register_project_sync_tools(self):
-        """Register project sync tools (apply_patch, sync, revert)."""
+        """Register project sync tools (apply_patch, revert)."""
         ps = self.project_sync_service
-        ws = self.workspace_service
-        def _patch_base(args):
-            if args.get("zone") == "playground":
-                return ws.workspace_root, False
-            return self.agent.write_root, True
+        agent = self.agent
 
-        def _apply_patch(target: str, edits: list, preview: bool = False,
-                         zone: str = "project") -> str:
-            args = {"zone": zone}
-            base, allow_abs = _patch_base(args)
+        def _writable_root_hint(p: str) -> str:
+            return (
+                f"Path '{p}' is outside writable root "
+                f"'{agent.write_root}'. Choose a path within "
+                f"'{agent.write_root}'."
+            )
+
+        def _apply_patch(target: str, edits: list, preview: bool = False) -> str:
             try:
-                resolved = _resolve_within(target, base=base, allow_absolute=allow_abs)
-            except ValueError as e:
+                resolved = _resolve_path(target, base=agent.project_dir)
+            except (ValueError, OSError) as e:
                 return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
+            zone_class = classify_write(resolved, agent)
+            if zone_class == "rejected":
+                return json.dumps({"status": "error",
+                                   "error": _writable_root_hint(target)},
+                                  ensure_ascii=False)
             # Snapshot trigger lives in ProjectSyncService.apply_patch
             # (see project_sync.py::_maybe_snapshot). Tool wrapper just
             # forwards the resolved path + record_changeset flag.
@@ -784,58 +884,60 @@ class ToolsModule(Module):
                 result = ps.preview_patch(resolved, edits)
             else:
                 result = ps.apply_patch(
-                    resolved, edits, record_changeset=(zone != "playground"),
+                    resolved, edits, record_changeset=(zone_class == "project"),
                 )
             return json.dumps(result, ensure_ascii=False)
+
+        def _safe_apply_patch_extract(args):
+            """Exception-safe path extraction for apply_patch (auth layer)."""
+            try:
+                return [_resolve_path(args.get("target", ""), base=agent.project_dir)]
+            except (ValueError, OSError):
+                return []
 
         self.agent.register_tool(
             name="apply_patch", func=_apply_patch,
             description=(
-                "Apply structured search/replace edits to a file. Atomic: all "
-                "edits succeed or none are written. Default zone is the project; "
-                "edits are tracked by changeset for revert. Set zone='playground' "
-                "to patch the framework's scratch cache (not tracked). "
-                "Set preview=true to validate without writing."
+                "Apply surgical match/replace edits to a file relative to the "
+                "project root. Each successful edit is tracked for revert. "
+                "Prefer this over write_files for partial changes."
             ),
             parameters={"type": "object", "properties": {
-                "target": {"type": "string", "description": "Target file path (relative to project by default)"},
+                "target": {"type": "string", "description": "Target file path (relative to project)"},
                 "edits": {"type": "array", "items": {"type": "object", "properties": {
                     "match": {"type": "string", "description": "Exact text to find"},
                     "replace": {"type": "string", "description": "Replacement text"},
                     "expected_count": {"type": "integer", "description": "Expected match count (default: 1)", "default": 1},
                 }, "required": ["match", "replace"]}, "description": "List of search/replace operations"},
                 "preview": {"type": "boolean", "description": "If true, validate edits without writing to disk", "default": False},
-                "zone": {"type": "string", "enum": ["project", "playground"], "default": "project",
-                          "description": "Where to apply. 'project' (default, changeset-tracked) | 'playground' (scratch, ephemeral)."},
             }, "required": ["target", "edits"]},
             tier="common", safety_level=2,
             path_extractor=lambda args: _safe_apply_patch_extract(args),
         )
 
-        def _safe_apply_patch_extract(args):
-            """Exception-safe path extraction for apply_patch (auth layer)."""
-            try:
-                return [_resolve_within(
-                    args.get("target", ""),
-                    base=(ws.workspace_root if args.get("zone") == "playground" else self.agent.write_root),
-                    allow_absolute=(args.get("zone") != "playground"),
-                )]
-            except (ValueError, OSError):
-                return []
-
         def _revert_changes(targets: list = None) -> str:
-            # Per D7 decision: a path that resolves to playground is never
-            # in the changeset stack (playground writes are ephemeral). Let
-            # the service surface the natural "no changeset" error.
             if targets:
                 resolved_targets = []
                 for t in targets:
                     try:
-                        resolved_targets.append(_resolve_within(
-                            t, base=self.agent.write_root, allow_absolute=True))
-                    except ValueError as e:
+                        resolved_targets.append(
+                            _resolve_path(t, base=agent.project_dir))
+                    except (ValueError, OSError) as e:
                         return json.dumps({"status": "error", "error": str(e)},
                                           ensure_ascii=False)
+                # If a target resolves to playground, surface the §3.5
+                # by-design error rather than the generic "no changeset"
+                # noise — the model needs to learn this is intentional.
+                for resolved, raw in zip(resolved_targets, targets):
+                    if classify_write(resolved, agent) == "playground":
+                        return json.dumps({
+                            "status": "error",
+                            "error": (
+                                f"No changeset for '{raw}'. Writes under "
+                                f"llama_playground/ are not tracked. "
+                                f"This is by design; do not retry."
+                            ),
+                        }, ensure_ascii=False)
                 result = ps.revert_changes(resolved_targets)
             else:
                 result = ps.revert_changes(None)
@@ -843,12 +945,7 @@ class ToolsModule(Module):
 
         self.agent.register_tool(
             name="revert_changes", func=_revert_changes,
-            description=(
-                "Revert the most recent project file change tracked by changeset. "
-                "Pass file paths (relative to project) to revert specific files, "
-                "or omit to revert the single most-recent global changeset. "
-                "Note: playground writes are ephemeral and not tracked."
-            ),
+            description="Undo recent typed writes by stack or by path.",
             parameters={"type": "object", "properties": {
                 "targets": {"type": "array", "items": {"type": "string"}, "description": "File paths to revert (relative to project). Omit to revert most recent changeset."},
             }},
@@ -861,10 +958,10 @@ class ToolsModule(Module):
             out = []
             for t in (args.get("targets") or []):
                 try:
-                    out.append(_resolve_within(t, base=self.agent.write_root, allow_absolute=True))
+                    out.append(_resolve_path(t, base=agent.project_dir))
                 except (ValueError, OSError):
                     continue
-            return out or [self.agent.write_root]  # sentinel for targets=None
+            return out or [agent.write_root]  # sentinel for targets=None
 
     # ============================================================
     # Meta-tool registration (all go to agent_registry to avoid global overwrite)

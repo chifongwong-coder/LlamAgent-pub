@@ -1,26 +1,30 @@
 """
 SnapshotService: coarse-grained safety net for v3.3 CI / auto_approve mode.
 
-Captures a one-shot directory copy of ``agent.write_root`` lazily — before
-the first project-zone write_files / apply_patch call OR the first
-``command`` tool invocation, whichever happens first. The snapshot is the
-"big-hammer" undo that complements the per-operation changeset journal
-(which only covers typed write tools): even shell-mediated changes are
-recoverable as long as the snapshot is intact.
+Captured **eagerly during agent init (single trigger point)** — see
+``LlamAgent.__init__`` calling ``ensure_snapshot()`` at the end of
+construction. This complements the per-operation changeset journal
+(which only covers typed write tools): even shell-mediated changes
+made via the ``command`` tool are recoverable as long as the snapshot
+is intact.
 
-Lifecycle:
-- Service is initialized eagerly by the agent (cheap — no fs work yet).
-- ``ensure_taken()`` is the public idempotent API. Call sites:
-    * ProjectSyncService.apply_patch / record_write_changeset (project zone)
-    * SandboxModule's `command` tool body
-- After the first successful capture, subsequent calls are no-ops.
-- LRU cleanup of older session snapshots happens on capture (not
-  shutdown) so retention is enforced even if the agent crashes.
+Scope:
+- Copies ``agent.write_root`` once.
+- **Excludes ``agent.playground_dir``** — playground is framework-level
+  ephemeral scratch (tool persistence, child agent shared area,
+  sandbox subprocess outputs). Snapshotting it inflates disk and adds
+  no recovery value because the model doesn't put intentional state
+  there. When ``edit_root`` narrows ``write_root`` to a sibling of
+  playground, the exclusion is a no-op (playground isn't in scope).
 
-Disabled state (the default for interactive mode):
+Disabled state (default in interactive mode):
 - ``ensure_taken`` is a no-op.
 - Auto-enabled when ``agent.config.auto_approve == True`` to give CI
   users a safety net automatically.
+
+LRU cleanup:
+- Older session snapshots are pruned on capture (not on shutdown) so
+  retention is enforced even if the agent crashes.
 """
 
 from __future__ import annotations
@@ -202,13 +206,33 @@ class SnapshotService:
 
     def _build_ignore_callable(self, root: str):
         """Returns an ignore function for shutil.copytree honoring the
-        gitignore directories."""
+        gitignore directories AND excluding the playground subdir
+        (commit-14: playground is ephemeral framework scratch, never
+        snapshot it)."""
         ignore_dirs = self._gitignore_dirs(root)
-        if not ignore_dirs:
+
+        # v3.3 commit-14: exclude playground subtree if it lives under
+        # write_root. When edit_root narrows write_root to a sibling
+        # of playground, the abspath comparison short-circuits naturally.
+        playground = os.path.realpath(getattr(self.agent, "playground_dir", "") or "")
+        root_real = os.path.realpath(root)
+        playground_under_root = bool(
+            playground
+            and (playground == root_real or playground.startswith(root_real + os.sep))
+        )
+
+        if not ignore_dirs and not playground_under_root:
             return None
 
-        def _ignore(_dirpath: str, names: list[str]) -> list[str]:
-            return [n for n in names if n in ignore_dirs]
+        def _ignore(dirpath: str, names: list[str]) -> list[str]:
+            skipped = [n for n in names if n in ignore_dirs]
+            if playground_under_root:
+                # Skip the exact playground basename when we're in its parent.
+                here = os.path.realpath(dirpath)
+                playground_parent = os.path.dirname(playground)
+                if here == playground_parent:
+                    skipped.append(os.path.basename(playground))
+            return skipped
 
         return _ignore
 

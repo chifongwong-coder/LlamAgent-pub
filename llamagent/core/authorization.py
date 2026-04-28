@@ -172,6 +172,16 @@ class InteractivePolicy(AuthorizationPolicy):
             )
             response = engine.confirm(request)
             if not response.allow:
+                # v3.3 §3.5: command rejection has its own do-not-retry
+                # template so the model treats user denial as terminal,
+                # not as "try a different command".
+                if tool_name == "command":
+                    return AuthorizationResult(
+                        decision=(
+                            "Command rejected by user. Do not retry the same "
+                            "command; ask user for an alternative approach."
+                        )
+                    )
                 return AuthorizationResult(
                     decision=f"Tool '{tool_name}' operation on '{item.path}' was denied."
                 )
@@ -276,6 +286,15 @@ class TaskPolicy(AuthorizationPolicy):
                 )
                 response = engine.confirm(request)
                 if not response.allow:
+                    # v3.3 §3.5: command-tool-specific rejection text.
+                    if tool_name == "command":
+                        return AuthorizationResult(
+                            decision=(
+                                "Command rejected by user. Do not retry the same "
+                                "command; ask user for an alternative approach."
+                            ),
+                            events=events,
+                        )
                     return AuthorizationResult(
                         decision=f"Tool '{tool_name}' operation on '{item.path}' was denied.",
                         events=events,

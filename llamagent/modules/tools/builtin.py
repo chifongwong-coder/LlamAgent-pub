@@ -130,21 +130,19 @@ def web_fetch(url: str) -> str:
         else:
             text = resp.text
 
-        # Truncate overly long content. 20k chars comfortably covers a
-        # typical GitHub repo page, blog post, or doc page after bs4
-        # cleaning — the old 5k cap was cutting off the license section
-        # of GitHub repo pages (the About/License sidebar renders near
-        # the end of the HTML flow, past 5k chars of README content).
-        max_len = 20000
-        if len(text) > max_len:
-            text = text[:max_len] + f"\n...(content truncated, total {len(resp.text)} characters)"
-
-        return json.dumps({
-            "url": url,
-            "status_code": resp.status_code,
-            "content": text,
-            "length": len(text),
-        }, ensure_ascii=False)
+        # v3.3 P2: no internal char truncation. Long pages flow through
+        # _truncate_observation (contract A) which persists to disk and
+        # emits a uniform hint. Returning plain text (not JSON) keeps the
+        # persisted file as raw content — line counts and ranges read
+        # back work directly. Header lines surface url/status/length
+        # without a JSON wrapper for the model to parse.
+        length = len(text)
+        return (
+            f"URL: {url}\n"
+            f"Status: {resp.status_code}\n"
+            f"Length: {length}\n\n"
+            f"{text}"
+        )
 
     except requests.exceptions.Timeout:
         return json.dumps({"error": f"Request timed out: {url}"}, ensure_ascii=False)
