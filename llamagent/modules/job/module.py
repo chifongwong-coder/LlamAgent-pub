@@ -70,9 +70,10 @@ class JobModule(Module):
                 "Execute a shell command as a managed job. "
                 "wait=True (default) blocks until completion and returns stdout/stderr. "
                 "wait=False starts the job asynchronously and returns a job_id for later polling. "
-                "cwd controls the working directory: \"workspace\" (default) uses the per-session "
-                "scratch directory under llama_playground/, \"project\" uses the project directory, "
-                "relative paths resolve from the scratch dir, absolute paths are used as-is."
+                "cwd is the working directory: omit (default) to run in a per-session "
+                "scratch directory under llama_playground/ (ephemeral); a relative path "
+                "anchors to the project root (same as read_files / write_files); an "
+                "absolute path is used as-is."
             ),
             parameters={
                 "type": "object",
@@ -82,8 +83,13 @@ class JobModule(Module):
                         "description": "Shell command to execute",
                     },
                     "cwd": {
-                        "type": "string",
-                        "description": "Working directory: \"workspace\" (default, per-session scratch under llama_playground/), \"project\", relative path, or absolute path",
+                        "type": ["string", "null"],
+                        "default": None,
+                        "description": (
+                            "Working directory. Omit (default null) to use the per-session "
+                            "scratch directory; relative paths anchor to project root; "
+                            "absolute paths are used as-is."
+                        ),
                     },
                     "wait": {
                         "type": "boolean",
@@ -98,7 +104,7 @@ class JobModule(Module):
             },
             tier="common",
             safety_level=2,
-            path_extractor=lambda args: [self._resolve_cwd(args.get("cwd", "workspace"))],
+            path_extractor=lambda args: [self._resolve_cwd(args.get("cwd"))],
         )
 
         # --- inspect_job (sl=1, common, pack=job-followup) ---
@@ -170,39 +176,38 @@ class JobModule(Module):
     # CWD resolution
     # ================================================================
 
-    def _resolve_cwd(self, cwd: str) -> str:
+    def _resolve_cwd(self, cwd: str | None) -> str:
         """
         Resolve the cwd parameter to an absolute directory path.
 
+        v3.4 R6: cwd is path-only — no special-literal handling.
+
         Resolution rules:
-        - "workspace" -> workspace root from ToolsModule, or playground_dir fallback
-        - "project"   -> agent.project_dir
-        - relative    -> resolved relative to workspace root
-        - absolute    -> used as-is
+        - None / empty string -> per-session scratch root (framework default;
+          falls back to playground_dir if ToolsModule unloaded)
+        - absolute path       -> used as-is
+        - relative path       -> joined with project_dir (same anchoring
+                                 as file tools read_files / write_files)
         """
         agent = self.agent
 
-        # Get workspace root (soft dependency on ToolsModule)
-        workspace_root = None
-        tools_mod = agent.get_module("tools")
-        if tools_mod is not None:
-            ws = getattr(tools_mod, "workspace_service", None)
-            if ws is not None:
-                workspace_root = getattr(ws, "workspace_root", None)
+        if cwd is None or cwd == "":
+            # Default: per-session scratch root from ToolsModule
+            tools_mod = agent.get_module("tools")
+            if tools_mod is not None:
+                ss = getattr(tools_mod, "scratch_service", None)
+                if ss is not None:
+                    scratch_root = getattr(ss, "scratch_root", None)
+                    if scratch_root is not None:
+                        return os.path.realpath(scratch_root)
+            # Fallback: playground_dir directly when ToolsModule unavailable
+            return os.path.realpath(getattr(agent, "playground_dir", os.getcwd()))
 
-        # Fallback to playground_dir if ToolsModule unavailable
-        if workspace_root is None:
-            workspace_root = getattr(agent, "playground_dir", os.getcwd())
-
-        if cwd == "workspace":
-            return os.path.realpath(workspace_root)
-        elif cwd == "project":
-            return os.path.realpath(agent.project_dir)
-        elif os.path.isabs(cwd):
+        if os.path.isabs(cwd):
             return os.path.realpath(cwd)
-        else:
-            # Relative path -> resolve from workspace root
-            return os.path.realpath(os.path.join(workspace_root, cwd))
+
+        # Relative path -> anchor to project_dir (matches file-tool semantics)
+        return os.path.realpath(os.path.join(agent.project_dir, cwd))
 
     # ================================================================
     # Tool implementations
@@ -211,7 +216,7 @@ class JobModule(Module):
     def _start_job(
         self,
         command: str,
-        cwd: str = "workspace",
+        cwd: str | None = None,
         wait: bool = True,
         profile: str = "default",
     ) -> str:

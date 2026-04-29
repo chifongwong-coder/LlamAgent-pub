@@ -86,7 +86,7 @@ class TestCrossModule:
         assert "glob_files" in schema_names
         assert "move_path" in schema_names
 
-        # Skill match still works (workspace-ops requires path-fallback).
+        # Skill match still works (path-ops requires path-fallback).
         skill_mod.on_context("move some files around", "")
         # Whether the skill activated depends on tag matching; either
         # outcome is fine — the path-fallback pack is already active.
@@ -193,7 +193,7 @@ class TestCrossModule:
         context2 = tools_mod.on_context("create a tool", context2)
         context2 = skill_mod.on_context("create a tool", context2)
 
-        # v3.3 WORKSPACE_GUIDE header was rewritten — assert a stable
+        # v3.3 FILE_TOOL_GUIDE header was rewritten — assert a stable
         # substring from the new body instead of the old "[File Tool
         # Guidelines]" bracketed header.
         assert "All paths are relative" in context2

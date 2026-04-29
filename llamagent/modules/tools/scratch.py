@@ -1,5 +1,5 @@
 """
-WorkspaceService: framework scratch directory management.
+ScratchService: framework scratch directory management.
 
 Plain service class (not a Module), instantiated by
 ToolsModule.on_attach(). Owns the per-session scratch tree under
@@ -10,14 +10,14 @@ Directory layout under playground_dir::
 
     <playground_dir>/
       sessions/
-        <workspace_id>/
-          shared/            <-- default workspace (SimpleReAct / plain chat)
+        <scratch_id>/
+          shared/            <-- default scratch root (SimpleReAct / plain chat)
           tasks/
             <task_id>/       <-- task-level isolation (PlanReAct / ChildAgent)
 
 v3.3: the model-facing path resolution lives at module scope as
 :func:`_resolve_path` + :func:`classify_write` (no ``project:`` prefix,
-no ``zone`` parameter). The legacy ``WorkspaceService.resolve_path``
+no ``zone`` parameter). The legacy ``ScratchService.resolve_path``
 remains as an internal helper used by framework code that writes
 into per-session scratch dirs directly.
 """
@@ -42,8 +42,8 @@ def _resolve_within(raw: str, *, base: str, allow_absolute: bool = True) -> str:
 
     Used by v3.3 file-tool path_extractors as the single, simple
     write-boundary primitive. Distinct from
-    :meth:`WorkspaceService.resolve_path` which still understands the
-    legacy ``project:`` prefix for backward compatibility.
+    :meth:`ScratchService.resolve_path` which resolves relative to
+    the per-session scratch root.
 
     Args:
         raw: Caller-supplied raw path string.
@@ -123,7 +123,7 @@ def classify_write(resolved_path: str, agent: LlamAgent) -> str:
     return "rejected"
 
 
-class WorkspaceService:
+class ScratchService:
     """Framework scratch directory manager for one LlamAgent instance.
 
     Provides session-scoped scratch directories under
@@ -135,18 +135,18 @@ class WorkspaceService:
         agent: The LlamAgent instance this service is attached to.
     """
 
-    def __init__(self, agent: LlamAgent, workspace_id: str | None = None) -> None:
+    def __init__(self, agent: LlamAgent, scratch_id: str | None = None) -> None:
         """
-        Initialize the WorkspaceService.
+        Initialize the ScratchService.
 
         Args:
-            agent: The LlamAgent instance that owns this workspace.
-            workspace_id: Optional external workspace identifier (e.g. API
+            agent: The LlamAgent instance that owns this scratch space.
+            scratch_id: Optional external scratch identifier (e.g. API
                 session_id). When None, a unique id is lazily generated on
-                first access via the ``workspace_id`` property.
+                first access via the ``scratch_id`` property.
         """
         self.agent = agent
-        self._workspace_id: str | None = workspace_id
+        self._scratch_id: str | None = scratch_id
 
     # ================================================================
     # Helpers
@@ -162,27 +162,27 @@ class WorkspaceService:
     # ================================================================
 
     @property
-    def workspace_id(self) -> str:
+    def scratch_id(self) -> str:
         """
-        Return the workspace identifier, lazily generating one if needed.
+        Return the scratch identifier, lazily generating one if needed.
 
         The id is a 32-character hex string (uuid4) when auto-generated.
         Once set (either externally or lazily), it does not change for the
         lifetime of this service instance.
         """
-        if self._workspace_id is None:
-            self._workspace_id = uuid.uuid4().hex
-            logger.info("Workspace id generated: %s", self._workspace_id)
-        return self._sanitize_id(self._workspace_id)
+        if self._scratch_id is None:
+            self._scratch_id = uuid.uuid4().hex
+            logger.info("Scratch id generated: %s", self._scratch_id)
+        return self._sanitize_id(self._scratch_id)
 
     @property
-    def workspace_root(self) -> str:
+    def scratch_root(self) -> str:
         """
-        Return the current workspace directory path, creating it if needed.
+        Return the current scratch directory path, creating it if needed.
 
         Routing logic:
-        - No ``_current_task_id`` on agent -> ``<playground>/sessions/<wid>/shared/``
-        - Has ``_current_task_id`` -> ``<playground>/sessions/<wid>/tasks/<task_id>/``
+        - No ``_current_task_id`` on agent -> ``<playground>/sessions/<sid>/shared/``
+        - Has ``_current_task_id`` -> ``<playground>/sessions/<sid>/tasks/<task_id>/``
 
         The directory is created with ``os.makedirs(exist_ok=True)`` so
         callers can assume the returned path exists.
@@ -193,7 +193,7 @@ class WorkspaceService:
             root = os.path.join(
                 self.agent.playground_dir,
                 "sessions",
-                self.workspace_id,
+                self.scratch_id,
                 "tasks",
                 self._sanitize_id(task_id),
             )
@@ -201,7 +201,7 @@ class WorkspaceService:
             root = os.path.join(
                 self.agent.playground_dir,
                 "sessions",
-                self.workspace_id,
+                self.scratch_id,
                 "shared",
             )
 
@@ -215,10 +215,9 @@ class WorkspaceService:
     def resolve_path(self, raw_path: str) -> str:
         """
         Resolve a raw path string to an absolute, real filesystem path,
-        relative to ``workspace_root`` by default.
+        relative to ``scratch_root`` by default.
 
-        v3.3: legacy ``project:`` prefix support has been removed (B2
-        decision); the model-facing tools auto-classify paths via
+        v3.3: the model-facing tools auto-classify paths via
         :func:`classify_write` instead of selecting via a ``zone``
         kwarg. This method is retained only for framework-internal
         callers writing into per-session scratch directories. New
@@ -226,7 +225,7 @@ class WorkspaceService:
 
         Resolution rules:
         - Absolute path -> used as-is (after realpath)
-        - Relative path -> relative to ``workspace_root``
+        - Relative path -> relative to ``scratch_root``
 
         Args:
             raw_path: The raw path string from a tool argument.
@@ -237,7 +236,7 @@ class WorkspaceService:
         if os.path.isabs(raw_path):
             return os.path.realpath(raw_path)
         return os.path.realpath(
-            os.path.join(self.workspace_root, raw_path)
+            os.path.join(self.scratch_root, raw_path)
         )
 
     def resolve_paths(self, raw_paths: list[str]) -> list[str]:
@@ -256,33 +255,23 @@ class WorkspaceService:
     # Boundary check
     # ================================================================
 
-    def ensure_in_workspace(self, resolved_path: str) -> bool:
+    def ensure_in_scratch_root(self, resolved_path: str) -> bool:
         """
-        Check whether a resolved path is inside the current workspace root.
+        Check whether a resolved path is inside the current scratch root.
 
-        This is used by tools that require source paths to stay within the
-        workspace (used by other tools that gate paths to the playground area).
+        Used by framework callers that need to gate paths to the
+        per-session scratch area.
 
         Args:
             resolved_path: An already-resolved absolute path (typically the
                 output of :meth:`resolve_path`).
 
         Returns:
-            True if the path is inside (or equal to) the workspace root,
+            True if the path is inside (or equal to) the scratch root,
             False otherwise.
         """
-        root = self.workspace_root
+        root = self.scratch_root
         return resolved_path == root or resolved_path.startswith(root + os.sep)
-
-    # ================================================================
-    # Workspace-only restriction
-    # ================================================================
-
-    # v3.3 commit-13b: resolve_path_workspace_only deleted. Path-fallback
-    # tools now share the core 5's resolution: _resolve_path against
-    # project_dir + classify_write decides routing. This helper had
-    # workspace-first semantics that v3.3 rejects (the model writes to
-    # project_dir, not workspace).
 
     # ================================================================
     # Lifecycle
@@ -290,9 +279,9 @@ class WorkspaceService:
 
     def cleanup(self) -> None:
         """
-        Remove the entire workspace session directory.
+        Remove the entire scratch session directory.
 
-        Deletes ``<playground_dir>/sessions/<workspace_id>/`` and all its
+        Deletes ``<playground_dir>/sessions/<scratch_id>/`` and all its
         contents.  Called during agent shutdown to free disk space.
 
         Silently ignores errors (e.g. directory already removed, permission
@@ -301,15 +290,15 @@ class WorkspaceService:
         session_dir = os.path.join(
             self.agent.playground_dir,
             "sessions",
-            self.workspace_id,
+            self.scratch_id,
         )
         if os.path.isdir(session_dir):
             try:
                 shutil.rmtree(session_dir)
-                logger.info("Workspace session cleaned up: %s", session_dir)
+                logger.info("Scratch session cleaned up: %s", session_dir)
             except OSError as e:
                 logger.warning(
-                    "Failed to clean up workspace session %s: %s",
+                    "Failed to clean up scratch session %s: %s",
                     session_dir,
                     e,
                 )

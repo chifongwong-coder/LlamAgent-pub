@@ -146,7 +146,9 @@ class ProcessRunnerBackend(AgentRunnerBackend):
             "system_prompt": spec.system_prompt or f"You are a {spec.role}.",
             "project_dir": getattr(self._parent_config, "project_dir", None) if self._parent_config else None,
             "playground_dir": getattr(self._parent_config, "playground_dir", None) if self._parent_config else None,
-            "workspace_mode": spec.policy.workspace_mode if spec.policy else "sandbox",
+            "share_parent_project_dir": (
+                spec.policy.share_parent_project_dir if spec.policy else False
+            ),
             "parent_playground_dir": (
                 getattr(self._parent_config, "playground_dir", None)
                 if self._parent_config else None
@@ -171,9 +173,13 @@ class ProcessRunnerBackend(AgentRunnerBackend):
             from dataclasses import asdict
             data["execution_policy"] = asdict(spec.policy.execution_policy)
 
-        # v2.7: serialize parent scopes for project mode child scope inheritance
-        workspace_mode = spec.policy.workspace_mode if spec.policy else "sandbox"
-        if workspace_mode == "project" and self._parent_agent is not None:
+        # v2.7: serialize parent scopes only when child shares parent project_dir
+        # (R3: was workspace_mode == "project" pre-v3.4; default flips to False
+        # at this site, matching the dict-key default above)
+        share_parent = (
+            spec.policy.share_parent_project_dir if spec.policy else False
+        )
+        if share_parent and self._parent_agent is not None:
             try:
                 parent_scopes = self._parent_agent._authorization_engine.export_scopes()
                 if parent_scopes:

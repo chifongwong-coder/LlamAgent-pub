@@ -39,7 +39,14 @@ class AgentExecutionPolicy:
     max_delegation_depth: int = 1
     history_mode: str = "none"
     result_mode: str = "text"
-    workspace_mode: str = "sandbox"  # "sandbox" | "project"
+    # v3.4 R3: replaces the old workspace_mode str enum. Default False
+    # means the child gets an isolated project_dir under the parent's
+    # playground (was workspace_mode="sandbox"). True means the child
+    # shares the parent's project_dir + scopes (was workspace_mode=
+    # "project"). Avoids the old name's three concept-name collisions
+    # ("sandbox" with SandboxModule, "project" with classify_write's
+    # zone, "workspace" itself being retired in v3.4).
+    share_parent_project_dir: bool = False
     model: str | None = None  # None = inherit parent's model
 
 
@@ -76,35 +83,35 @@ ROLE_POLICIES: dict[str, AgentExecutionPolicy] = {
         tool_allowlist=["web_search", "web_fetch", "search_knowledge", "search_text", "read_files"],
         budget=Budget(max_llm_calls=20, max_time_seconds=300),
         can_spawn_children=False,
-        workspace_mode="sandbox",
+        share_parent_project_dir=False,
     ),
     "writer": AgentExecutionPolicy(
         tool_allowlist=["read_files", "write_files", "apply_patch"],
         budget=Budget(max_llm_calls=15, max_time_seconds=300),
         can_spawn_children=False,
-        workspace_mode="sandbox",
+        share_parent_project_dir=False,
     ),
     "analyst": AgentExecutionPolicy(
         tool_allowlist=["read_files", "search_text", "web_search", "search_knowledge"],
         budget=Budget(max_llm_calls=15, max_time_seconds=300),
         can_spawn_children=False,
-        workspace_mode="sandbox",
+        share_parent_project_dir=False,
     ),
     "coder": AgentExecutionPolicy(
         tool_allowlist=["read_files", "write_files", "apply_patch", "start_job", "glob_files", "search_text"],
         execution_policy=POLICY_SANDBOXED_CODER if _SANDBOX_AVAILABLE else None,
         budget=Budget(max_llm_calls=30, max_time_seconds=600),
         can_spawn_children=False,
-        workspace_mode="project",
+        share_parent_project_dir=True,
     ),
     "delegate": AgentExecutionPolicy(
         tool_allowlist=[],
         budget=Budget(max_llm_calls=1, max_time_seconds=30),
         can_spawn_children=False,
-        workspace_mode="sandbox",
+        share_parent_project_dir=False,
     ),
     "worker": AgentExecutionPolicy(
-        workspace_mode="project",
+        share_parent_project_dir=True,
         budget=Budget(max_llm_calls=30, max_time_seconds=600),
         can_spawn_children=False,
     ),

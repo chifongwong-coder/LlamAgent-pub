@@ -1,11 +1,9 @@
-"""Transitional adapter: parse the current string-based chat_stream into
-structured events (v3.0.3).
+"""Adapter: parse the string-based chat_stream into structured events (v3.0.3).
 
 The framework's `agent.chat_stream()` yields strings that mix LLM content
 with control markers (`[Calling foo...]`, `[foo done]`, `[Error: ...]`, ...).
 This module converts that stream into the typed events defined in
-`stream_protocol`. When the framework natively emits structured events
-(v3.1+), callers can swap the data source and keep the same schema.
+`stream_protocol`.
 
 Scanning algorithm:
 - Accumulate chunks into a buffer.
@@ -25,7 +23,6 @@ Known limitation: the scanner cuts each marker at the first `]`, so markers
 whose payload contains `]` get truncated. In practice this only affects
 `[Error: ...]` when an exception's string representation contains `]`;
 the truncated tail is preserved as plain content (nothing is dropped).
-Native event emission (v3.1+) will make this moot.
 """
 
 import re

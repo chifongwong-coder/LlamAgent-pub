@@ -26,11 +26,22 @@ RAG_GUIDE = """\
 - Search results may contain multiple entries; filter for the most relevant ones
 - For common knowledge questions, answer directly without searching the knowledge base"""
 
+# Why the guide below is so explicit ("MUST call", "Do NOT claim..."):
+# Empirical finding — small local models (e.g. qwen3.5:2b with thinking
+# disabled) tend to *hallucinate* that they already consulted the knowledge
+# base ("I cannot find any information about X in the available knowledge
+# base") without ever actually invoking list_knowledge. A descriptive guide
+# ("You can browse...") yielded 0% routing on kb-01 (US-Iran 2026 fictional
+# event); adding the imperative + anti-hallucination clause raised it to
+# ~40%. The remainder is model capability ceiling, not a framework gap.
 FS_RETRIEVE_GUIDE = """\
-[Knowledge Base] You can browse documents in the local knowledge base.
-- Use list_knowledge to see all available documents and their descriptions.
-- Use list_entries to see the section headings within one or more documents.
-- Use read_document to read a document (full body, or a specific section).
+[Knowledge Base] A local knowledge base is loaded with user-specific documents that are NOT in your training data.
+- IMPORTANT: When the user asks about specific facts, dates, names, events, or domain knowledge that you do NOT have a confident answer for, you MUST call list_knowledge FIRST before saying "I don't know" or guessing.
+- Do NOT claim you have already checked the knowledge base unless you have actually called one of these tools in this turn.
+- Tools available:
+  * list_knowledge — see all available documents and their descriptions.
+  * list_entries — see the section headings within one or more documents.
+  * read_document — read a document (full body, or a specific section).
 - Browse step by step: documents -> entries -> content."""
 
 

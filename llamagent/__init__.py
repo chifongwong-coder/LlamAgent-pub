@@ -16,6 +16,17 @@ Core design:
 A bare LlamAgent is a fully functional conversational Agent. Each
 module loaded grants a new capability.
 
+v3.4 highlights (terminology cleanup):
+- rename_path(target, new_name) added to path-fallback pack for
+  in-place renames; move_path now rejects same-parent calls.
+- start_job cwd is path-only (None → scratch root, absolute → as-is,
+  relative → project_dir). No special string literals.
+- AgentExecutionPolicy.workspace_mode removed; replaced by
+  share_parent_project_dir: bool (False = isolated child).
+- Per-session scratch cache renamed: WorkspaceService → ScratchService;
+  workspace_root → scratch_root; Config.workspace_id → scratch_id.
+- builtin skill workspace-ops renamed to path-ops (hard break, no alias).
+
 v3.3 highlights:
 - Model never sees a `zone` parameter or path prefix; the framework
   auto-classifies write paths into playground / project / rejected
@@ -25,9 +36,9 @@ v3.3 highlights:
   are saved under llama_playground/tool_results/ and the model
   reads them back via read_files. read_files has an internal cap so
   re-reads can't cycle.
-- Every typed write (write_files / apply_patch / move_path /
-  copy_path / delete_path) is recorded as a Changeset and can be
-  rolled back via revert_changes.
+- Every typed write (write_files / apply_patch / rename_path /
+  move_path / copy_path / delete_path) is recorded as a Changeset and
+  can be rolled back via revert_changes.
 
 Usage:
     from llamagent import LlamAgent, Config, Module
@@ -35,7 +46,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "3.3"
+__version__ = "3.4"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager

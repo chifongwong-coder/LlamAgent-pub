@@ -1192,7 +1192,7 @@ def test_workspace_sandbox_mode(bare_agent, mock_llm_client, tmp_path):
     module = ChildAgentModule()
     bare_agent.register_module(module)
 
-    # Spawn sandbox-mode child (writer role defaults to workspace_mode="sandbox")
+    # Spawn isolated child (writer role defaults to share_parent_project_dir=False)
     result = bare_agent.call_tool("spawn_child", {"task": "write a draft", "role": "writer"})
     assert isinstance(result, str)
 
@@ -1392,7 +1392,7 @@ def test_project_child_inherit_scope(bare_agent, mock_llm_client, tmp_path):
     # Spawn a project child
     spec = ChildAgentSpec(
         task="project task", role="worker",
-        policy=AgentExecutionPolicy(workspace_mode="project"),
+        policy=AgentExecutionPolicy(share_parent_project_dir=True),
     )
     child = module._create_child_agent(spec)
 
@@ -3521,9 +3521,9 @@ def test_continuous_child_sandbox_no_parent_scope(bare_agent, mock_llm_client, t
         path_prefixes=[str(tmp_path)],
     ))
 
-    # Create a continuous child with sandbox workspace_mode
+    # Create a continuous child with isolated project_dir (formerly workspace_mode="sandbox")
     sandbox_policy = AgentExecutionPolicy(
-        workspace_mode="sandbox",
+        share_parent_project_dir=False,
         budget=Budget(max_llm_calls=5, max_time_seconds=60),
     )
     spec = ChildAgentSpec(
@@ -3543,9 +3543,9 @@ def test_continuous_child_sandbox_no_parent_scope(bare_agent, mock_llm_client, t
             assert prefix not in parent_paths, \
                 f"Sandbox child should not inherit parent scope path: {prefix}"
 
-    # Project mode child SHOULD inherit parent scopes
+    # share_parent_project_dir=True child SHOULD inherit parent scopes
     project_policy = AgentExecutionPolicy(
-        workspace_mode="project",
+        share_parent_project_dir=True,
         budget=Budget(max_llm_calls=5, max_time_seconds=60),
     )
     spec_project = ChildAgentSpec(

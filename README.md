@@ -41,7 +41,7 @@ agent.register_module(PlanningModule())   # DAG-based task decomposition
 
 **Smart tool exposure** — Not all tools need to be visible all the time. The pack system dynamically shows the right tools at the right moment — triggered by task context, skills, or runtime state. Small models see a clean 12-tool surface, not a wall of 40 schemas.
 
-**Two-tier write safety (v3.3)** — Every project write (`write_files`, `apply_patch`, plus path-fallback `move_path` / `copy_path` / `delete_path`) is tracked in a Changeset journal for instant `revert_changes` rollback. In CI / `auto_approve=True` mode, a coarse snapshot of the project is captured at agent startup as a manual-restore safety net. Configure `edit_root` to narrow the agent's write boundary to a sub-directory; the model physically can't write outside it. The framework auto-classifies paths: writes under `llama_playground/` route to ephemeral scratch (no Changeset, never snapshotted), writes inside the write boundary are tracked, anything outside is rejected — no `zone` parameter for the model to choose, just paths.
+**Two-tier write safety (v3.3)** — Every project write (`write_files`, `apply_patch`, plus path-fallback `rename_path` / `move_path` / `copy_path` / `delete_path`) is tracked in a Changeset journal for instant `revert_changes` rollback. In CI / `auto_approve=True` mode, a coarse snapshot of the project is captured at agent startup as a manual-restore safety net. Configure `edit_root` to narrow the agent's write boundary to a sub-directory; the model physically can't write outside it. The framework auto-classifies paths: writes under `llama_playground/` route to ephemeral scratch (no Changeset, never snapshotted), writes inside the write boundary are tracked, anything outside is rejected — no `zone` parameter for the model to choose, just paths.
 
 **Memory that actually works** — Not text blobs in a vector DB. LlamAgent extracts structured facts from conversations, deduplicates them, resolves conflicts when information changes, and auto-recalls relevant memories each turn. Periodic consolidation cleans up outdated or redundant facts automatically.
 
@@ -64,7 +64,7 @@ agent.register_module(PlanningModule())   # DAG-based task decomposition
 | **Compression** | Context management — tool result compression (4 strategies), thinking stripping, LLM summarization. |
 | **Persistence** | Save and restore conversation history across restarts. |
 | **Sandbox** | Isolated execution backends for high-risk tools. Secure by default — no sandbox, no shell. |
-| **Tools** | 5 core file tools (read/write/patch/list/revert) + path-fallback pack (move/copy/delete/glob/search/stat/temp) auto-activated when no shell tool. Auto-classified write zones (project / playground / rejected); no `zone` parameter. Changeset-tracked revert for every typed write. |
+| **Tools** | 5 core file tools (read/write/patch/list/revert) + path-fallback pack (rename/move/copy/delete/glob/search/stat/temp) auto-activated when no shell tool. Auto-classified write zones (project / playground / rejected); no `zone` parameter. Changeset-tracked revert for every typed write. |
 | **Job** | Run shell commands (sync/async) via sandbox. Inspect, wait, cancel running jobs. |
 | **Retrieval** | Load documents (code, markdown, text), hybrid search (vector + BM25), LLM reranking. |
 | **Memory** | Structured fact memory — extract, deduplicate, resolve conflicts, auto-recall. Periodic consolidation. |
@@ -72,7 +72,7 @@ agent.register_module(PlanningModule())   # DAG-based task decomposition
 | **Reflection** | Score results, extract lessons from failures, trigger replanning. Drives skill improvement. |
 | **Planning** | SimpleReAct for quick tasks. PlanReAct with DAG decomposition for complex multi-step work. |
 | **MCP** | Connect to external Model Context Protocol servers. |
-| **Child Agent** | Spawn constrained sub-agents with budgets, tool allowlists, and independent workspaces. |
+| **Child Agent** | Spawn constrained sub-agents with budgets, tool allowlists, and isolated child directories. |
 
 Modules share a **retrieval layer** with swappable embedding models and vector backends — no module-level lock-in. A zero-dependency **FS backend** (markdown files) works out of the box.
 
@@ -208,7 +208,7 @@ See [`examples/`](examples/) for runnable tutorials:
 | 06 | `sandbox.py` | Isolated execution |
 | 07 | `child_agent.py` | Constrained sub-agents |
 | 08 | `skill.py` | Task playbooks |
-| 09 | `workspace_and_jobs.py` | Workspace tools, project sync, jobs |
+| 09 | `workspace_and_jobs.py` | File tools (path-fallback pack), project sync, jobs |
 
 ## Project Structure
 

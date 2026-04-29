@@ -47,7 +47,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from llamagent.core.agent import LlamAgent
-    from llamagent.modules.tools.workspace import WorkspaceService
+    from llamagent.modules.tools.scratch import ScratchService
 
 logger = logging.getLogger(__name__)
 
@@ -126,22 +126,22 @@ class ProjectSyncService:
 
     Attributes:
         agent: The LlamAgent instance this service is attached to.
-        workspace_service: The WorkspaceService for workspace path resolution.
+        scratch_service: The ScratchService for per-session scratch path resolution.
     """
 
     def __init__(
-        self, agent: LlamAgent, workspace_service: WorkspaceService
+        self, agent: LlamAgent, scratch_service: ScratchService
     ) -> None:
         """
         Initialize the ProjectSyncService.
 
         Args:
             agent: The LlamAgent instance that owns this service.
-            workspace_service: The WorkspaceService used for workspace
-                path resolution (used by changeset/write helpers).
+            scratch_service: The ScratchService used for per-session
+                scratch path resolution (used by changeset/write helpers).
         """
         self.agent = agent
-        self.workspace_service = workspace_service
+        self.scratch_service = scratch_service
         self._changesets: list[Changeset] = []
         # v3.3: paths whose changesets were dropped by the LRU cap;
         # used by revert_changes to surface a precise error.

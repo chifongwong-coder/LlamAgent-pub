@@ -1575,6 +1575,8 @@ class LlamAgent:
         steps = 0
         last_action: tuple | None = None  # Previous (name, args_json)
         duplicate_count = 0
+        last_tool_result: str | None = None  # For error-aware dedup
+        dedup_hint_given = False  # Track whether we've already warned about this duplicate run
         last_text_response = ""  # Record the last successful text response
         total_start = time.time()  # v2.9.9: cumulative timeout baseline
 
@@ -1645,23 +1647,59 @@ class LlamAgent:
                     tool_args = {}
                     logger.warning("Tool argument JSON parsing failed: %s", tool_call.function.arguments)
 
-                # Duplicate detection
+                # Error-aware duplicate detection (v3.4 R7):
+                # - Identical (name, args) after a SUCCESSFUL previous result → true duplicate
+                # - Identical (name, args) after an ERROR result → legitimate retry, allow
+                # - First time hitting threshold → inject HINT as tool_result, skip dispatch
+                # - Second time still duplicating → abort
                 current_action = (tool_name, json.dumps(tool_args, sort_keys=True))
-                if current_action == last_action:
+                is_duplicate = current_action == last_action
+                prev_was_error = self._is_error_result(last_tool_result)
+
+                if is_duplicate and prev_was_error:
+                    # Legitimate retry on transient failure — reset dedup counter
+                    duplicate_count = 1
+                    dedup_hint_given = False
+                elif is_duplicate:
                     duplicate_count += 1
                     if self.config.max_duplicate_actions != -1 and duplicate_count >= self.config.max_duplicate_actions:
-                        logger.warning(
-                            "Duplicate action detected (%s), %d consecutive times, aborting",
-                            tool_name,
-                            duplicate_count,
-                        )
-                        self._react_trace = messages[initial_len:] if len(messages) > initial_len else None
-                        return ReactResult(
-                            text=f"Duplicate action detected ({tool_name}), execution aborted.",
-                            status="error", steps_used=steps)
+                        if not dedup_hint_given:
+                            # First intervention: hint instead of abort
+                            hint_msg = (
+                                f"DUPLICATE CALL: you just called {tool_name} with the "
+                                f"same arguments and got a successful result. Calling it "
+                                f"again with identical arguments returns the same data and "
+                                f"won't help. Either (a) use the data you already have to "
+                                f"answer the user, or (b) try different arguments / a "
+                                f"different tool / a different approach."
+                            )
+                            logger.info(
+                                "Duplicate action %s — giving hint (1st intervention)",
+                                tool_name,
+                            )
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": hint_msg,
+                            })
+                            last_tool_result = hint_msg
+                            dedup_hint_given = True
+                            continue  # skip dispatch, next tool_call or back to LLM
+                        else:
+                            # Hint already given, model still duplicating → abort
+                            logger.warning(
+                                "Duplicate action detected (%s), %d consecutive times after hint, aborting",
+                                tool_name,
+                                duplicate_count,
+                            )
+                            self._react_trace = messages[initial_len:] if len(messages) > initial_len else None
+                            return ReactResult(
+                                text=f"Duplicate action detected ({tool_name}), execution aborted.",
+                                status="error", steps_used=steps)
                 else:
                     last_action = current_action
                     duplicate_count = 1
+                    dedup_hint_given = False
 
                 # --- Action: dispatch execution ---
                 try:
@@ -1673,6 +1711,7 @@ class LlamAgent:
 
                 # --- Observation: truncate overly long results ---
                 result = self._truncate_observation(result, tool_name=tool_name, tool_args=tool_args)
+                last_tool_result = result  # Track for error-aware dedup on next iteration
 
                 # Append tool message
                 messages.append({
@@ -1759,6 +1798,8 @@ class LlamAgent:
             steps = 0
             last_action: tuple | None = None
             duplicate_count = 0
+            last_tool_result: str | None = None
+            dedup_hint_given = False
             total_start = time.time()  # v2.9.9: cumulative timeout baseline
 
             while self.config.max_react_steps == -1 or steps < self.config.max_react_steps:
@@ -1825,16 +1866,39 @@ class LlamAgent:
                     except json.JSONDecodeError:
                         tool_args = {}
 
-                    # Duplicate detection
+                    # Error-aware duplicate detection (v3.4 R7)
                     current_action = (tool_name, json.dumps(tool_args, sort_keys=True))
-                    if current_action == last_action:
+                    is_duplicate = current_action == last_action
+                    prev_was_error = self._is_error_result(last_tool_result)
+
+                    if is_duplicate and prev_was_error:
+                        # Legitimate retry on transient failure
+                        duplicate_count = 1
+                        dedup_hint_given = False
+                    elif is_duplicate:
                         duplicate_count += 1
                         if self.config.max_duplicate_actions != -1 and duplicate_count >= self.config.max_duplicate_actions:
-                            yield f"\n[Duplicate action detected ({tool_name}), aborting]"
-                            return
+                            if not dedup_hint_given:
+                                hint_msg = (
+                                    f"DUPLICATE CALL: you just called {tool_name} with the "
+                                    f"same arguments and got a successful result. Calling it "
+                                    f"again with identical arguments returns the same data and "
+                                    f"won't help. Either (a) use the data you already have to "
+                                    f"answer the user, or (b) try different arguments / a "
+                                    f"different tool / a different approach."
+                                )
+                                yield f"\n[Duplicate {tool_name}; reminding model]\n"
+                                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": hint_msg})
+                                last_tool_result = hint_msg
+                                dedup_hint_given = True
+                                continue
+                            else:
+                                yield f"\n[Duplicate action detected ({tool_name}), aborting]"
+                                return
                     else:
                         last_action = current_action
                         duplicate_count = 1
+                        dedup_hint_given = False
 
                     yield f"\n[Calling {tool_name}...]\n"
                     try:
@@ -1844,6 +1908,7 @@ class LlamAgent:
                         logger.error("Tool '%s' dispatch error: %s", tool_name, e)
                         result = f"Tool execution error: {e}"
                     result = self._truncate_observation(result, tool_name=tool_name, tool_args=tool_args)
+                    last_tool_result = result
                     yield f"[{tool_name} done]\n"
 
                     messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
@@ -1880,6 +1945,49 @@ class LlamAgent:
                     tc["function"]["name"] += delta.function.name
                 if hasattr(delta.function, "arguments") and delta.function.arguments:
                     tc["function"]["arguments"] += delta.function.arguments
+
+    @staticmethod
+    def _is_error_result(result: str | None) -> bool:
+        """Heuristic check: did the previous tool call return an error?
+
+        Used by error-aware dedup (v3.4 R7) to allow legitimate retries
+        on transient failures (network timeouts, rate limits, file locks)
+        without triggering the duplicate-action abort.
+
+        Returns True if the result looks like an error/failure, False if
+        it looks like a successful result.
+        """
+        if not result:
+            return True
+        lowered = result.strip().lower()
+        if not lowered:
+            return True
+        # Common error prefixes (matches our own dispatch error format
+        # "Tool 'X' execution error: ..." plus typical API/network errors)
+        error_prefixes = (
+            "error",
+            "tool execution error",
+            "tool '",
+            "failed",
+            "timed out",
+            "timeout",
+            "connection refused",
+            "connection error",
+            "permission denied",
+            "rate limit",
+            "no such file",
+            "not found",
+            "exception",
+            "operation aborted",
+        )
+        for prefix in error_prefixes:
+            if lowered.startswith(prefix):
+                return True
+        # "execution error" anywhere in the first 200 chars catches our
+        # framework-emitted error format regardless of exact prefix
+        if "execution error" in lowered[:200]:
+            return True
+        return False
 
     def _truncate_observation(
         self,

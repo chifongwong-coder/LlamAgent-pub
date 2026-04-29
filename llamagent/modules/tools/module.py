@@ -17,13 +17,15 @@ Responsibilities:
       playground (no changeset), project (changeset-tracked), or
       rejected (outside writable root). No `zone` parameter.
     * Pack `path-fallback` (auto-activated when neither `command`
-      nor `start_job` is registered): move_path, copy_path,
-      delete_path, glob_files, search_text, stat_paths,
-      create_temp_file. Destructive 3 (move/copy/delete) register
-      changesets when targeting write_root; delete_path rejects
-      directories and binary files. Other packs (web / toolsmith /
-      multi-agent / job-followup) follow the same pack mechanism.
-- WORKSPACE_GUIDE + CAPABILITY_HINT_BLOCK injection via on_context.
+      nor `start_job` is registered): rename_path, move_path,
+      copy_path, delete_path, glob_files, search_text, stat_paths,
+      create_temp_file. rename_path renames in-place (basename only);
+      move_path crosses directories (same-parent rejected). Destructive
+      3 (move/copy/delete) register changesets when targeting write_root;
+      delete_path rejects directories and binary files. Other packs
+      (web / toolsmith / multi-agent / job-followup) follow the same
+      pack mechanism.
+- FILE_TOOL_GUIDE + CAPABILITY_HINT_BLOCK injection via on_context.
 """
 
 import base64
@@ -38,7 +40,7 @@ import tempfile
 from llamagent.core.agent import Module
 from llamagent.modules.tools.registry import ToolRegistry, global_registry
 from llamagent.modules.tools.agent_tools import AgentToolManager
-from llamagent.modules.tools.workspace import _resolve_within, _resolve_path, classify_write
+from llamagent.modules.tools.scratch import _resolve_within, _resolve_path, classify_write
 
 logger = logging.getLogger(__name__)
 
@@ -48,13 +50,19 @@ COMMON_STORE_ID = "__common__"
 # File-tool behavioral guidelines injected via on_context (v3.3 surface).
 # This block is the model's primary reference for file-tool semantics; mock
 # tests in tests/test_workspace.py assert exact substrings — change carefully.
-WORKSPACE_GUIDE = """\
+FILE_TOOL_GUIDE = """\
 You can read and write files in the project directory using:
   - read_files(paths)         # read one or more files (relative to project root)
   - write_files(files)        # create or overwrite (relative to project root)
   - apply_patch(target, edits) # surgical match/replace edits
   - list_tree(root)           # browse project structure
   - revert_changes(targets)   # undo recent typed writes (within the project)
+
+File management (path-fallback pack):
+  - rename_path(target, new_name)  # rename in-place; new_name must be a filename, not a path
+  - move_path(src, dst)            # move across directories (same-parent rejected — use rename_path)
+  - copy_path(src, dst)            # copy file or directory
+  - delete_path(path)              # delete a single file (directories rejected)
 
 Path conventions:
   - All paths are relative to the project root unless absolute. No prefixes.
@@ -120,7 +128,7 @@ These tool packs are hidden by default but can be activated when needed:
 - toolsmith: Create and manage custom tools (when explicitly requested)
 - multi-agent: Lightweight role-based delegation (when collaboration is needed)
 - job-followup: Inspect/wait/cancel running jobs (auto-activated when jobs exist)
-- path-fallback: glob/move/copy/delete/stat files (auto-activated when no shell tool is available)"""
+- path-fallback: rename/move/copy/delete/glob/stat files (auto-activated when no shell tool is available)"""
 
 
 class ToolsModule(Module):
@@ -155,10 +163,10 @@ class ToolsModule(Module):
             builtin.ask_user._handler = agent.interaction_handler
 
         # --- 1b. Create v1.5 internal services ---
-        from llamagent.modules.tools.workspace import WorkspaceService
+        from llamagent.modules.tools.scratch import ScratchService
         from llamagent.modules.tools.project_sync import ProjectSyncService
-        self.workspace_service = WorkspaceService(agent, workspace_id=agent.config.workspace_id)
-        self.project_sync_service = ProjectSyncService(agent, self.workspace_service)
+        self.scratch_service = ScratchService(agent, scratch_id=agent.config.scratch_id)
+        self.project_sync_service = ProjectSyncService(agent, self.scratch_service)
 
         # --- 2. Load admin-created common tools (from __common__.json into common_registry) ---
         try:
@@ -199,7 +207,7 @@ class ToolsModule(Module):
         # --- 4. Register meta-tools (per-instance, by role) ---
         self._register_meta_tools()
 
-        # --- 4b. Register v1.5 workspace + project sync tools ---
+        # --- 4b. Register v1.5 file + project sync tools ---
         self._register_workspace_tools()
         self._register_project_sync_tools()
 
@@ -249,8 +257,8 @@ class ToolsModule(Module):
         """Evaluate state-driven packs and inject guidelines into LLM context."""
         # Step 2: evaluate state-driven packs
         self._evaluate_state_packs()
-        # Inject workspace guide + capability hints
-        guide = WORKSPACE_GUIDE + "\n\n" + CAPABILITY_HINT_BLOCK
+        # Inject file-tool guide + capability hints
+        guide = FILE_TOOL_GUIDE + "\n\n" + CAPABILITY_HINT_BLOCK
         return f"{context}\n\n{guide}" if context else guide
 
     def _evaluate_state_packs(self):
@@ -260,10 +268,10 @@ class ToolsModule(Module):
             self.agent._active_packs.add("job-followup")
 
         # path-fallback: if neither a registered shell tool (`command`) nor
-        # the JobModule's `start_job` is available, expose the legacy
-        # path-op tools (move/copy/delete/glob/stat/temp) so the model
-        # still has a way to manipulate workspace files. When a shell
-        # tool exists, these stay hidden.
+        # the JobModule's `start_job` is available, expose the path-op
+        # tools (rename/move/copy/delete/glob/stat/temp) so the model
+        # still has a way to manage files. When a shell tool exists,
+        # these stay hidden.
         if not self._shell_tool_available():
             self.agent._active_packs.add("path-fallback")
 
@@ -278,17 +286,17 @@ class ToolsModule(Module):
         return False
 
     def on_shutdown(self) -> None:
-        """Clean up workspace session directory on agent shutdown."""
-        if hasattr(self, "workspace_service") and self.workspace_service:
-            self.workspace_service.cleanup()
+        """Clean up scratch session directory on agent shutdown."""
+        if hasattr(self, "scratch_service") and self.scratch_service:
+            self.scratch_service.cleanup()
 
     # ============================================================
-    # v1.5 workspace tool registration
+    # v1.5 file tool registration
     # ============================================================
 
     def _register_workspace_tools(self):
-        """Register workspace exploration and modification tools."""
-        ws = self.workspace_service
+        """Register file-tool surface (read/write/patch/list/revert + pack)."""
+        ws = self.scratch_service
         # v3.3: paths from the model are always resolved against project_dir.
         # classify_write decides the routing for writes (playground / project /
         # rejected). Reads default to project_dir; the authorization engine's
@@ -715,12 +723,71 @@ class ToolsModule(Module):
             pack="path-fallback",
         )
 
+        def _rename_path(target: str, new_name: str) -> str:
+            # new_name must be a plain filename — no path separators allowed.
+            if os.sep in new_name or "/" in new_name or "\\" in new_name:
+                return json.dumps({
+                    "status": "error",
+                    "error": (
+                        f"rename_path: new_name must be a filename, not a path "
+                        f"(got '{new_name}'). Use move_path to move across directories."
+                    ),
+                }, ensure_ascii=False)
+            try:
+                rsrc = _resolve_path(target, base=agent.project_dir)
+            except (ValueError, OSError) as e:
+                return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
+            if classify_write(rsrc, agent) == "rejected":
+                return json.dumps({
+                    "status": "error",
+                    "error": _writable_root_hint(target),
+                }, ensure_ascii=False)
+            rdst = os.path.realpath(os.path.join(os.path.dirname(rsrc), new_name))
+            # Post-realpath guard: new_name must not escape the source directory
+            # (e.g. new_name=".." passes the separator check but shifts the dir).
+            if os.path.dirname(rdst) != os.path.dirname(rsrc):
+                return json.dumps({
+                    "status": "error",
+                    "error": (
+                        f"rename_path: new_name '{new_name}' would move the file "
+                        f"outside its directory. Use move_path to change directories."
+                    ),
+                }, ensure_ascii=False)
+            try:
+                shutil.move(rsrc, rdst)
+                if classify_write(rdst, agent) == "project":
+                    self.project_sync_service.record_move_changeset(rsrc, rdst)
+                return json.dumps({"status": "success", "target": target, "new_name": new_name}, ensure_ascii=False)
+            except Exception as e:
+                return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
+
+        self.agent.register_tool(
+            name="rename_path", func=_rename_path,
+            description="Rename a file or directory in-place. new_name must be a filename (no slashes); use move_path to move across directories.",
+            parameters={"type": "object", "properties": {
+                "target": {"type": "string", "description": "Path to rename (relative to project root)"},
+                "new_name": {"type": "string", "description": "New filename (basename only, no path separators)"},
+            }, "required": ["target", "new_name"]},
+            tier="common", safety_level=2,
+            pack="path-fallback",
+            path_extractor=lambda args: _safe_extract_paths([args.get("target", "")]),
+        )
+
         def _move_path(src: str, dst: str) -> str:
             try:
                 rsrc = _resolve_path(src, base=agent.project_dir)
                 rdst = _resolve_path(dst, base=agent.project_dir)
             except (ValueError, OSError) as e:
                 return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
+            # Same-parent rejection: use rename_path for in-place renames.
+            if os.path.dirname(rsrc) == os.path.dirname(rdst):
+                return json.dumps({
+                    "status": "error",
+                    "error": (
+                        f"move_path: source and destination share the same parent directory. "
+                        f"Use rename_path('{src}', '{os.path.basename(dst)}') to rename in-place."
+                    ),
+                }, ensure_ascii=False)
             for raw, resolved in (("src", rsrc), ("dst", rdst)):
                 if classify_write(resolved, agent) == "rejected":
                     return json.dumps({
@@ -738,10 +805,10 @@ class ToolsModule(Module):
 
         self.agent.register_tool(
             name="move_path", func=_move_path,
-            description="Move a file or directory within the project.",
+            description="Move a file or directory to a different directory. Rejects same-parent calls — use rename_path to rename in-place.",
             parameters={"type": "object", "properties": {
                 "src": {"type": "string", "description": "Source path"},
-                "dst": {"type": "string", "description": "Destination path"},
+                "dst": {"type": "string", "description": "Destination path (must be in a different directory than src)"},
             }, "required": ["src", "dst"]},
             tier="common", safety_level=2,
             pack="path-fallback",

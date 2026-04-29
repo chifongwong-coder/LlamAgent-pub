@@ -1,16 +1,16 @@
 """
-Workspace and project sync flow tests: v1.6 tool system.
+File tools and project sync flow tests: v3.3/v3.4 tool system.
 
-Tests cover ToolsModule registration, pack mechanism, workspace exploration,
-project sync (apply_patch with preview, revert), workspace-only write restriction,
-context injection (WORKSPACE_GUIDE + capability hint block), and workspace lifecycle.
+Tests cover ToolsModule registration, pack mechanism, file/directory exploration,
+project sync (apply_patch with preview, revert), write-root boundary enforcement,
+context injection (FILE_TOOL_GUIDE + capability hint block), and scratch lifecycle.
 """
 
 import base64
 import json
 import os
 
-from llamagent.modules.tools.module import ToolsModule, WORKSPACE_GUIDE, CAPABILITY_HINT_BLOCK
+from llamagent.modules.tools.module import ToolsModule, FILE_TOOL_GUIDE, CAPABILITY_HINT_BLOCK
 
 
 # ============================================================
@@ -82,6 +82,7 @@ class TestToolRegistrationAndPackFiltering:
             "search_text": "path-fallback",
             "stat_paths": "path-fallback",
             "create_temp_file": "path-fallback",
+            "rename_path": "path-fallback",
             "move_path": "path-fallback",
             "copy_path": "path-fallback",
             "delete_path": "path-fallback",
@@ -120,32 +121,33 @@ class TestToolRegistrationAndPackFiltering:
         schemas = bare_agent.get_all_tool_schemas()
         schema_names = [s["function"]["name"] for s in schemas]
         assert "glob_files" in schema_names
+        assert "rename_path" in schema_names
         assert "move_path" in schema_names
         assert "stat_paths" in schema_names
 
 
 class TestContextInjection:
-    """on_context injects WORKSPACE_GUIDE + CAPABILITY_HINT_BLOCK."""
+    """on_context injects FILE_TOOL_GUIDE + CAPABILITY_HINT_BLOCK."""
 
     def test_context_injection(self, bare_agent, tmp_path):
         mod = _make_agent_with_tools(bare_agent, tmp_path)
 
         # -- Guide and hints injected into existing context --
         result = mod.on_context("test query", "existing context")
-        assert WORKSPACE_GUIDE in result
+        assert FILE_TOOL_GUIDE in result
         assert CAPABILITY_HINT_BLOCK in result
         assert "existing context" in result
 
         # -- Guide and hints injected when context is empty --
         result = mod.on_context("test query", "")
-        assert WORKSPACE_GUIDE in result
+        assert FILE_TOOL_GUIDE in result
         assert CAPABILITY_HINT_BLOCK in result
 
 
-class TestWorkspaceExplorationAndFileTypes:
-    """list_tree, read_files (zone parameter), ranges, text/binary detection."""
+class TestFileExplorationAndFileTypes:
+    """list_tree, read_files, ranges, text/binary detection."""
 
-    def test_workspace_exploration_and_file_types(self, bare_agent, tmp_path):
+    def test_file_exploration_and_file_types(self, bare_agent, tmp_path):
         _make_agent_with_tools(bare_agent, tmp_path)
 
         # -- write_files creates files in project (v3.3 default) --
@@ -365,17 +367,17 @@ class TestPatchAndSyncLifecycle:
         # v3.3: sync_workspace_to_project removed; project writes go through
         # write_files / apply_patch directly. The lifecycle test ends here.
 
-        # -- on_shutdown removes the workspace session directory --
+        # -- on_shutdown removes the scratch session directory --
         _call_tool_json(bare_agent, "write_files", files={"temp.txt": "temporary"})
 
-        ws_root = mod.workspace_service.workspace_root
-        assert os.path.isdir(ws_root)
+        scratch_root = mod.scratch_service.scratch_root
+        assert os.path.isdir(scratch_root)
 
         mod.on_shutdown()
 
         session_dir = os.path.join(
             bare_agent.playground_dir, "sessions",
-            mod.workspace_service.workspace_id,
+            mod.scratch_service.scratch_id,
         )
         assert not os.path.isdir(session_dir)
 
@@ -817,3 +819,28 @@ class TestChangesetLRU:
         # Either the top-level error or per-file error mentions eviction.
         msg_blob = json.dumps(result)
         assert "evicted" in msg_blob.lower()
+
+
+class TestR4RenamePathAndMovePathSplit:
+    """v3.4 R4 smoke tests: rename_path in-place rename + move_path same-parent rejection."""
+
+    def test_rename_path(self, bare_agent, tmp_path):
+        """rename_path renames a project file; file exists under new name."""
+        _make_agent_with_tools(bare_agent, tmp_path)
+        src = os.path.join(bare_agent.project_dir, "before.txt")
+        with open(src, "w") as f:
+            f.write("content")
+        result = _call_tool_json(bare_agent, "rename_path", target="before.txt", new_name="after.txt")
+        assert result["status"] == "success"
+        assert not os.path.exists(src)
+        assert os.path.exists(os.path.join(bare_agent.project_dir, "after.txt"))
+
+    def test_move_path_same_parent_rejected(self, bare_agent, tmp_path):
+        """move_path with src and dst in the same directory is rejected with a hint to use rename_path."""
+        _make_agent_with_tools(bare_agent, tmp_path)
+        src = os.path.join(bare_agent.project_dir, "x.txt")
+        with open(src, "w") as f:
+            f.write("x")
+        result = _call_tool_json(bare_agent, "move_path", src="x.txt", dst="y.txt")
+        assert result["status"] == "error"
+        assert "rename_path" in result["error"]

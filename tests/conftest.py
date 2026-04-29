@@ -222,7 +222,7 @@ def bare_agent(mock_llm_client):
     config.job_default_timeout = 300.0
     config.job_max_active = 10
     config.job_profiles = {}
-    config.workspace_id = None
+    config.scratch_id = None
     config.hooks_config = None
     config.module_models = {}
     config.persistence_enabled = False
