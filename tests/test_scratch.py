@@ -1,9 +1,9 @@
 """
-Workspace and project sync flow tests: v1.6 tool system.
+File tools and project sync flow tests: v3.3/v3.4 tool system.
 
-Tests cover ToolsModule registration, pack mechanism, workspace exploration,
-project sync (apply_patch with preview, revert), workspace-only write restriction,
-context injection (FILE_TOOL_GUIDE + capability hint block), and workspace lifecycle.
+Tests cover ToolsModule registration, pack mechanism, file/directory exploration,
+project sync (apply_patch with preview, revert), write-root boundary enforcement,
+context injection (FILE_TOOL_GUIDE + capability hint block), and scratch lifecycle.
 """
 
 import base64
@@ -144,10 +144,10 @@ class TestContextInjection:
         assert CAPABILITY_HINT_BLOCK in result
 
 
-class TestWorkspaceExplorationAndFileTypes:
-    """list_tree, read_files (zone parameter), ranges, text/binary detection."""
+class TestFileExplorationAndFileTypes:
+    """list_tree, read_files, ranges, text/binary detection."""
 
-    def test_workspace_exploration_and_file_types(self, bare_agent, tmp_path):
+    def test_file_exploration_and_file_types(self, bare_agent, tmp_path):
         _make_agent_with_tools(bare_agent, tmp_path)
 
         # -- write_files creates files in project (v3.3 default) --
