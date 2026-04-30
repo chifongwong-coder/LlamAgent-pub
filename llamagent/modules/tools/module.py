@@ -852,9 +852,10 @@ class ToolsModule(Module):
         )
 
         def _delete_path(path: str) -> str:
-            # MF2: delete_path rejects directories. Pre-13a it would
-            # rmtree any directory; v3.3 only accepts file paths so the
-            # changeset journal can record per-file pre_image bytes.
+            # v3.5: empty directories are now removable (revert via mkdir).
+            # Non-empty directories are still rejected — Changeset can't
+            # capture per-file pre_image bytes for revert. Model must
+            # delete contents first, then the empty directory.
             try:
                 resolved = _resolve_path(path, base=agent.project_dir)
             except (ValueError, OSError) as e:
@@ -865,12 +866,37 @@ class ToolsModule(Module):
                     "error": _writable_root_hint(path),
                 }, ensure_ascii=False)
             if os.path.isdir(resolved):
+                # Empty directory: allowed (revert via mkdir).
+                if not os.listdir(resolved):
+                    track = (classify_write(resolved, agent) == "project")
+                    cid = None
+                    if track:
+                        try:
+                            cid = self.project_sync_service.record_rmdir_changeset(resolved)
+                        except Exception as e:
+                            logger.warning(
+                                "delete_path: failed to record rmdir changeset for %s: %s",
+                                resolved, e,
+                            )
+                    try:
+                        os.rmdir(resolved)
+                    except OSError as e:
+                        return json.dumps({
+                            "status": "error",
+                            "error": f"Failed to remove empty directory '{path}': {e}",
+                        }, ensure_ascii=False)
+                    return json.dumps({
+                        "status": "success",
+                        "path": path,
+                        "kind": "directory",
+                        "changeset_id": cid,
+                    }, ensure_ascii=False)
+                # Non-empty: still rejected, with hint to delete contents first.
                 return json.dumps({
                     "status": "error",
                     "error": (
-                        f"delete_path cannot remove a directory ('{path}'). "
-                        f"Pass a list of file paths instead. Use list_tree('{path}') "
-                        f"to enumerate files first."
+                        f"Non-empty directory '{path}'. Delete its files first, "
+                        f"then call delete_path on the empty dir."
                     ),
                 }, ensure_ascii=False)
             if not os.path.exists(resolved):
@@ -909,9 +935,12 @@ class ToolsModule(Module):
 
         self.agent.register_tool(
             name="delete_path", func=_delete_path,
-            description="Delete a single file relative to the project root. Directories are rejected.",
+            description=(
+                "Delete a file or empty directory. Non-empty dirs rejected — "
+                "delete contents first, then the empty dir."
+            ),
             parameters={"type": "object", "properties": {
-                "path": {"type": "string", "description": "File path to delete (directories rejected)"},
+                "path": {"type": "string", "description": "File or empty-directory path"},
             }, "required": ["path"]},
             tier="common", safety_level=2,
             pack="path-fallback",

@@ -505,6 +505,27 @@ class ProjectSyncService:
         self._enforce_changeset_caps()
         return changeset.changeset_id
 
+    def record_rmdir_changeset(self, target: str) -> str:
+        """Record an empty-directory removal: inverse is os.mkdir(target).
+
+        v3.5: delete_path now accepts empty directories. Since the directory
+        was empty, no file pre_images need to be captured — the inverse is
+        a single mkdir. action="rmdir"; pre_image=None; ops records the
+        rmdir signature so revert can reconstruct.
+        """
+        resolved = os.path.realpath(target)
+        changeset = Changeset(
+            changeset_id=uuid.uuid4().hex,
+            target_path=resolved,
+            pre_image=None,
+            ops=[{"action": "rmdir"}],
+            timestamp=time.time(),
+            action="rmdir",
+        )
+        self._changesets.append(changeset)
+        self._enforce_changeset_caps()
+        return changeset.changeset_id
+
     def record_copy_changeset(self, src: str, dst: str) -> str:
         """Record a copy: inverse is os.unlink(dst). src is unchanged."""
         rsrc = os.path.realpath(src)
@@ -819,6 +840,14 @@ class ProjectSyncService:
             if not changeset.dst:
                 raise OSError("copy changeset missing dst")
             self._unlink_if_exists(changeset.dst, cid)
+
+        elif action == "rmdir":
+            # Inverse: recreate the empty directory.
+            os.makedirs(changeset.target_path, exist_ok=True)
+            logger.info(
+                "revert_changes: recreated empty directory %s (changeset %s)",
+                changeset.target_path, cid,
+            )
 
         else:
             raise OSError(f"unknown changeset action: {action}")
