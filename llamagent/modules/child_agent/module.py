@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 import time
 
 from llamagent.core.agent import Module
@@ -605,14 +606,31 @@ class ChildAgentModule(Module):
         except RuntimeError as e:
             return f"Cannot spawn child agent: {e}"
 
+        # v3.5: emit structured spawn return with child_dir for cross-agent
+        # path resolution. share_parent_project_dir=True → child_dir is
+        # parent.project_dir; False → parent.playground/children/<task_id>/.
+        share = policy.share_parent_project_dir if policy else True
+        if share:
+            child_dir = self.agent.project_dir
+        else:
+            child_dir = os.path.join(self.agent.playground_dir, "children", task_id)
+        header = (
+            f"Spawned child agent.\n"
+            f"- task_id: {task_id}\n"
+            f"- role: {role}\n"
+            f"- child_dir: {child_dir}\n"
+            f"- Note: if the child reports relative artifact paths, resolve them against child_dir.\n"
+        )
+
         # Check if already completed (inline runner, or very fast thread execution)
         record = self.controller.task_board.get(task_id)
         if record and record.status in ("completed", "failed"):
-            return record.result or f"Child agent ({role}) completed with no output."
+            body = record.result or f"Child agent ({role}) completed with no output."
+            return f"{header}\nResult: {body}"
         else:
             # Thread runner: return task_id for async collection
             return (
-                f"Spawned child agent [task_id: {task_id}] with role={role}. "
+                f"{header}\n"
                 f"Use wait_child(task_id=\"{task_id}\") or collect_results() to get results."
             )
 
