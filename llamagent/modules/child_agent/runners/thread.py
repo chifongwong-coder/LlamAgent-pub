@@ -15,7 +15,11 @@ import uuid
 
 from llamagent.modules.child_agent.budget import BudgetExceededError
 from llamagent.modules.child_agent.policy import ChildAgentSpec
-from llamagent.modules.child_agent.runner import AgentRunnerBackend, format_fallback_report
+from llamagent.modules.child_agent.runner import (
+    AgentRunnerBackend,
+    format_fallback_report,
+    maybe_request_completion_report,
+)
 from llamagent.modules.child_agent.task_board import TaskRecord
 
 logger = logging.getLogger(__name__)
@@ -258,6 +262,8 @@ class ThreadRunnerBackend(AgentRunnerBackend):
             prompt = f"Context:\n{spec.context}\n\nTask:\n{spec.task}"
 
         result_text = child.chat(prompt)
+        # v3.5 template A: optional auto-prompt for completion report
+        result_text = maybe_request_completion_report(child, result_text)
         elapsed = time.time() - start_time
 
         record = TaskRecord(

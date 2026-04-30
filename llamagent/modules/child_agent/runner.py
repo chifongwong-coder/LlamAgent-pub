@@ -12,6 +12,42 @@ from llamagent.modules.child_agent.policy import ChildAgentSpec
 from llamagent.modules.child_agent.task_board import TaskRecord
 
 
+# v3.5 template A: the prompt the framework appends when the child's
+# final reply is a free-form sentence with no Status/Summary/Artifacts
+# structure. Used by runners when child_agent_report_template="auto".
+COMPLETION_REPORT_REQUEST = (
+    "Please conclude with a completion report in this exact format:\n"
+    "Status: success | partial | failed\n"
+    "Summary: <1-3 sentences describing what you did>\n"
+    "Artifacts: <comma-separated absolute paths of files you created or modified, or \"none\">"
+)
+
+
+def maybe_request_completion_report(child, result_text: str) -> str:
+    """If the child's final reply lacks the v3.5 completion-report shape AND
+    the parent's config opted into ``"auto"`` template, ask the child once
+    more to emit the structured form. Single retry, never recursive.
+
+    Returns the (possibly re-asked) result text. If template != "auto" or
+    the format is already present, returns the original text unchanged.
+    """
+    template = "system_prompt"
+    try:
+        template = getattr(child.config, "child_agent_report_template", "system_prompt")
+    except Exception:
+        pass
+    if template != "auto":
+        return result_text
+    if "Status:" in (result_text or "") and "Summary:" in (result_text or ""):
+        return result_text
+    try:
+        return child.chat(COMPLETION_REPORT_REQUEST)
+    except Exception:
+        # If the child errors trying to produce the report, keep the
+        # original free-form result rather than masking with an exception.
+        return result_text
+
+
 def format_fallback_report(
     reason_kind: str,
     reason_detail: str,
