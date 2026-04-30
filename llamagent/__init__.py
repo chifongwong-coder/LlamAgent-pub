@@ -16,6 +16,31 @@ Core design:
 A bare LlamAgent is a fully functional conversational Agent. Each
 module loaded grants a new capability.
 
+v3.5 highlights (child agent collaboration: summary + artifacts, not data passing):
+- spawn_child returns structured text including child_dir so the
+  parent's model can resolve relative artifact paths against the
+  right directory. Hard break: wait_child no longer accepts
+  include_history / include_logs (anti-pattern).
+- Child completion report convention (Status / Summary / Artifacts).
+  Two delivery templates, controlled by child_agent_report_template:
+  "system_prompt" (default) | "auto" | "off". Framework does NOT
+  parse record.result; the contract is model-to-model.
+- Crash fallback: when a child crashes (BudgetExceededError,
+  unhandled exception, SIGKILL, JSON decode error from process
+  runner), the runner's finally block writes a v3.5-shaped
+  fallback report into record.result so the parent has a
+  consistent shape to read.
+- Per-child runlog at <parent.playground>/child_runlogs/<task_id>.log
+  (JSONL: reply / tool / end). Observability-only, not exposed to
+  the parent agent through the tool surface.
+- Cancellation cascade: cancel_child(task_id) walks descendants
+  depth-first and runner-cancels each before the target.
+- max_delegation_depth = 2 default (Hermes-style); enforced at
+  spawn time.
+- send_message accepts agent_id or task_id (resolves task_id →
+  agent_id internally; the message_child tool was not added —
+  one tool, two target shapes).
+
 v3.4 highlights (terminology cleanup):
 - rename_path(target, new_name) added to path-fallback pack for
   in-place renames; move_path now rejects same-parent calls.
@@ -46,7 +71,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "3.4"
+__version__ = "3.5"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager
