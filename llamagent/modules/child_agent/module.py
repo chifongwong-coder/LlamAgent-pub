@@ -24,6 +24,19 @@ import os
 import time
 
 from llamagent.core.agent import Module
+
+# v3.5: Child completion report convention (template B — system prompt).
+# Combined with the framework auto-prompt (template A, commit-6), the goal
+# is for record.result to be a structured summary the parent's model can
+# read consistently. Framework does NOT parse this output — record.result
+# stays a free-form string.
+CHILD_SYSTEM_PROMPT = (
+    "You are a {role}. Complete the assigned task concisely.\n\n"
+    "When your task is complete, your final reply MUST follow this format:\n"
+    "Status: success | partial | failed\n"
+    "Summary: <1-3 sentences describing what you did>\n"
+    "Artifacts: <comma-separated absolute paths of files you created or modified, or \"none\">"
+)
 from llamagent.modules.child_agent.budget import BudgetedLLM, BudgetTracker
 from llamagent.modules.child_agent.policy import (
     AgentExecutionPolicy,
@@ -805,10 +818,19 @@ class ChildAgentModule(Module):
         # Ensure api_retry_count exists (may be missing if parent config was manually constructed)
         if not hasattr(config, 'api_retry_count'):
             config.api_retry_count = 1
-        config.system_prompt = (
-            spec.system_prompt
-            or f"You are a {spec.role}. Complete the assigned task concisely."
-        )
+        # v3.5: report_template config gates the completion-report convention.
+        #   "system_prompt" (default): inject CHILD_SYSTEM_PROMPT (template B)
+        #   "auto"                  : same default + framework auto-prompt at end of run (template A, commit-6)
+        #   "off"                   : no completion-report shaping (legacy behavior)
+        report_template = getattr(parent.config, "child_agent_report_template", "system_prompt")
+        if spec.system_prompt:
+            config.system_prompt = spec.system_prompt
+        elif report_template in ("system_prompt", "auto"):
+            config.system_prompt = CHILD_SYSTEM_PROMPT.format(role=spec.role)
+        else:
+            config.system_prompt = (
+                f"You are a {spec.role}. Complete the assigned task concisely."
+            )
         config.context_window_size = 10
         config.context_compress_threshold = 0.7
         config.compress_keep_turns = 2
