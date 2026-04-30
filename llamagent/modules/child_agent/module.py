@@ -244,7 +244,23 @@ class ChildAgentController:
         return self.task_board.children_of(parent_id)
 
     def cancel_child(self, task_id: str) -> bool:
-        """Cancel a running child agent."""
+        """Cancel a running child agent and all its descendants.
+
+        v3.5: cancellation cascades — if the target child has spawned
+        grandchildren, they are killed before the target itself. Mirrors
+        Hermes' _active_children walk: depth-first so nothing escapes.
+        """
+        # Walk descendants depth-first
+        descendants = self._collect_descendants(task_id)
+        for desc_id in descendants:
+            try:
+                self.runner.cancel(desc_id)
+                rec = self.task_board.get(desc_id)
+                if rec and rec.status == "running":
+                    self.task_board.update(desc_id, status="cancelled")
+            except Exception:
+                pass  # best-effort
+
         success = self.runner.cancel(task_id)
         if success:
             # Only overwrite status if still running (child may have completed before abort took effect)
@@ -252,6 +268,17 @@ class ChildAgentController:
             if existing and existing.status == "running":
                 self.task_board.update(task_id, status="cancelled")
         return success
+
+    def _collect_descendants(self, task_id: str) -> list[str]:
+        """Return [grandchild_id, ggc_id, ...] in depth-first order."""
+        out = []
+        stack = [task_id]
+        while stack:
+            current = stack.pop()
+            for child in self.task_board.children_of(current):
+                out.append(child.task_id)
+                stack.append(child.task_id)
+        return out
 
     def collect_results(self, parent_id: str) -> list[TaskRecord]:
         """Collect completed/failed results for a parent."""
@@ -420,13 +447,16 @@ class ChildAgentModule(Module):
         agent.register_tool(
             name="send_message",
             func=self._tool_send_message,
-            description="Send a message to another agent by agent_id",
+            description=(
+                "Send a message to another agent. Pass the recipient's agent_id "
+                "(from list_agents) or the task_id of a child you spawned."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
                     "to_id": {
                         "type": "string",
-                        "description": "The agent_id of the recipient",
+                        "description": "Recipient agent_id, or task_id of a spawned child",
                     },
                     "content": {
                         "type": "string",
@@ -497,12 +527,31 @@ class ChildAgentModule(Module):
         )
 
     def _tool_send_message(self, to_id: str, content: str, msg_type: str = "info") -> str:
-        """Send a message to another agent."""
+        """Send a message to another agent. v3.5: to_id may be an agent_id
+        OR a task_id of a child this agent spawned."""
+        # v3.5: if to_id matches a known task_id of a continuous child,
+        # resolve to that child's agent_id.
+        resolved_to_id = self._resolve_send_target(to_id)
         try:
-            msg_id = self._channel.send(self._agent_id, to_id, content, msg_type)
+            msg_id = self._channel.send(self._agent_id, resolved_to_id, content, msg_type)
             return f"Message sent (id: {msg_id})"
         except KeyError:
             return f"Agent '{to_id}' not found."
+
+    def _resolve_send_target(self, target: str) -> str:
+        """Resolve a send_message target. If target is a known task_id of a
+        continuous child, return that child's agent_id; else return target
+        unchanged (caller's KeyError handler will report on miss)."""
+        try:
+            record = self.controller.task_board.get(target)
+        except Exception:
+            return target
+        if record is None:
+            return target
+        agent_id = (record.metrics or {}).get("agent_id")
+        if isinstance(agent_id, str) and agent_id:
+            return agent_id
+        return target
 
     def _tool_check_messages(self) -> str:
         """Check and return pending messages."""
@@ -602,12 +651,24 @@ class ChildAgentModule(Module):
         if model_override:
             policy.model = model_override
 
+        # v3.5: enforce max_delegation_depth before spawn. Default cap = 2
+        # (Hermes-style). The cap is applied when *this* agent is itself a
+        # child agent (i.e. has a delegation_depth set on its own spec).
+        max_depth = getattr(self.agent.config, "child_agent_max_delegation_depth", 2)
+        my_depth = getattr(self.agent, "_delegation_depth", 0)
+        if my_depth + 1 > max_depth:
+            return (
+                f"Cannot spawn child: max_delegation_depth ({max_depth}) exceeded. "
+                f"Current depth: {my_depth}. Restructure your task to be flatter."
+            )
+
         spec = ChildAgentSpec(
             task=task,
             role=role,
             context=context,
             policy=policy,
             parent_task_id=self._parent_id,
+            delegation_depth=my_depth + 1,
         )
         # v3.5: pre-allocate runlog path. Controller sets spec.task_id before
         # factory invocation, but we need the path string ahead of spawn so
@@ -621,6 +682,10 @@ class ChildAgentModule(Module):
             task_id = self.controller.spawn_child(spec, self._create_child_agent)
         except RuntimeError as e:
             return f"Cannot spawn child agent: {e}"
+        # v3.5: track active child for cascading cancellation
+        if not hasattr(self.agent, "_active_child_ids"):
+            self.agent._active_child_ids = set()
+        self.agent._active_child_ids.add(task_id)
 
         # v3.5: emit structured spawn return with child_dir for cross-agent
         # path resolution. share_parent_project_dir=True → child_dir is
@@ -933,6 +998,10 @@ class ChildAgentModule(Module):
             for tool_name, tool in child._tools.items():
                 if tool.get("execution_policy") is None:
                     tool["execution_policy"] = spec.policy.execution_policy
+
+        # v3.5: propagate delegation depth so a recursive ChildAgentModule
+        # in the child can enforce max_delegation_depth on grandchildren.
+        child._delegation_depth = spec.delegation_depth
 
         # v3.5: wrap child.llm with LoggingLLM to record each reply to the
         # runlog file, and register a POST_TOOL_USE hook to record each tool
