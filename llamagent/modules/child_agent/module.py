@@ -378,14 +378,6 @@ class ChildAgentModule(Module):
                             "type": "string",
                             "description": "The task_id of the child agent to wait for",
                         },
-                        "include_history": {
-                            "type": "boolean",
-                            "description": "If true, include the full conversation history of the child agent",
-                        },
-                        "include_logs": {
-                            "type": "boolean",
-                            "description": "If true, include the child agent's execution logs (stderr for process, captured logs for thread)",
-                        },
                     },
                     "required": ["task_id"],
                 },
@@ -634,9 +626,16 @@ class ChildAgentModule(Module):
                 f"Use wait_child(task_id=\"{task_id}\") or collect_results() to get results."
             )
 
-    def _wait_child(self, task_id: str, include_history: bool = False,
-                    include_logs: bool = False) -> str:
-        """Wait for a specific child agent and return its result."""
+    def _wait_child(self, task_id: str) -> str:
+        """Wait for a specific child agent and return its result.
+
+        v3.5: removed include_history / include_logs parameters (hard break,
+        no shim). They were anti-patterns: leaking child internal state into
+        parent's context. Parent gets the child's completion summary in
+        record.result, plus the child_dir hint for resolving relative paths.
+        For debugging, child runs are written to a runlog file (commit-4)
+        which is for external observation only — not exposed to parent agent.
+        """
         record = self.controller.task_board.get(task_id)
         if record is None:
             return f"No child agent found with task_id '{task_id}'."
@@ -649,21 +648,16 @@ class ChildAgentModule(Module):
             return f"Child agent '{task_id}' completed but result not yet available."
 
         result = record.result or "(no output)"
-        if include_history and record.history:
-            history_text = "\n".join(
-                f"[{m.get('role', '?')}]: {(m.get('content') or '')[:2000]}"
-                for m in record.history
-            )
-            result = f"Result: {result}\n\nFull history:\n{history_text}"
-        if include_logs and record.logs:
-            result += f"\n\nChild logs:\n{record.logs[:2000]}"
-        # Include child_root path for isolated children (share_parent_project_dir=False)
+        # Include child_dir hint so parent can resolve relative artifact paths.
         if record.input_snapshot and record.input_snapshot.get("child_root"):
-            import os
-            child_root = os.path.join(
+            child_dir = os.path.join(
                 self.agent.playground_dir, record.input_snapshot["child_root"]
             )
-            result += f"\n\nChild root: {child_root}"
+        else:
+            child_dir = self.agent.project_dir
+        result += (
+            f"\n\n(Resolve relative artifact paths against {child_dir})"
+        )
         return result
 
     def _list_children(self) -> str:
@@ -702,7 +696,10 @@ class ChildAgentModule(Module):
             lines.append(f"({timed_out} child agent(s) timed out and are still running)")
         for r in results:
             task_preview = r.task[:50] + "..." if len(r.task) > 50 else r.task
-            result_preview = r.result[:200] if r.result else "(no output)"
+            # v3.5: no [:200] truncation — record.result is the child's summary,
+            # bounded by design. ReAct's _truncate_observation handles overflow
+            # at the framework layer if the aggregate gets too long.
+            body = r.result if r.result else "(no output)"
             cost_parts = []
             if r.metrics.get("llm_calls"):
                 cost_parts.append(f"{r.metrics['llm_calls']} LLM calls")
@@ -711,7 +708,7 @@ class ChildAgentModule(Module):
             if r.metrics.get("elapsed_seconds"):
                 cost_parts.append(f"{r.metrics['elapsed_seconds']}s")
             cost_line = f"\nCost: {', '.join(cost_parts)}" if cost_parts else ""
-            lines.append(f"[{r.role}] {task_preview}\nResult: {result_preview}{cost_line}")
+            lines.append(f"[{r.role}] {task_preview}\nResult: {body}{cost_line}")
         return "\n\n".join(lines)
 
     # ============================================================
