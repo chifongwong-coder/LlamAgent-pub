@@ -24,7 +24,7 @@ import time
 import uuid
 
 from llamagent.modules.child_agent.policy import ChildAgentSpec
-from llamagent.modules.child_agent.runner import AgentRunnerBackend
+from llamagent.modules.child_agent.runner import AgentRunnerBackend, format_fallback_report
 from llamagent.modules.child_agent.task_board import TaskRecord
 from llamagent.modules.command_runner import CommandRunner
 
@@ -218,22 +218,24 @@ class ProcessRunnerBackend(AgentRunnerBackend):
             record = TaskRecord(
                 task_id=task_id,
                 status="failed",
-                result="Process timed out",
+                result=format_fallback_report(
+                    "killed by timeout", f"subprocess exceeded {timeout}s"
+                ),
             )
         except (json.JSONDecodeError, Exception) as e:
-            # Include subprocess stderr in error for debugging
+            # Include subprocess stderr in error detail for human debugging.
             stderr_text = ""
             try:
                 stderr_text = stderr[:500] if stderr else ""
             except NameError:
                 pass
-            error_msg = f"Process error: {e}"
+            detail = f"{type(e).__name__}: {e}"
             if stderr_text:
-                error_msg += f"\nstderr: {stderr_text}"
+                detail += f" | stderr: {stderr_text}"
             record = TaskRecord(
                 task_id=task_id,
                 status="failed",
-                result=error_msg,
+                result=format_fallback_report("process error", detail),
             )
         finally:
             # Cleanup spec file

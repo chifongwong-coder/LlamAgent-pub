@@ -15,7 +15,7 @@ import uuid
 
 from llamagent.modules.child_agent.budget import BudgetExceededError
 from llamagent.modules.child_agent.policy import ChildAgentSpec
-from llamagent.modules.child_agent.runner import AgentRunnerBackend
+from llamagent.modules.child_agent.runner import AgentRunnerBackend, format_fallback_report
 from llamagent.modules.child_agent.task_board import TaskRecord
 
 logger = logging.getLogger(__name__)
@@ -173,7 +173,7 @@ class ThreadRunnerBackend(AgentRunnerBackend):
                 role=spec.role,
                 task=spec.task,
                 status="failed",
-                result=f"Budget exceeded: {e}",
+                result=format_fallback_report("budget exceeded", str(e)),
                 history=list(child.history) if child else [],
                 metrics=_build_metrics(elapsed, child),
                 created_at=start_time,
@@ -192,7 +192,9 @@ class ThreadRunnerBackend(AgentRunnerBackend):
                 role=spec.role,
                 task=spec.task,
                 status="failed",
-                result=f"Execution error: {e}",
+                result=format_fallback_report(
+                    "execution error", f"{type(e).__name__}: {e}"
+                ),
                 history=list(child.history) if child else [],
                 metrics=_build_metrics(elapsed, child),
                 created_at=start_time,

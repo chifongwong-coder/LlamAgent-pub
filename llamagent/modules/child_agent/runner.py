@@ -12,6 +12,39 @@ from llamagent.modules.child_agent.policy import ChildAgentSpec
 from llamagent.modules.child_agent.task_board import TaskRecord
 
 
+def format_fallback_report(
+    reason_kind: str,
+    reason_detail: str,
+    runlog_path: str | None = None,
+) -> str:
+    """Format a v3.5 fallback completion report for crashed children.
+
+    Used when the child agent does not produce a normal completion report
+    (Budget exceeded, unhandled exception, SIGKILL, timeout, etc.). Format
+    is aligned with the v3.5 success-path report so the parent's model
+    reads both via the same convention.
+
+    Args:
+        reason_kind: short label, e.g. "budget exceeded", "execution error",
+            "killed by timeout", "max_steps reached".
+        reason_detail: exception class + message, or other diagnostic text.
+        runlog_path: absolute path to the child's runlog file. Surfaced only
+            for human debugging; the parent agent does not act on it.
+
+    Returns:
+        Multi-line report ending with optional runlog hint.
+    """
+    parts = [
+        "Status: failed",
+        f"Summary: child {reason_kind}: {reason_detail}",
+        "Artifacts: none",
+    ]
+    body = "\n".join(parts)
+    if runlog_path:
+        body += f"\n\n(See child runlog at {runlog_path} for details.)"
+    return body
+
+
 class AgentRunnerBackend:
     """
     Abstract base class for child agent execution backends.
