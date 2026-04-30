@@ -67,6 +67,7 @@ class ChildAgentSpec:
     parent_task_id: str | None = None
     artifact_refs: list[dict] = field(default_factory=list)
     task_id: str | None = None  # Set by controller before factory call
+    runlog_path: str = ""  # v3.5: absolute path of child's JSONL runlog (set by ChildAgentModule)
     # Continuous child agent fields
     continuous: bool = False
     trigger_type: str | None = None        # "timer" | "file"

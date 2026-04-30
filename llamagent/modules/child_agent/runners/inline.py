@@ -95,7 +95,9 @@ class InlineRunnerBackend(AgentRunnerBackend):
                 role=spec.role,
                 task=spec.task,
                 status="failed",
-                result=format_fallback_report("budget exceeded", str(e)),
+                result=format_fallback_report(
+                    "budget exceeded", str(e), spec.runlog_path or None
+                ),
                 history=list(child.history) if child else [],
                 metrics=_build_metrics(elapsed, child),
                 created_at=start_time,
@@ -115,7 +117,8 @@ class InlineRunnerBackend(AgentRunnerBackend):
                 task=spec.task,
                 status="failed",
                 result=format_fallback_report(
-                    "execution error", f"{type(e).__name__}: {e}"
+                    "execution error", f"{type(e).__name__}: {e}",
+                    spec.runlog_path or None,
                 ),
                 history=list(child.history) if child else [],
                 metrics=_build_metrics(elapsed, child),
@@ -128,6 +131,17 @@ class InlineRunnerBackend(AgentRunnerBackend):
             )
 
         finally:
+            # v3.5: emit runlog "end" record so observers see a clean terminator
+            if spec.runlog_path:
+                from llamagent.core.logging_llm import append_runlog
+                try:
+                    append_runlog(spec.runlog_path, {
+                        "ts": time.time(),
+                        "kind": "end",
+                        "status": record.status if record else "unknown",
+                    })
+                except Exception:
+                    pass
             if child is not None:
                 try:
                     child.shutdown()

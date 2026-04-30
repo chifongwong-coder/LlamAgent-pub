@@ -106,11 +106,14 @@ class ChildAgentController:
         # Pre-generate task_id so we can create the board entry BEFORE spawning.
         # This prevents a race where the callback fires before the board entry exists
         # (happens when the child completes instantly, e.g., mock LLM in tests).
-        import uuid
-        task_id = uuid.uuid4().hex[:12]
-
-        # Set task_id on spec so the agent factory can use it (e.g., for workspace dir)
-        spec.task_id = task_id
+        # v3.5: respect pre-set spec.task_id (caller may have already allocated it
+        # so it can compute downstream paths like runlog_path).
+        if spec.task_id:
+            task_id = spec.task_id
+        else:
+            import uuid
+            task_id = uuid.uuid4().hex[:12]
+            spec.task_id = task_id
 
         # Build input snapshot for debugging/auditing
         input_snapshot = {
@@ -593,6 +596,14 @@ class ChildAgentModule(Module):
             policy=policy,
             parent_task_id=self._parent_id,
         )
+        # v3.5: pre-allocate runlog path. Controller sets spec.task_id before
+        # factory invocation, but we need the path string ahead of spawn so
+        # the runner finally block can write the "end" record after a crash.
+        # Pre-generate task_id here (controller respects pre-set IDs).
+        if not spec.task_id:
+            import uuid as _uuid
+            spec.task_id = _uuid.uuid4().hex[:12]
+        spec.runlog_path = self._runlog_path_for(spec.task_id)
         try:
             task_id = self.controller.spawn_child(spec, self._create_child_agent)
         except RuntimeError as e:
@@ -710,6 +721,58 @@ class ChildAgentModule(Module):
             cost_line = f"\nCost: {', '.join(cost_parts)}" if cost_parts else ""
             lines.append(f"[{r.role}] {task_preview}\nResult: {body}{cost_line}")
         return "\n\n".join(lines)
+
+    # ============================================================
+    # v3.5: Runlog (observability-only, not parent-visible)
+    # ============================================================
+
+    def _runlog_path_for(self, task_id: str) -> str:
+        """Return the absolute runlog path for a child task_id.
+
+        Lives under parent.playground_dir/child_runlogs/<task_id>.log so
+        parent and child (even cross-process) can both physically reach it.
+        """
+        return os.path.join(
+            self.agent.playground_dir, "child_runlogs", f"{task_id}.log"
+        )
+
+    def _attach_runlog(self, child, runlog_path: str) -> None:
+        """Wrap child's LLM with LoggingLLM and register POST_TOOL_USE hook.
+
+        Both writers are append-only to the same JSONL file. The hook closure
+        captures runlog_path; LoggingLLM is a thin proxy.
+        """
+        from llamagent.core.logging_llm import LoggingLLM, append_runlog
+        from llamagent.core.hooks import HookEvent, HookResult
+
+        max_bytes = getattr(
+            self.agent.config, "child_agent_runlog_max_bytes", 10 * 1024 * 1024
+        )
+        # Wrap the child's LLM (may already be BudgetedLLM-wrapped from earlier)
+        child.llm = LoggingLLM(child.llm, runlog_path, max_bytes=max_bytes)
+
+        def _runlog_tool_writer(ctx):
+            data = ctx.data
+            try:
+                append_runlog(
+                    runlog_path,
+                    {
+                        "ts": time.time(),
+                        "kind": "tool",
+                        "name": data.get("tool_name"),
+                        "args_preview": str(data.get("args", ""))[:500],
+                        "result_preview": str(data.get("result", ""))[:500],
+                    },
+                    max_bytes=max_bytes,
+                )
+            except Exception as e:
+                logger.warning("runlog tool-side write failed: %s", e)
+            return HookResult.CONTINUE
+
+        try:
+            child.register_hook(HookEvent.POST_TOOL_USE, _runlog_tool_writer)
+        except Exception as e:
+            logger.warning("failed to register runlog POST_TOOL_USE hook: %s", e)
 
     # ============================================================
     # Child agent factory
@@ -848,6 +911,13 @@ class ChildAgentModule(Module):
             for tool_name, tool in child._tools.items():
                 if tool.get("execution_policy") is None:
                     tool["execution_policy"] = spec.policy.execution_policy
+
+        # v3.5: wrap child.llm with LoggingLLM to record each reply to the
+        # runlog file, and register a POST_TOOL_USE hook to record each tool
+        # call. The runlog is observability-only — never exposed to parent
+        # agent through the tool surface.
+        if spec.runlog_path:
+            self._attach_runlog(child, spec.runlog_path)
 
         return child
 
@@ -1005,6 +1075,10 @@ class ChildAgentModule(Module):
         if self._registry:
             self._registry.register(child.agent_id, role=spec.role, mode="continuous")
         self._register_child_messaging_tools(child)
+
+        # v3.5: attach runlog (observability-only, not parent-visible)
+        if spec.runlog_path:
+            self._attach_runlog(child, spec.runlog_path)
 
         return child
 

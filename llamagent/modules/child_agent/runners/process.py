@@ -104,7 +104,7 @@ class ProcessRunnerBackend(AgentRunnerBackend):
         event = threading.Event()
         monitor = threading.Thread(
             target=self._monitor,
-            args=(task_id, proc, event, spec_path, self._get_timeout(spec)),
+            args=(task_id, proc, event, spec_path, self._get_timeout(spec), spec.runlog_path or ""),
             daemon=True,
         )
         with self._lock:
@@ -166,6 +166,9 @@ class ProcessRunnerBackend(AgentRunnerBackend):
                 "max_time_seconds": spec.policy.budget.max_time_seconds,
             } if spec.policy and spec.policy.budget else None,
             "sandbox_enabled": self._parent_has_sandbox,
+            # v3.5: subprocess writes its runlog at this absolute path; lives
+            # under parent.playground so the parent (or any monitor) can read.
+            "runlog_path": spec.runlog_path or "",
         }
 
         # Serialize execution_policy for subprocess sandbox setup
@@ -198,7 +201,8 @@ class ProcessRunnerBackend(AgentRunnerBackend):
         return 330  # Default: 300 + 30
 
     def _monitor(self, task_id: str, proc: subprocess.Popen,
-                 event: threading.Event, spec_path: str, timeout: float):
+                 event: threading.Event, spec_path: str, timeout: float,
+                 runlog_path: str = ""):
         """Monitor thread: wait for process, parse result, cleanup, signal completion."""
         record = None
         try:
@@ -219,7 +223,8 @@ class ProcessRunnerBackend(AgentRunnerBackend):
                 task_id=task_id,
                 status="failed",
                 result=format_fallback_report(
-                    "killed by timeout", f"subprocess exceeded {timeout}s"
+                    "killed by timeout", f"subprocess exceeded {timeout}s",
+                    runlog_path or None,
                 ),
             )
         except (json.JSONDecodeError, Exception) as e:
@@ -235,9 +240,25 @@ class ProcessRunnerBackend(AgentRunnerBackend):
             record = TaskRecord(
                 task_id=task_id,
                 status="failed",
-                result=format_fallback_report("process error", detail),
+                result=format_fallback_report(
+                    "process error", detail, runlog_path or None
+                ),
             )
         finally:
+            # v3.5: parent monitor writes runlog terminator. Subprocess may
+            # have died (SIGKILL / JSON corruption) before its own end-record
+            # got flushed; this guarantees observers see a terminator.
+            if runlog_path:
+                from llamagent.core.logging_llm import append_runlog
+                try:
+                    append_runlog(runlog_path, {
+                        "ts": time.time(),
+                        "kind": "end",
+                        "status": record.status if record else "unknown",
+                        "writer": "parent_monitor",
+                    })
+                except Exception:
+                    pass
             # Cleanup spec file
             try:
                 os.unlink(spec_path)

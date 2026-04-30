@@ -141,6 +141,35 @@ def main():
             tracker = BudgetTracker(budget)
             agent.llm = BudgetedLLM(agent.llm, tracker)
 
+        # v3.5: wrap with LoggingLLM and register POST_TOOL_USE hook so
+        # subprocess child also writes to the runlog file under
+        # parent.playground/child_runlogs/<task_id>.log. The path is set by
+        # the parent process via spec; subprocess just appends.
+        runlog_path = spec.get("runlog_path") or ""
+        if runlog_path:
+            from llamagent.core.logging_llm import LoggingLLM, append_runlog
+            from llamagent.core.hooks import HookEvent, HookResult
+
+            agent.llm = LoggingLLM(agent.llm, runlog_path)
+
+            def _runlog_tool_writer(ctx):
+                try:
+                    append_runlog(runlog_path, {
+                        "ts": time.time(),
+                        "kind": "tool",
+                        "name": ctx.data.get("tool_name"),
+                        "args_preview": str(ctx.data.get("args", ""))[:500],
+                        "result_preview": str(ctx.data.get("result", ""))[:500],
+                    })
+                except Exception:
+                    pass
+                return HookResult.CONTINUE
+
+            try:
+                agent.register_hook(HookEvent.POST_TOOL_USE, _runlog_tool_writer)
+            except Exception:
+                pass
+
         # Build prompt
         task = spec.get("task", "")
         context = spec.get("context", "")

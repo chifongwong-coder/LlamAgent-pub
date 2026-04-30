@@ -173,7 +173,9 @@ class ThreadRunnerBackend(AgentRunnerBackend):
                 role=spec.role,
                 task=spec.task,
                 status="failed",
-                result=format_fallback_report("budget exceeded", str(e)),
+                result=format_fallback_report(
+                    "budget exceeded", str(e), spec.runlog_path or None
+                ),
                 history=list(child.history) if child else [],
                 metrics=_build_metrics(elapsed, child),
                 created_at=start_time,
@@ -193,7 +195,8 @@ class ThreadRunnerBackend(AgentRunnerBackend):
                 task=spec.task,
                 status="failed",
                 result=format_fallback_report(
-                    "execution error", f"{type(e).__name__}: {e}"
+                    "execution error", f"{type(e).__name__}: {e}",
+                    spec.runlog_path or None,
                 ),
                 history=list(child.history) if child else [],
                 metrics=_build_metrics(elapsed, child),
@@ -206,6 +209,18 @@ class ThreadRunnerBackend(AgentRunnerBackend):
             )
 
         finally:
+            # v3.5: emit runlog "end" record so external observers see a
+            # clean terminator regardless of how the run finished.
+            if spec.runlog_path:
+                from llamagent.core.logging_llm import append_runlog
+                try:
+                    append_runlog(spec.runlog_path, {
+                        "ts": time.time(),
+                        "kind": "end",
+                        "status": record.status if record else "unknown",
+                    })
+                except Exception:
+                    pass
             # Remove log capture handler and store captured logs
             logging.getLogger().removeHandler(capture)
             captured_logs = "\n".join(capture.records[-100:])  # Last 100 entries
