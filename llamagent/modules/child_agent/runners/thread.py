@@ -115,10 +115,13 @@ class ThreadRunnerBackend(AgentRunnerBackend):
 
     def spawn(self, spec: ChildAgentSpec, agent_factory, task_id: str | None = None) -> str:
         """
-        Spawn a child agent in a new thread, returning immediately.
+        Spawn a child agent in a new thread.
 
-        The Event is created before starting the thread to prevent a race
-        where _run_child completes before the caller can access the event.
+        spawn() blocks until the factory completes (success or failure) so any
+        state the factory writes — e.g. ``task_board.metrics["agent_id"]`` for
+        continuous children — is visible by the time the caller receives the
+        task_id and may invoke ``send_message(task_id)``. The chat / run-loop
+        runs asynchronously after spawn() returns.
 
         Args:
             spec: Child agent specification.
@@ -130,18 +133,27 @@ class ThreadRunnerBackend(AgentRunnerBackend):
         """
         task_id = task_id or uuid.uuid4().hex[:12]
         event = threading.Event()
+        # Synchronization barrier: signalled once the factory has run (whether
+        # it produced an agent or raised). Eliminates the race where a parent
+        # tool call lands before the factory-side state is published.
+        factory_done = threading.Event()
         thread = threading.Thread(
             target=self._run_child,
-            args=(task_id, spec, agent_factory),
+            args=(task_id, spec, agent_factory, factory_done),
             daemon=True,
         )
         with self._lock:
             self._events[task_id] = event
             self._threads[task_id] = thread
         thread.start()
+        # 30 s upper bound: factory work is dominated by Config copy + Module
+        # init which is sub-second in practice. The cap is paranoia, not a
+        # functional dependency.
+        factory_done.wait(timeout=30)
         return task_id
 
-    def _run_child(self, task_id: str, spec: ChildAgentSpec, agent_factory):
+    def _run_child(self, task_id: str, spec: ChildAgentSpec, agent_factory,
+                   factory_done: threading.Event | None = None):
         """Thread target: create agent, run chat() or ContinuousRunner, store result."""
         # Set thread name for log disambiguation
         threading.current_thread().name = f"child-{task_id[:8]}"
@@ -156,9 +168,15 @@ class ThreadRunnerBackend(AgentRunnerBackend):
         record = None
 
         try:
-            child = agent_factory(spec)
-            with self._lock:
-                self._agents[task_id] = child
+            try:
+                child = agent_factory(spec)
+                with self._lock:
+                    self._agents[task_id] = child
+            finally:
+                # Release the parent thread regardless of factory outcome —
+                # spawn() can return as soon as factory state is published.
+                if factory_done is not None:
+                    factory_done.set()
 
             if spec.continuous:
                 record = self._run_continuous_child(

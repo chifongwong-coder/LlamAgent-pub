@@ -589,12 +589,26 @@ class ChildAgentModule(Module):
         if model_override:
             policy.model = model_override
 
+        # v3.5.1: enforce max_delegation_depth and propagate delegation_depth
+        # symmetrically with _spawn_child. Currently moot because continuous
+        # children have spawn tools pruned in the factory, but defensive — a
+        # future relaxation that re-enables grandchild spawning would
+        # otherwise silently bypass the cap.
+        max_depth = getattr(self.agent.config, "child_agent_max_delegation_depth", 2)
+        my_depth = getattr(self.agent, "_delegation_depth", 0)
+        if my_depth + 1 > max_depth:
+            return (
+                f"Cannot spawn continuous child: max_delegation_depth ({max_depth}) "
+                f"exceeded. Current depth: {my_depth}. Restructure your task to be flatter."
+            )
+
         spec = ChildAgentSpec(
             task=task,
             role=role,
             context="",
             policy=policy,
             parent_task_id=self._parent_id,
+            delegation_depth=my_depth + 1,
             continuous=True,
             trigger_type=trigger_type,
             trigger_interval=trigger_interval,
@@ -1171,14 +1185,19 @@ class ChildAgentModule(Module):
                 if tool.get("execution_policy") is None:
                     tool["execution_policy"] = spec.policy.execution_policy
 
-        # 9. Register to AgentRegistry and register messaging tools on child
+        # v3.5.1: propagate delegation_depth so a hypothetical relaxation of
+        # the spawn-tool pruning would still let the cap fire on grandchildren.
+        # Mirrors the short-child factory.
+        child._delegation_depth = spec.delegation_depth
+
+        # 9. Register to AgentRegistry and publish agent_id to task_board.
         if self._registry:
             self._registry.register(child.agent_id, role=spec.role, mode="continuous")
-        self._register_child_messaging_tools(child)
-
-        # v3.5 B1: populate task_board metrics so send_message(task_id) can
-        # resolve to agent_id while the child is still running, not only
-        # after it completes (continuous children live a long time).
+        # v3.5 B1: write the task_board agent_id metric IMMEDIATELY after
+        # registry.register so that any subsequent setup step's failure
+        # (messaging-tools registration, runlog attach) still leaves the
+        # metric present — the on-complete callback uses it to unregister
+        # the registry entry, avoiding a registry leak on factory crash.
         if spec.task_id:
             try:
                 self.controller.task_board.update(
@@ -1186,6 +1205,8 @@ class ChildAgentModule(Module):
                 )
             except KeyError:
                 pass  # Board entry not yet created (shouldn't happen)
+
+        self._register_child_messaging_tools(child)
 
         # v3.5: attach runlog (observability-only, not parent-visible)
         if spec.runlog_path:
@@ -1256,8 +1277,22 @@ class ChildAgentModule(Module):
         if self._auto_memorize and record.status == "completed" and record.result:
             self._save_child_result_to_memory(record.task, record.role, record.result)
 
-        # Unregister continuous child agent from AgentRegistry
+        # Unregister continuous child agent from AgentRegistry. Source the
+        # agent_id from the task_board (single source of truth) rather than
+        # the runner's record: the factory writes the metric early in
+        # ``_create_continuous_child_agent``, so it is present even when the
+        # child crashes before the runner had a chance to populate
+        # ``record.metrics`` with agent_id (which only happens on a clean
+        # ContinuousRunner exit). The board's ``update`` merge semantics
+        # preserve the early write through later runner-side metric writes.
         agent_id = record.metrics.get("agent_id") if record.metrics else None
+        if not agent_id and self.controller is not None:
+            try:
+                board_record = self.controller.task_board.get(task_id)
+            except Exception:
+                board_record = None
+            if board_record and board_record.metrics:
+                agent_id = board_record.metrics.get("agent_id")
         if self._registry and agent_id:
             try:
                 self._registry.unregister(agent_id)
