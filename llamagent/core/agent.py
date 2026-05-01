@@ -42,6 +42,36 @@ from llamagent.core.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 
+# v3.5.2: scoped exception policy. The agent only catches what it knows
+# (provider-level LLM errors). Anything else — framework signaling
+# exceptions like ``BudgetExceededError``, ``KeyboardInterrupt``,
+# programming bugs from custom LLM clients — propagates to the caller.
+#
+# Note on the source of the parent class: LiteLLM's *standard provider
+# errors* (APIError, AuthenticationError, RateLimitError,
+# ContextWindowExceededError, ServiceUnavailableError, BadRequestError, …)
+# all inherit from ``openai.OpenAIError`` — the upstream OpenAI library's
+# class — NOT ``litellm.exceptions.OpenAIError`` which is a separate
+# class used only for LiteLLM-internal signaling wrappers (Budget,
+# Guardrail, etc.). Catching ``openai.OpenAIError`` covers the full
+# provider error surface; catching ``litellm.exceptions.OpenAIError``
+# would miss every real provider error.
+#
+# When ``openai`` / ``litellm`` are not installed both tuples are empty,
+# which makes the ``except`` clauses no-ops and lets every exception
+# propagate (the correct behaviour for users plugging in their own
+# ``LLMClient``).
+try:
+    import openai
+    _KNOWN_LLM_ERRORS: tuple = (openai.OpenAIError,)
+except ImportError:
+    _KNOWN_LLM_ERRORS = ()
+try:
+    import litellm.exceptions as _litellm_exc
+    _CONTEXT_WINDOW_ERRORS: tuple = (_litellm_exc.ContextWindowExceededError,)
+except ImportError:
+    _CONTEXT_WINDOW_ERRORS = ()
+
 # Preview length when persisting an oversized tool result. Smaller forces the
 # model to call read_files for the full content rather than guess from preview.
 _PERSIST_PREVIEW_CHARS = 300
@@ -1603,15 +1633,14 @@ class LlamAgent:
             try:
                 resp = self.llm.chat(messages, tools=tools_schema,
                                      timeout=self.config.react_timeout)
-            except Exception as e:
-                # ContextWindowExceededError -> abort loop
-                error_name = type(e).__name__
-                if "ContextWindow" in error_name:
-                    logger.warning("Context window overflow during ReAct loop, aborting")
-                    text = last_text_response or "The task is too complex. Consider enabling the Planning module for step-by-step execution, or use /clear to clear conversation history."
-                    self._react_trace = messages[initial_len:] if len(messages) > initial_len else None
-                    return ReactResult(text=text, status="context_overflow",
-                                       error=str(e), steps_used=steps, terminal=True)
+            except _CONTEXT_WINDOW_ERRORS as e:
+                # Context overflow: abort the loop with a recoverable status
+                logger.warning("Context window overflow during ReAct loop, aborting")
+                text = last_text_response or "The task is too complex. Consider enabling the Planning module for step-by-step execution, or use /clear to clear conversation history."
+                self._react_trace = messages[initial_len:] if len(messages) > initial_len else None
+                return ReactResult(text=text, status="context_overflow",
+                                   error=str(e), steps_used=steps, terminal=True)
+            except _KNOWN_LLM_ERRORS as e:
                 logger.error("ReAct LLM call failed: %s", e)
                 self._react_trace = messages[initial_len:] if len(messages) > initial_len else None
                 return ReactResult(text=f"ReAct execution error: {e}", status="error",
@@ -1752,12 +1781,20 @@ class LlamAgent:
                            status="max_steps", steps_used=steps)
 
     def _simple_llm_call(self, messages: list[dict]) -> ReactResult:
-        """Simple LLM call when no tools are available."""
+        """Simple LLM call when no tools are available.
+
+        Catches LiteLLM provider errors (``OpenAIError`` family) and reports
+        them as a ``status="error"`` ReactResult so chat() can surface a
+        friendly message. Anything else — ``BudgetExceededError``,
+        ``KeyboardInterrupt``, runtime bugs from custom LLM clients —
+        propagates to the caller (e.g. the child_agent runner converts
+        ``BudgetExceededError`` into a v3.5 fallback report).
+        """
         try:
             resp = self.llm.chat(messages)
             return ReactResult(text=resp.choices[0].message.content or "",
                                status="completed")
-        except Exception as e:
+        except _KNOWN_LLM_ERRORS as e:
             logger.error("LLM call failed: %s", e)
             return ReactResult(text=f"Conversation error: {e}", status="error", error=str(e))
 
@@ -1786,7 +1823,7 @@ class LlamAgent:
                     delta = chunk.choices[0].delta
                     if hasattr(delta, "content") and delta.content:
                         yield delta.content
-            except Exception as e:
+            except _KNOWN_LLM_ERRORS as e:
                 logger.error("LLM stream call failed: %s", e)
                 yield f"\n[Error: {e}]"
             return
@@ -1832,11 +1869,10 @@ class LlamAgent:
                             yield delta.content
                         if hasattr(delta, "tool_calls") and delta.tool_calls:
                             self._merge_tool_call_deltas(accumulated_tool_calls, delta.tool_calls)
-                except Exception as e:
-                    error_name = type(e).__name__
-                    if "ContextWindow" in error_name:
-                        yield "\n[Context window overflow]"
-                        return
+                except _CONTEXT_WINDOW_ERRORS:
+                    yield "\n[Context window overflow]"
+                    return
+                except _KNOWN_LLM_ERRORS as e:
                     logger.error("ReAct stream LLM call failed: %s", e)
                     yield f"\n[Error: {e}]"
                     return
