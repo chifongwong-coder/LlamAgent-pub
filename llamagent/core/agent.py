@@ -1225,6 +1225,15 @@ class LlamAgent:
                 logger.error("Module '%s' on_context error: %s", mod.name, e)
 
         # 3. Execution strategy
+        # v3.5.2: scoped exception policy at the chat() boundary too. The
+        # inner LLM-call sites (run_react / _simple_llm_call /
+        # run_react_stream) already convert provider errors to ReactResult
+        # with status="error". By the time anything bubbles out to here it
+        # is either an inner provider error that escaped (rare; we still
+        # surface a friendly string) or a framework signaling exception /
+        # programming bug — those propagate to the caller. Notably this
+        # lets the child_agent runner's outer ``except BudgetExceededError``
+        # actually fire and produce a v3.5 fallback report.
         try:
             if is_prepare:
                 # Prepare mode: inject extra_system, run react directly
@@ -1238,7 +1247,7 @@ class LlamAgent:
                     response = self._execution_strategy.execute(processed, context + "\n" + extra_system, self)
                 else:
                     response = self._execution_strategy.execute(processed, context, self)
-        except Exception as e:
+        except _KNOWN_LLM_ERRORS as e:
             logger.error("Execution error: %s", e)
             response = f"Error processing request: {e}"
 
