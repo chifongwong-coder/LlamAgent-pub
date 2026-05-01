@@ -161,6 +161,10 @@ class ProcessRunnerBackend(AgentRunnerBackend):
             ),
             "system_prompt": child_system_prompt,
             "child_agent_report_template": report_template,
+            "child_agent_runlog_max_bytes": (
+                getattr(self._parent_config, "child_agent_runlog_max_bytes", 10 * 1024 * 1024)
+                if self._parent_config else 10 * 1024 * 1024
+            ),
             "project_dir": getattr(self._parent_config, "project_dir", None) if self._parent_config else None,
             "playground_dir": getattr(self._parent_config, "playground_dir", None) if self._parent_config else None,
             "share_parent_project_dir": (

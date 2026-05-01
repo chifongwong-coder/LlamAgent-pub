@@ -37,6 +37,7 @@ def main():
     start_time = time.time()
     output = None
     agent = None
+    spec = None  # made available to except handlers for runlog_path lookup
 
     try:
         # ---- read spec (inside try so errors produce JSON output) ----
@@ -63,6 +64,10 @@ def main():
         # the structured shape.
         if spec_config.get("child_agent_report_template"):
             config.child_agent_report_template = spec_config["child_agent_report_template"]
+        # v3.5.1: honour parent's runlog rotation cap so a process-runner
+        # child uses the same cap as inline / thread children.
+        if spec_config.get("child_agent_runlog_max_bytes"):
+            config.child_agent_runlog_max_bytes = spec_config["child_agent_runlog_max_bytes"]
 
         # Create agent
         agent = LlamAgent(config)
@@ -156,7 +161,11 @@ def main():
             from llamagent.core.logging_llm import LoggingLLM, append_runlog
             from llamagent.core.hooks import HookEvent, HookResult
 
-            agent.llm = LoggingLLM(agent.llm, runlog_path)
+            agent.llm = LoggingLLM(
+                agent.llm,
+                runlog_path,
+                max_bytes=getattr(config, "child_agent_runlog_max_bytes", 10 * 1024 * 1024),
+            )
 
             def _runlog_tool_writer(ctx):
                 try:
@@ -208,18 +217,31 @@ def main():
 
     except SystemExit:
         elapsed = time.time() - start_time
+        from llamagent.modules.child_agent.runner import format_fallback_report
+        runlog_path = (spec or {}).get("runlog_path") if isinstance(spec, dict) else None
         output = {
             "status": "cancelled",
-            "result": "Process terminated",
+            "result": format_fallback_report(
+                "cancelled", "subprocess terminated", runlog_path or None
+            ),
             "history": list(agent.history) if agent else [],
             "metrics": {"elapsed_seconds": round(elapsed, 2)},
         }
 
     except BaseException as e:
         elapsed = time.time() - start_time
+        # v3.5.1: align subprocess in-process exception result with the
+        # v3.5 fallback shape so the parent's model reads success and
+        # failure paths through the same Status/Summary/Artifacts
+        # convention. Previously raw str(e) bypassed the convention only
+        # for this code path.
+        from llamagent.modules.child_agent.runner import format_fallback_report
+        runlog_path = (spec or {}).get("runlog_path") if isinstance(spec, dict) else None
         output = {
             "status": "failed",
-            "result": str(e),
+            "result": format_fallback_report(
+                "execution error", f"{type(e).__name__}: {e}", runlog_path or None
+            ),
             "history": list(agent.history) if agent else [],
             "metrics": {"elapsed_seconds": round(elapsed, 2)},
         }
