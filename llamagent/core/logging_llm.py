@@ -60,9 +60,13 @@ def append_runlog(runlog_path: str, record: dict, max_bytes: int = 10 * 1024 * 1
             # land in the middle of a multi-byte UTF-8 sequence and corrupt
             # JSON readers; a placeholder record sidesteps that entirely.
             if len(encoded) > _MAX_LINE_BYTES:
+                # Defensive: cap kind to 64 chars so a pathological caller
+                # passing a giant kind string can't re-bust the placeholder.
+                kind_raw = record.get("kind", "?")
+                kind_safe = str(kind_raw)[:64] if kind_raw is not None else "?"
                 placeholder = {
                     "ts": record.get("ts", time.time()),
-                    "kind": record.get("kind", "?"),
+                    "kind": kind_safe,
                     "truncated": True,
                 }
                 encoded = (json.dumps(placeholder, ensure_ascii=False) + "\n").encode("utf-8")

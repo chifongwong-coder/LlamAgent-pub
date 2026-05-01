@@ -602,9 +602,7 @@ class ChildAgentModule(Module):
         )
         # v3.5 B2: pre-allocate task_id + runlog_path so the long-running
         # continuous child gets the same observability sink as short children.
-        if not spec.task_id:
-            import uuid as _uuid
-            spec.task_id = _uuid.uuid4().hex[:12]
+        self._ensure_task_id(spec)
         spec.runlog_path = self._runlog_path_for(spec.task_id)
         try:
             task_id = self.controller.spawn_child(spec, self._create_child_agent)
@@ -679,10 +677,7 @@ class ChildAgentModule(Module):
         # v3.5: pre-allocate runlog path. Controller sets spec.task_id before
         # factory invocation, but we need the path string ahead of spawn so
         # the runner finally block can write the "end" record after a crash.
-        # Pre-generate task_id here (controller respects pre-set IDs).
-        if not spec.task_id:
-            import uuid as _uuid
-            spec.task_id = _uuid.uuid4().hex[:12]
+        self._ensure_task_id(spec)
         spec.runlog_path = self._runlog_path_for(spec.task_id)
         try:
             task_id = self.controller.spawn_child(spec, self._create_child_agent)
@@ -805,6 +800,20 @@ class ChildAgentModule(Module):
     # ============================================================
     # v3.5: Runlog (observability-only, not parent-visible)
     # ============================================================
+
+    @staticmethod
+    def _ensure_task_id(spec) -> str:
+        """Ensure ``spec.task_id`` is set; allocate one when missing.
+
+        The controller honours pre-set IDs (see ``ChildAgentController.spawn_child``),
+        so callers that need to compute downstream paths (runlog, child_root)
+        before invoking the controller can pre-bind via this helper. Returns
+        the resulting task_id.
+        """
+        if not spec.task_id:
+            import uuid as _uuid
+            spec.task_id = _uuid.uuid4().hex[:12]
+        return spec.task_id
 
     def _runlog_path_for(self, task_id: str) -> str:
         """Return the absolute runlog path for a child task_id.
@@ -944,7 +953,6 @@ class ChildAgentModule(Module):
         # the child shares the parent's project_dir + scopes.
         # When policy is None (backward compat), default to True (share).
         import os
-        import uuid as _uuid
         share_parent_project_dir = (
             spec.policy.share_parent_project_dir if spec.policy else True
         )
@@ -954,7 +962,7 @@ class ChildAgentModule(Module):
             child.playground_dir = parent.playground_dir
         else:
             # Isolated: child gets its own project_dir under parent's playground
-            child_task_id = spec.task_id or _uuid.uuid4().hex[:12]
+            child_task_id = self._ensure_task_id(spec)
             child_root = os.path.join(
                 parent.playground_dir, "children", child_task_id
             )
@@ -1088,8 +1096,7 @@ class ChildAgentModule(Module):
             child.project_dir = parent.project_dir
             child.playground_dir = parent.playground_dir
         else:
-            import uuid as _uuid
-            child_task_id = spec.task_id or _uuid.uuid4().hex[:12]
+            child_task_id = self._ensure_task_id(spec)
             child_root = os.path.join(
                 parent.playground_dir, "children", child_task_id
             )
