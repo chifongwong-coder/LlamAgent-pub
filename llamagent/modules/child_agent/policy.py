@@ -36,7 +36,10 @@ class AgentExecutionPolicy:
     execution_policy: object | None = None  # ExecutionPolicy when sandbox is available
     budget: Budget | None = None
     can_spawn_children: bool = False
-    max_delegation_depth: int = 1
+    # v3.5: max_delegation_depth retired from policy — depth cap is now per-agent
+    # via config.child_agent_max_delegation_depth (default 2). Per-policy override
+    # was never enforced (dead code from v2.6); a future re-introduction should
+    # consult both sources.
     history_mode: str = "none"
     result_mode: str = "text"
     # v3.4 R3: replaces the old workspace_mode str enum. Default False

@@ -84,6 +84,11 @@ class TaskBoard:
         Args:
             task_id: The task to update.
             **kwargs: Fields to update (e.g., status="completed", result="...").
+                ``metrics`` has merge semantics: the supplied dict is merged
+                into the existing record's metrics rather than replacing it,
+                so partial writes (e.g. early ``agent_id`` from the factory,
+                later ``elapsed_seconds`` from the runner) compose without
+                clobbering each other.
 
         Raises:
             KeyError: If the task_id does not exist.
@@ -92,12 +97,15 @@ class TaskBoard:
             record = self._tasks.get(task_id)
             if record is None:
                 raise KeyError(f"Task '{task_id}' not found on the task board")
-            # Atomic replace: create a new record with updated fields to prevent
-            # readers from observing partially-updated state via mutable references.
             from dataclasses import replace
-            self._tasks[task_id] = replace(record, **{
-                k: v for k, v in kwargs.items() if hasattr(record, k)
-            })
+            patch = {k: v for k, v in kwargs.items() if hasattr(record, k)}
+            # Merge metrics rather than replace so partial writers can
+            # compose. Other fields keep replace semantics.
+            if "metrics" in patch and isinstance(patch["metrics"], dict):
+                merged = dict(record.metrics or {})
+                merged.update(patch["metrics"])
+                patch["metrics"] = merged
+            self._tasks[task_id] = replace(record, **patch)
 
     def get(self, task_id: str) -> TaskRecord | None:
         """Look up a task record by ID. Returns a snapshot (safe for concurrent reads)."""

@@ -131,6 +131,22 @@ class ProcessRunnerBackend(AgentRunnerBackend):
             else (self._parent_config.model if self._parent_config else "auto")
         )
 
+        # v3.5: propagate child_agent_report_template so the subprocess can
+        # decide whether to use template B (system_prompt), template A
+        # (auto-prompt), or neither (off).
+        report_template = (
+            getattr(self._parent_config, "child_agent_report_template", "system_prompt")
+            if self._parent_config else "system_prompt"
+        )
+
+        if spec.system_prompt:
+            child_system_prompt = spec.system_prompt
+        elif report_template in ("system_prompt", "auto"):
+            from llamagent.modules.child_agent.module import CHILD_SYSTEM_PROMPT
+            child_system_prompt = CHILD_SYSTEM_PROMPT.format(role=spec.role)
+        else:
+            child_system_prompt = f"You are a {spec.role}."
+
         config_data = {
             "model": model,
             "max_react_steps": (
@@ -143,7 +159,8 @@ class ProcessRunnerBackend(AgentRunnerBackend):
                 if spec.policy and spec.policy.budget and spec.policy.budget.max_time_seconds
                 else 60
             ),
-            "system_prompt": spec.system_prompt or f"You are a {spec.role}.",
+            "system_prompt": child_system_prompt,
+            "child_agent_report_template": report_template,
             "project_dir": getattr(self._parent_config, "project_dir", None) if self._parent_config else None,
             "playground_dir": getattr(self._parent_config, "playground_dir", None) if self._parent_config else None,
             "share_parent_project_dir": (

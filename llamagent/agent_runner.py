@@ -57,6 +57,12 @@ def main():
             config.react_timeout = spec_config["react_timeout"]
         if spec_config.get("system_prompt"):
             config.system_prompt = spec_config["system_prompt"]
+        # v3.5: report_template gates the framework auto-prompt. Default
+        # "system_prompt" relies on the system_prompt convention alone;
+        # "auto" additionally re-asks the model if the final reply lacks
+        # the structured shape.
+        if spec_config.get("child_agent_report_template"):
+            config.child_agent_report_template = spec_config["child_agent_report_template"]
 
         # Create agent
         agent = LlamAgent(config)
@@ -180,6 +186,10 @@ def main():
 
         # Execute
         result_text = agent.chat(prompt)
+        # v3.5 template A: optional auto-prompt for completion report.
+        # No-op when report_template != "auto" or shape is already present.
+        from llamagent.modules.child_agent.runner import maybe_request_completion_report
+        result_text = maybe_request_completion_report(agent, result_text)
         elapsed = time.time() - start_time
 
         metrics = {"elapsed_seconds": round(elapsed, 2)}

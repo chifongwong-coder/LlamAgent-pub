@@ -600,6 +600,12 @@ class ChildAgentModule(Module):
             trigger_interval=trigger_interval,
             trigger_watch_dir=trigger_watch_dir,
         )
+        # v3.5 B2: pre-allocate task_id + runlog_path so the long-running
+        # continuous child gets the same observability sink as short children.
+        if not spec.task_id:
+            import uuid as _uuid
+            spec.task_id = _uuid.uuid4().hex[:12]
+        spec.runlog_path = self._runlog_path_for(spec.task_id)
         try:
             task_id = self.controller.spawn_child(spec, self._create_child_agent)
         except RuntimeError as e:
@@ -682,10 +688,6 @@ class ChildAgentModule(Module):
             task_id = self.controller.spawn_child(spec, self._create_child_agent)
         except RuntimeError as e:
             return f"Cannot spawn child agent: {e}"
-        # v3.5: track active child for cascading cancellation
-        if not hasattr(self.agent, "_active_child_ids"):
-            self.agent._active_child_ids = set()
-        self.agent._active_child_ids.add(task_id)
 
         # v3.5: emit structured spawn return with child_dir for cross-agent
         # path resolution. share_parent_project_dir=True → child_dir is
@@ -1166,6 +1168,17 @@ class ChildAgentModule(Module):
         if self._registry:
             self._registry.register(child.agent_id, role=spec.role, mode="continuous")
         self._register_child_messaging_tools(child)
+
+        # v3.5 B1: populate task_board metrics so send_message(task_id) can
+        # resolve to agent_id while the child is still running, not only
+        # after it completes (continuous children live a long time).
+        if spec.task_id:
+            try:
+                self.controller.task_board.update(
+                    spec.task_id, metrics={"agent_id": child.agent_id}
+                )
+            except KeyError:
+                pass  # Board entry not yet created (shouldn't happen)
 
         # v3.5: attach runlog (observability-only, not parent-visible)
         if spec.runlog_path:

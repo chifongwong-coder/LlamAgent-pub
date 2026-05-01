@@ -55,9 +55,17 @@ def append_runlog(runlog_path: str, record: dict, max_bytes: int = 10 * 1024 * 1
                     encoded = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
                     if len(encoded) <= _MAX_LINE_BYTES:
                         break
-            # Hard cap if still too long
+            # Hard cap if still too long: replace with a placeholder record
+            # that's guaranteed valid JSON + UTF-8. A naive byte-slice could
+            # land in the middle of a multi-byte UTF-8 sequence and corrupt
+            # JSON readers; a placeholder record sidesteps that entirely.
             if len(encoded) > _MAX_LINE_BYTES:
-                encoded = encoded[: _MAX_LINE_BYTES - 1] + b"\n"
+                placeholder = {
+                    "ts": record.get("ts", time.time()),
+                    "kind": record.get("kind", "?"),
+                    "truncated": True,
+                }
+                encoded = (json.dumps(placeholder, ensure_ascii=False) + "\n").encode("utf-8")
         # Rotation: rename when file would exceed max_bytes
         try:
             existing = os.path.getsize(runlog_path) if os.path.exists(runlog_path) else 0
