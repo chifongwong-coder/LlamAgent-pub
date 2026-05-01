@@ -20,9 +20,23 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 import time
 
 from llamagent.core.agent import Module
+
+# v3.5: Child completion report convention (template B — system prompt).
+# Combined with the framework auto-prompt (template A, commit-6), the goal
+# is for record.result to be a structured summary the parent's model can
+# read consistently. Framework does NOT parse this output — record.result
+# stays a free-form string.
+CHILD_SYSTEM_PROMPT = (
+    "You are a {role}. Complete the assigned task concisely.\n\n"
+    "When your task is complete, your final reply MUST follow this format:\n"
+    "Status: success | partial | failed\n"
+    "Summary: <1-3 sentences describing what you did>\n"
+    "Artifacts: <comma-separated absolute paths of files you created or modified, or \"none\">"
+)
 from llamagent.modules.child_agent.budget import BudgetedLLM, BudgetTracker
 from llamagent.modules.child_agent.policy import (
     AgentExecutionPolicy,
@@ -105,11 +119,14 @@ class ChildAgentController:
         # Pre-generate task_id so we can create the board entry BEFORE spawning.
         # This prevents a race where the callback fires before the board entry exists
         # (happens when the child completes instantly, e.g., mock LLM in tests).
-        import uuid
-        task_id = uuid.uuid4().hex[:12]
-
-        # Set task_id on spec so the agent factory can use it (e.g., for workspace dir)
-        spec.task_id = task_id
+        # v3.5: respect pre-set spec.task_id (caller may have already allocated it
+        # so it can compute downstream paths like runlog_path).
+        if spec.task_id:
+            task_id = spec.task_id
+        else:
+            import uuid
+            task_id = uuid.uuid4().hex[:12]
+            spec.task_id = task_id
 
         # Build input snapshot for debugging/auditing
         input_snapshot = {
@@ -227,7 +244,23 @@ class ChildAgentController:
         return self.task_board.children_of(parent_id)
 
     def cancel_child(self, task_id: str) -> bool:
-        """Cancel a running child agent."""
+        """Cancel a running child agent and all its descendants.
+
+        v3.5: cancellation cascades — if the target child has spawned
+        grandchildren, they are killed before the target itself. Mirrors
+        Hermes' _active_children walk: depth-first so nothing escapes.
+        """
+        # Walk descendants depth-first
+        descendants = self._collect_descendants(task_id)
+        for desc_id in descendants:
+            try:
+                self.runner.cancel(desc_id)
+                rec = self.task_board.get(desc_id)
+                if rec and rec.status == "running":
+                    self.task_board.update(desc_id, status="cancelled")
+            except Exception:
+                pass  # best-effort
+
         success = self.runner.cancel(task_id)
         if success:
             # Only overwrite status if still running (child may have completed before abort took effect)
@@ -235,6 +268,17 @@ class ChildAgentController:
             if existing and existing.status == "running":
                 self.task_board.update(task_id, status="cancelled")
         return success
+
+    def _collect_descendants(self, task_id: str) -> list[str]:
+        """Return [grandchild_id, ggc_id, ...] in depth-first order."""
+        out = []
+        stack = [task_id]
+        while stack:
+            current = stack.pop()
+            for child in self.task_board.children_of(current):
+                out.append(child.task_id)
+                stack.append(child.task_id)
+        return out
 
     def collect_results(self, parent_id: str) -> list[TaskRecord]:
         """Collect completed/failed results for a parent."""
@@ -377,14 +421,6 @@ class ChildAgentModule(Module):
                             "type": "string",
                             "description": "The task_id of the child agent to wait for",
                         },
-                        "include_history": {
-                            "type": "boolean",
-                            "description": "If true, include the full conversation history of the child agent",
-                        },
-                        "include_logs": {
-                            "type": "boolean",
-                            "description": "If true, include the child agent's execution logs (stderr for process, captured logs for thread)",
-                        },
                     },
                     "required": ["task_id"],
                 },
@@ -411,13 +447,16 @@ class ChildAgentModule(Module):
         agent.register_tool(
             name="send_message",
             func=self._tool_send_message,
-            description="Send a message to another agent by agent_id",
+            description=(
+                "Send a message to another agent. Pass the recipient's agent_id "
+                "(from list_agents) or the task_id of a child you spawned."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
                     "to_id": {
                         "type": "string",
-                        "description": "The agent_id of the recipient",
+                        "description": "Recipient agent_id, or task_id of a spawned child",
                     },
                     "content": {
                         "type": "string",
@@ -488,12 +527,31 @@ class ChildAgentModule(Module):
         )
 
     def _tool_send_message(self, to_id: str, content: str, msg_type: str = "info") -> str:
-        """Send a message to another agent."""
+        """Send a message to another agent. v3.5: to_id may be an agent_id
+        OR a task_id of a child this agent spawned."""
+        # v3.5: if to_id matches a known task_id of a continuous child,
+        # resolve to that child's agent_id.
+        resolved_to_id = self._resolve_send_target(to_id)
         try:
-            msg_id = self._channel.send(self._agent_id, to_id, content, msg_type)
+            msg_id = self._channel.send(self._agent_id, resolved_to_id, content, msg_type)
             return f"Message sent (id: {msg_id})"
         except KeyError:
             return f"Agent '{to_id}' not found."
+
+    def _resolve_send_target(self, target: str) -> str:
+        """Resolve a send_message target. If target is a known task_id of a
+        continuous child, return that child's agent_id; else return target
+        unchanged (caller's KeyError handler will report on miss)."""
+        try:
+            record = self.controller.task_board.get(target)
+        except Exception:
+            return target
+        if record is None:
+            return target
+        agent_id = (record.metrics or {}).get("agent_id")
+        if isinstance(agent_id, str) and agent_id:
+            return agent_id
+        return target
 
     def _tool_check_messages(self) -> str:
         """Check and return pending messages."""
@@ -542,6 +600,12 @@ class ChildAgentModule(Module):
             trigger_interval=trigger_interval,
             trigger_watch_dir=trigger_watch_dir,
         )
+        # v3.5 B2: pre-allocate task_id + runlog_path so the long-running
+        # continuous child gets the same observability sink as short children.
+        if not spec.task_id:
+            import uuid as _uuid
+            spec.task_id = _uuid.uuid4().hex[:12]
+        spec.runlog_path = self._runlog_path_for(spec.task_id)
         try:
             task_id = self.controller.spawn_child(spec, self._create_child_agent)
         except RuntimeError as e:
@@ -593,32 +657,76 @@ class ChildAgentModule(Module):
         if model_override:
             policy.model = model_override
 
+        # v3.5: enforce max_delegation_depth before spawn. Default cap = 2
+        # (Hermes-style). The cap is applied when *this* agent is itself a
+        # child agent (i.e. has a delegation_depth set on its own spec).
+        max_depth = getattr(self.agent.config, "child_agent_max_delegation_depth", 2)
+        my_depth = getattr(self.agent, "_delegation_depth", 0)
+        if my_depth + 1 > max_depth:
+            return (
+                f"Cannot spawn child: max_delegation_depth ({max_depth}) exceeded. "
+                f"Current depth: {my_depth}. Restructure your task to be flatter."
+            )
+
         spec = ChildAgentSpec(
             task=task,
             role=role,
             context=context,
             policy=policy,
             parent_task_id=self._parent_id,
+            delegation_depth=my_depth + 1,
         )
+        # v3.5: pre-allocate runlog path. Controller sets spec.task_id before
+        # factory invocation, but we need the path string ahead of spawn so
+        # the runner finally block can write the "end" record after a crash.
+        # Pre-generate task_id here (controller respects pre-set IDs).
+        if not spec.task_id:
+            import uuid as _uuid
+            spec.task_id = _uuid.uuid4().hex[:12]
+        spec.runlog_path = self._runlog_path_for(spec.task_id)
         try:
             task_id = self.controller.spawn_child(spec, self._create_child_agent)
         except RuntimeError as e:
             return f"Cannot spawn child agent: {e}"
 
+        # v3.5: emit structured spawn return with child_dir for cross-agent
+        # path resolution. share_parent_project_dir=True → child_dir is
+        # parent.project_dir; False → parent.playground/children/<task_id>/.
+        share = policy.share_parent_project_dir if policy else True
+        if share:
+            child_dir = self.agent.project_dir
+        else:
+            child_dir = os.path.join(self.agent.playground_dir, "children", task_id)
+        header = (
+            f"Spawned child agent.\n"
+            f"- task_id: {task_id}\n"
+            f"- role: {role}\n"
+            f"- child_dir: {child_dir}\n"
+            f"- Note: if the child reports relative artifact paths, resolve them against child_dir.\n"
+        )
+
         # Check if already completed (inline runner, or very fast thread execution)
         record = self.controller.task_board.get(task_id)
         if record and record.status in ("completed", "failed"):
-            return record.result or f"Child agent ({role}) completed with no output."
+            body = record.result or f"Child agent ({role}) completed with no output."
+            return f"{header}\nResult: {body}"
         else:
             # Thread runner: return task_id for async collection
             return (
-                f"Spawned child agent [task_id: {task_id}] with role={role}. "
+                f"{header}\n"
                 f"Use wait_child(task_id=\"{task_id}\") or collect_results() to get results."
             )
 
-    def _wait_child(self, task_id: str, include_history: bool = False,
-                    include_logs: bool = False) -> str:
-        """Wait for a specific child agent and return its result."""
+    def _wait_child(self, task_id: str) -> str:
+        """Wait for a specific child agent and return its result.
+
+        v3.5: removed include_history / include_logs parameters (hard break,
+        no shim). They were anti-patterns: leaking child internal state into
+        parent's context. Parent gets the child's completion summary in
+        record.result, plus the child_dir hint for resolving relative paths.
+        For debugging, child runs are written to a runlog file (commit-4)
+        which is for external observation only — not exposed to parent agent.
+        """
         record = self.controller.task_board.get(task_id)
         if record is None:
             return f"No child agent found with task_id '{task_id}'."
@@ -631,21 +739,16 @@ class ChildAgentModule(Module):
             return f"Child agent '{task_id}' completed but result not yet available."
 
         result = record.result or "(no output)"
-        if include_history and record.history:
-            history_text = "\n".join(
-                f"[{m.get('role', '?')}]: {(m.get('content') or '')[:2000]}"
-                for m in record.history
-            )
-            result = f"Result: {result}\n\nFull history:\n{history_text}"
-        if include_logs and record.logs:
-            result += f"\n\nChild logs:\n{record.logs[:2000]}"
-        # Include child_root path for isolated children (share_parent_project_dir=False)
+        # Include child_dir hint so parent can resolve relative artifact paths.
         if record.input_snapshot and record.input_snapshot.get("child_root"):
-            import os
-            child_root = os.path.join(
+            child_dir = os.path.join(
                 self.agent.playground_dir, record.input_snapshot["child_root"]
             )
-            result += f"\n\nChild root: {child_root}"
+        else:
+            child_dir = self.agent.project_dir
+        result += (
+            f"\n\n(Resolve relative artifact paths against {child_dir})"
+        )
         return result
 
     def _list_children(self) -> str:
@@ -684,7 +787,10 @@ class ChildAgentModule(Module):
             lines.append(f"({timed_out} child agent(s) timed out and are still running)")
         for r in results:
             task_preview = r.task[:50] + "..." if len(r.task) > 50 else r.task
-            result_preview = r.result[:200] if r.result else "(no output)"
+            # v3.5: no [:200] truncation — record.result is the child's summary,
+            # bounded by design. ReAct's _truncate_observation handles overflow
+            # at the framework layer if the aggregate gets too long.
+            body = r.result if r.result else "(no output)"
             cost_parts = []
             if r.metrics.get("llm_calls"):
                 cost_parts.append(f"{r.metrics['llm_calls']} LLM calls")
@@ -693,8 +799,60 @@ class ChildAgentModule(Module):
             if r.metrics.get("elapsed_seconds"):
                 cost_parts.append(f"{r.metrics['elapsed_seconds']}s")
             cost_line = f"\nCost: {', '.join(cost_parts)}" if cost_parts else ""
-            lines.append(f"[{r.role}] {task_preview}\nResult: {result_preview}{cost_line}")
+            lines.append(f"[{r.role}] {task_preview}\nResult: {body}{cost_line}")
         return "\n\n".join(lines)
+
+    # ============================================================
+    # v3.5: Runlog (observability-only, not parent-visible)
+    # ============================================================
+
+    def _runlog_path_for(self, task_id: str) -> str:
+        """Return the absolute runlog path for a child task_id.
+
+        Lives under parent.playground_dir/child_runlogs/<task_id>.log so
+        parent and child (even cross-process) can both physically reach it.
+        """
+        return os.path.join(
+            self.agent.playground_dir, "child_runlogs", f"{task_id}.log"
+        )
+
+    def _attach_runlog(self, child, runlog_path: str) -> None:
+        """Wrap child's LLM with LoggingLLM and register POST_TOOL_USE hook.
+
+        Both writers are append-only to the same JSONL file. The hook closure
+        captures runlog_path; LoggingLLM is a thin proxy.
+        """
+        from llamagent.core.logging_llm import LoggingLLM, append_runlog
+        from llamagent.core.hooks import HookEvent, HookResult
+
+        max_bytes = getattr(
+            self.agent.config, "child_agent_runlog_max_bytes", 10 * 1024 * 1024
+        )
+        # Wrap the child's LLM (may already be BudgetedLLM-wrapped from earlier)
+        child.llm = LoggingLLM(child.llm, runlog_path, max_bytes=max_bytes)
+
+        def _runlog_tool_writer(ctx):
+            data = ctx.data
+            try:
+                append_runlog(
+                    runlog_path,
+                    {
+                        "ts": time.time(),
+                        "kind": "tool",
+                        "name": data.get("tool_name"),
+                        "args_preview": str(data.get("args", ""))[:500],
+                        "result_preview": str(data.get("result", ""))[:500],
+                    },
+                    max_bytes=max_bytes,
+                )
+            except Exception as e:
+                logger.warning("runlog tool-side write failed: %s", e)
+            return HookResult.CONTINUE
+
+        try:
+            child.register_hook(HookEvent.POST_TOOL_USE, _runlog_tool_writer)
+        except Exception as e:
+            logger.warning("failed to register runlog POST_TOOL_USE hook: %s", e)
 
     # ============================================================
     # Child agent factory
@@ -727,10 +885,19 @@ class ChildAgentModule(Module):
         # Ensure api_retry_count exists (may be missing if parent config was manually constructed)
         if not hasattr(config, 'api_retry_count'):
             config.api_retry_count = 1
-        config.system_prompt = (
-            spec.system_prompt
-            or f"You are a {spec.role}. Complete the assigned task concisely."
-        )
+        # v3.5: report_template config gates the completion-report convention.
+        #   "system_prompt" (default): inject CHILD_SYSTEM_PROMPT (template B)
+        #   "auto"                  : same default + framework auto-prompt at end of run (template A, commit-6)
+        #   "off"                   : no completion-report shaping (legacy behavior)
+        report_template = getattr(parent.config, "child_agent_report_template", "system_prompt")
+        if spec.system_prompt:
+            config.system_prompt = spec.system_prompt
+        elif report_template in ("system_prompt", "auto"):
+            config.system_prompt = CHILD_SYSTEM_PROMPT.format(role=spec.role)
+        else:
+            config.system_prompt = (
+                f"You are a {spec.role}. Complete the assigned task concisely."
+            )
         config.context_window_size = 10
         config.context_compress_threshold = 0.7
         config.compress_keep_turns = 2
@@ -833,6 +1000,17 @@ class ChildAgentModule(Module):
             for tool_name, tool in child._tools.items():
                 if tool.get("execution_policy") is None:
                     tool["execution_policy"] = spec.policy.execution_policy
+
+        # v3.5: propagate delegation depth so a recursive ChildAgentModule
+        # in the child can enforce max_delegation_depth on grandchildren.
+        child._delegation_depth = spec.delegation_depth
+
+        # v3.5: wrap child.llm with LoggingLLM to record each reply to the
+        # runlog file, and register a POST_TOOL_USE hook to record each tool
+        # call. The runlog is observability-only — never exposed to parent
+        # agent through the tool surface.
+        if spec.runlog_path:
+            self._attach_runlog(child, spec.runlog_path)
 
         return child
 
@@ -990,6 +1168,21 @@ class ChildAgentModule(Module):
         if self._registry:
             self._registry.register(child.agent_id, role=spec.role, mode="continuous")
         self._register_child_messaging_tools(child)
+
+        # v3.5 B1: populate task_board metrics so send_message(task_id) can
+        # resolve to agent_id while the child is still running, not only
+        # after it completes (continuous children live a long time).
+        if spec.task_id:
+            try:
+                self.controller.task_board.update(
+                    spec.task_id, metrics={"agent_id": child.agent_id}
+                )
+            except KeyError:
+                pass  # Board entry not yet created (shouldn't happen)
+
+        # v3.5: attach runlog (observability-only, not parent-visible)
+        if spec.runlog_path:
+            self._attach_runlog(child, spec.runlog_path)
 
         return child
 

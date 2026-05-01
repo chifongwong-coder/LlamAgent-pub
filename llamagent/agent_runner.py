@@ -57,6 +57,12 @@ def main():
             config.react_timeout = spec_config["react_timeout"]
         if spec_config.get("system_prompt"):
             config.system_prompt = spec_config["system_prompt"]
+        # v3.5: report_template gates the framework auto-prompt. Default
+        # "system_prompt" relies on the system_prompt convention alone;
+        # "auto" additionally re-asks the model if the final reply lacks
+        # the structured shape.
+        if spec_config.get("child_agent_report_template"):
+            config.child_agent_report_template = spec_config["child_agent_report_template"]
 
         # Create agent
         agent = LlamAgent(config)
@@ -141,6 +147,35 @@ def main():
             tracker = BudgetTracker(budget)
             agent.llm = BudgetedLLM(agent.llm, tracker)
 
+        # v3.5: wrap with LoggingLLM and register POST_TOOL_USE hook so
+        # subprocess child also writes to the runlog file under
+        # parent.playground/child_runlogs/<task_id>.log. The path is set by
+        # the parent process via spec; subprocess just appends.
+        runlog_path = spec.get("runlog_path") or ""
+        if runlog_path:
+            from llamagent.core.logging_llm import LoggingLLM, append_runlog
+            from llamagent.core.hooks import HookEvent, HookResult
+
+            agent.llm = LoggingLLM(agent.llm, runlog_path)
+
+            def _runlog_tool_writer(ctx):
+                try:
+                    append_runlog(runlog_path, {
+                        "ts": time.time(),
+                        "kind": "tool",
+                        "name": ctx.data.get("tool_name"),
+                        "args_preview": str(ctx.data.get("args", ""))[:500],
+                        "result_preview": str(ctx.data.get("result", ""))[:500],
+                    })
+                except Exception:
+                    pass
+                return HookResult.CONTINUE
+
+            try:
+                agent.register_hook(HookEvent.POST_TOOL_USE, _runlog_tool_writer)
+            except Exception:
+                pass
+
         # Build prompt
         task = spec.get("task", "")
         context = spec.get("context", "")
@@ -151,6 +186,10 @@ def main():
 
         # Execute
         result_text = agent.chat(prompt)
+        # v3.5 template A: optional auto-prompt for completion report.
+        # No-op when report_template != "auto" or shape is already present.
+        from llamagent.modules.child_agent.runner import maybe_request_completion_report
+        result_text = maybe_request_completion_report(agent, result_text)
         elapsed = time.time() - start_time
 
         metrics = {"elapsed_seconds": round(elapsed, 2)}

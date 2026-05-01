@@ -36,7 +36,10 @@ class AgentExecutionPolicy:
     execution_policy: object | None = None  # ExecutionPolicy when sandbox is available
     budget: Budget | None = None
     can_spawn_children: bool = False
-    max_delegation_depth: int = 1
+    # v3.5: max_delegation_depth retired from policy — depth cap is now per-agent
+    # via config.child_agent_max_delegation_depth (default 2). Per-policy override
+    # was never enforced (dead code from v2.6); a future re-introduction should
+    # consult both sources.
     history_mode: str = "none"
     result_mode: str = "text"
     # v3.4 R3: replaces the old workspace_mode str enum. Default False
@@ -67,6 +70,8 @@ class ChildAgentSpec:
     parent_task_id: str | None = None
     artifact_refs: list[dict] = field(default_factory=list)
     task_id: str | None = None  # Set by controller before factory call
+    runlog_path: str = ""  # v3.5: absolute path of child's JSONL runlog (set by ChildAgentModule)
+    delegation_depth: int = 0  # v3.5: 0 = direct child of root parent; +1 per level
     # Continuous child agent fields
     continuous: bool = False
     trigger_type: str | None = None        # "timer" | "file"

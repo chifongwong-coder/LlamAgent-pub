@@ -24,7 +24,7 @@ import time
 import uuid
 
 from llamagent.modules.child_agent.policy import ChildAgentSpec
-from llamagent.modules.child_agent.runner import AgentRunnerBackend
+from llamagent.modules.child_agent.runner import AgentRunnerBackend, format_fallback_report
 from llamagent.modules.child_agent.task_board import TaskRecord
 from llamagent.modules.command_runner import CommandRunner
 
@@ -104,7 +104,7 @@ class ProcessRunnerBackend(AgentRunnerBackend):
         event = threading.Event()
         monitor = threading.Thread(
             target=self._monitor,
-            args=(task_id, proc, event, spec_path, self._get_timeout(spec)),
+            args=(task_id, proc, event, spec_path, self._get_timeout(spec), spec.runlog_path or ""),
             daemon=True,
         )
         with self._lock:
@@ -131,6 +131,22 @@ class ProcessRunnerBackend(AgentRunnerBackend):
             else (self._parent_config.model if self._parent_config else "auto")
         )
 
+        # v3.5: propagate child_agent_report_template so the subprocess can
+        # decide whether to use template B (system_prompt), template A
+        # (auto-prompt), or neither (off).
+        report_template = (
+            getattr(self._parent_config, "child_agent_report_template", "system_prompt")
+            if self._parent_config else "system_prompt"
+        )
+
+        if spec.system_prompt:
+            child_system_prompt = spec.system_prompt
+        elif report_template in ("system_prompt", "auto"):
+            from llamagent.modules.child_agent.module import CHILD_SYSTEM_PROMPT
+            child_system_prompt = CHILD_SYSTEM_PROMPT.format(role=spec.role)
+        else:
+            child_system_prompt = f"You are a {spec.role}."
+
         config_data = {
             "model": model,
             "max_react_steps": (
@@ -143,7 +159,8 @@ class ProcessRunnerBackend(AgentRunnerBackend):
                 if spec.policy and spec.policy.budget and spec.policy.budget.max_time_seconds
                 else 60
             ),
-            "system_prompt": spec.system_prompt or f"You are a {spec.role}.",
+            "system_prompt": child_system_prompt,
+            "child_agent_report_template": report_template,
             "project_dir": getattr(self._parent_config, "project_dir", None) if self._parent_config else None,
             "playground_dir": getattr(self._parent_config, "playground_dir", None) if self._parent_config else None,
             "share_parent_project_dir": (
@@ -166,6 +183,9 @@ class ProcessRunnerBackend(AgentRunnerBackend):
                 "max_time_seconds": spec.policy.budget.max_time_seconds,
             } if spec.policy and spec.policy.budget else None,
             "sandbox_enabled": self._parent_has_sandbox,
+            # v3.5: subprocess writes its runlog at this absolute path; lives
+            # under parent.playground so the parent (or any monitor) can read.
+            "runlog_path": spec.runlog_path or "",
         }
 
         # Serialize execution_policy for subprocess sandbox setup
@@ -198,7 +218,8 @@ class ProcessRunnerBackend(AgentRunnerBackend):
         return 330  # Default: 300 + 30
 
     def _monitor(self, task_id: str, proc: subprocess.Popen,
-                 event: threading.Event, spec_path: str, timeout: float):
+                 event: threading.Event, spec_path: str, timeout: float,
+                 runlog_path: str = ""):
         """Monitor thread: wait for process, parse result, cleanup, signal completion."""
         record = None
         try:
@@ -218,24 +239,43 @@ class ProcessRunnerBackend(AgentRunnerBackend):
             record = TaskRecord(
                 task_id=task_id,
                 status="failed",
-                result="Process timed out",
+                result=format_fallback_report(
+                    "killed by timeout", f"subprocess exceeded {timeout}s",
+                    runlog_path or None,
+                ),
             )
         except (json.JSONDecodeError, Exception) as e:
-            # Include subprocess stderr in error for debugging
+            # Include subprocess stderr in error detail for human debugging.
             stderr_text = ""
             try:
                 stderr_text = stderr[:500] if stderr else ""
             except NameError:
                 pass
-            error_msg = f"Process error: {e}"
+            detail = f"{type(e).__name__}: {e}"
             if stderr_text:
-                error_msg += f"\nstderr: {stderr_text}"
+                detail += f" | stderr: {stderr_text}"
             record = TaskRecord(
                 task_id=task_id,
                 status="failed",
-                result=error_msg,
+                result=format_fallback_report(
+                    "process error", detail, runlog_path or None
+                ),
             )
         finally:
+            # v3.5: parent monitor writes runlog terminator. Subprocess may
+            # have died (SIGKILL / JSON corruption) before its own end-record
+            # got flushed; this guarantees observers see a terminator.
+            if runlog_path:
+                from llamagent.core.logging_llm import append_runlog
+                try:
+                    append_runlog(runlog_path, {
+                        "ts": time.time(),
+                        "kind": "end",
+                        "status": record.status if record else "unknown",
+                        "writer": "parent_monitor",
+                    })
+                except Exception:
+                    pass
             # Cleanup spec file
             try:
                 os.unlink(spec_path)

@@ -15,7 +15,11 @@ import uuid
 
 from llamagent.modules.child_agent.budget import BudgetExceededError
 from llamagent.modules.child_agent.policy import ChildAgentSpec
-from llamagent.modules.child_agent.runner import AgentRunnerBackend
+from llamagent.modules.child_agent.runner import (
+    AgentRunnerBackend,
+    format_fallback_report,
+    maybe_request_completion_report,
+)
 from llamagent.modules.child_agent.task_board import TaskRecord
 
 logger = logging.getLogger(__name__)
@@ -173,7 +177,9 @@ class ThreadRunnerBackend(AgentRunnerBackend):
                 role=spec.role,
                 task=spec.task,
                 status="failed",
-                result=f"Budget exceeded: {e}",
+                result=format_fallback_report(
+                    "budget exceeded", str(e), spec.runlog_path or None
+                ),
                 history=list(child.history) if child else [],
                 metrics=_build_metrics(elapsed, child),
                 created_at=start_time,
@@ -192,7 +198,10 @@ class ThreadRunnerBackend(AgentRunnerBackend):
                 role=spec.role,
                 task=spec.task,
                 status="failed",
-                result=f"Execution error: {e}",
+                result=format_fallback_report(
+                    "execution error", f"{type(e).__name__}: {e}",
+                    spec.runlog_path or None,
+                ),
                 history=list(child.history) if child else [],
                 metrics=_build_metrics(elapsed, child),
                 created_at=start_time,
@@ -204,6 +213,18 @@ class ThreadRunnerBackend(AgentRunnerBackend):
             )
 
         finally:
+            # v3.5: emit runlog "end" record so external observers see a
+            # clean terminator regardless of how the run finished.
+            if spec.runlog_path:
+                from llamagent.core.logging_llm import append_runlog
+                try:
+                    append_runlog(spec.runlog_path, {
+                        "ts": time.time(),
+                        "kind": "end",
+                        "status": record.status if record else "unknown",
+                    })
+                except Exception:
+                    pass
             # Remove log capture handler and store captured logs
             logging.getLogger().removeHandler(capture)
             captured_logs = "\n".join(capture.records[-100:])  # Last 100 entries
@@ -241,6 +262,8 @@ class ThreadRunnerBackend(AgentRunnerBackend):
             prompt = f"Context:\n{spec.context}\n\nTask:\n{spec.task}"
 
         result_text = child.chat(prompt)
+        # v3.5 template A: optional auto-prompt for completion report
+        result_text = maybe_request_completion_report(child, result_text)
         elapsed = time.time() - start_time
 
         record = TaskRecord(

@@ -137,6 +137,10 @@ _YAML_MAP = [
     (("child_agent", "max_children"), "child_agent_max_children", int),
     (("child_agent", "role_models"), "child_agent_role_models", dict),
     (("child_agent", "auto_memorize"), "child_agent_auto_memorize", bool),
+    # v3.5
+    (("child_agent", "report_template"), "child_agent_report_template", str),
+    (("child_agent", "max_delegation_depth"), "child_agent_max_delegation_depth", int),
+    (("child_agent", "runlog_max_bytes"), "child_agent_runlog_max_bytes", int),
 ]
 
 # Build a set of valid YAML key paths for unknown-key detection
@@ -345,6 +349,10 @@ class Config:
         self.child_agent_runner: str = "inline"
         self.child_agent_max_children: int = 20
         self.child_agent_role_models: dict = {}
+        # v3.5
+        self.child_agent_report_template: str = "system_prompt"  # "system_prompt" | "auto" | "off"
+        self.child_agent_max_delegation_depth: int = 2  # Hermes-style cap
+        self.child_agent_runlog_max_bytes: int = 10 * 1024 * 1024  # 10 MiB rotation cap
         self.child_agent_auto_memorize: bool = True
 
         # Web

@@ -1026,8 +1026,12 @@ def test_agent_runner_entry_point(tmp_path):
 # ============================================================
 
 
-def test_thread_runner_logs_captured(bare_agent, mock_llm_client):
-    """Thread runner captures child agent logs into TaskRecord.logs; wait_child(include_logs=True) returns them."""
+def test_thread_runner_wait_child_returns_result(bare_agent, mock_llm_client):
+    """Thread runner: wait_child returns the child agent's result + child_dir hint.
+
+    v3.5: include_logs / include_history removed. Child internal state stays
+    in the runlog file (see commit-4); parent only sees record.result.
+    """
     bare_agent.config.child_agent_runner = "thread"
 
     mock_llm_client.set_responses([
@@ -1040,25 +1044,17 @@ def test_thread_runner_logs_captured(bare_agent, mock_llm_client):
     spawn_msg = module._spawn_child(task="research topic", role="researcher")
     assert "task_id:" in spawn_msg
 
-    # Extract task_id
+    # Extract task_id (v3.5 multi-line format still has the substring)
     match = re.search(r"task_id:\s*(\w+)", spawn_msg)
     assert match is not None, f"Could not extract task_id from: {spawn_msg}"
     task_id = match.group(1)
 
-    # Wait with include_logs=True
-    result = module._wait_child(task_id=task_id, include_logs=True)
+    # v3.5: wait_child only takes task_id (hard-break removed include_logs/history)
+    result = module._wait_child(task_id=task_id)
 
-    # The child agent produces log output during execution (LLM calls, etc.)
-    # The result should contain "Child logs:" section when logs are available
     assert "research findings complete" in result
-    # Thread runner captures logs via ThreadLogCapture, so logs section should appear
-    if "Child logs:" in result:
-        # Logs were captured — verify the section is present
-        assert "Child logs:" in result
-    else:
-        # Even if no log output was generated (minimal mock), the result
-        # should still contain the child's output
-        assert "research findings complete" in result
+    # v3.5: result must include child_dir hint for path resolution
+    assert "Resolve relative artifact paths against" in result
 
 
 def test_child_metrics_include_budget(bare_agent, mock_llm_client):
