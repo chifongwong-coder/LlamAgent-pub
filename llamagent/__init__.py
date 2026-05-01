@@ -5,11 +5,12 @@ Core design:
 - core/ provides a standalone base Agent (conversation, LLM calls,
   authorization engine, write-boundary primitives, persistence
   round-trip contracts).
-- modules/ provides 15 pluggable enhanced capabilities (resilience,
+- modules/ provides 14 pluggable enhanced capabilities (resilience,
   safety, compression, persistence, sandbox, tools, job, retrieval,
-  memory, skill, reflection, reasoning/planning, mcp, child_agent,
-  toolsmith). Loading a module is one line; modules are loosely
-  coupled (graceful degradation when peers are absent).
+  memory, skill, reflection, reasoning/planning, mcp, child_agent).
+  Loading a module is one line; modules are loosely coupled (graceful
+  degradation when peers are absent). Toolsmith lives as a pack inside
+  the tools module, not a separate module.
 - interfaces/ provides three interaction surfaces (CLI, Web UI, API)
   with shared module presets.
 
