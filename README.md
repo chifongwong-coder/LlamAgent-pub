@@ -31,7 +31,7 @@ agent.register_module(PlanningModule())   # DAG-based task decomposition
 
 ## Why LlamAgent?
 
-**Truly modular** — 15 independent modules, zero coupling between them. Load only what your task needs. A chatbot, a code assistant, a research agent — same framework, different module sets.
+**Truly modular** — 14 independent modules, zero coupling between them. Load only what your task needs. A chatbot, a code assistant, a research agent — same framework, different module sets.
 
 **Any LLM, zero lock-in** — OpenAI, Anthropic, DeepSeek, Ollama, or any [LiteLLM](https://github.com/BerriAI/litellm)-supported backend. Auto-detects available API keys. No key? Falls back to local Ollama.
 
@@ -72,7 +72,7 @@ agent.register_module(PlanningModule())   # DAG-based task decomposition
 | **Reflection** | Score results, extract lessons from failures, trigger replanning. Drives skill improvement. |
 | **Planning** | SimpleReAct for quick tasks. PlanReAct with DAG decomposition for complex multi-step work. |
 | **MCP** | Connect to external Model Context Protocol servers. |
-| **Child Agent** | Spawn constrained sub-agents with budgets, tool allowlists, and isolated child directories. |
+| **Child Agent** | Spawn constrained sub-agents with budgets, tool allowlists, and isolated child directories. v3.5 child→parent contract is summary + artifacts (not data passing): structured Status/Summary/Artifacts completion report, per-child JSONL runlog for observability, cancellation cascade, max delegation depth, and `send_message` accepting either `agent_id` or `task_id`. |
 
 Modules share a **retrieval layer** with swappable embedding models and vector backends — no module-level lock-in. A zero-dependency **FS backend** (markdown files) works out of the box.
 
@@ -221,7 +221,7 @@ llamagent/
 │   ├── persistence/   Conversation history save/restore
 │   ├── rag/           RAG backend (embedding, vector, lexical, chunker, retriever)
 │   ├── fs_store/      FS backend (markdown parser, atomic file store)
-│   ├── tools/         Workspace tools + project sync + pack system
+│   ├── tools/         File tools + project sync + pack system (path-fallback, web, toolsmith)
 │   ├── memory/        Structured fact memory + consolidation
 │   ├── retrieval/     Knowledge retrieval module (uses RAG/FS backend)
 │   ├── job/           Command execution lifecycle
@@ -234,7 +234,7 @@ llamagent/
 │   └── mcp/           Model Context Protocol
 ├── interfaces/        CLI, Web UI, API server, Module Presets
 ├── examples/          Tutorial scripts
-└── tests/             820+ tests
+└── tests/             190+ public tests (curated CI-friendly suite)
 ```
 
 ## License
