@@ -732,7 +732,13 @@ class ChildAgentModule(Module):
         spec.runlog_path = self._runlog_path_for(spec.task_id)
         try:
             task_id = self.controller.spawn_child(spec, self._create_child_agent)
-        except RuntimeError as e:
+        except (RuntimeError, ValueError) as e:
+            # v3.7 commit-8: also catch ValueError so the v3.7 helper's
+            # share_parent_modules validation errors (parent missing
+            # module / not shareable / unknown name) reach the model
+            # as a clean tool-result string instead of a stack trace.
+            # logger.exception preserves the trace for dev visibility.
+            logger.exception("Cannot spawn continuous child agent")
             return f"Cannot spawn continuous child agent: {e}"
 
         return (
@@ -807,7 +813,9 @@ class ChildAgentModule(Module):
         spec.runlog_path = self._runlog_path_for(spec.task_id)
         try:
             task_id = self.controller.spawn_child(spec, self._create_child_agent)
-        except RuntimeError as e:
+        except (RuntimeError, ValueError) as e:
+            # v3.7 commit-8: see _spawn_continuous_child for rationale.
+            logger.exception("Cannot spawn child agent")
             return f"Cannot spawn child agent: {e}"
 
         # v3.5: emit structured spawn return with child_dir for cross-agent
