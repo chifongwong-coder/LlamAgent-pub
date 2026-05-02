@@ -75,11 +75,11 @@ class SandboxModule(Module):
         import json as _json
         import subprocess as _subprocess
 
-        def _command(cmd: str, cwd: str | None = None, timeout: int = 30) -> str:
-            """Run a shell command. Cwd defaults to write_root.
+        def _command(agent, cmd: str, cwd: str | None = None, timeout: int = 30) -> str:
+            """Run a shell command. Cwd defaults to the calling agent's write_root.
 
-            v3.3 D7: snapshot is captured eagerly at agent init when
-            enabled — no per-call trigger needed.
+            v3.6: ``agent`` is dispatcher-injected so a child agent's
+            command runs with the child's write_root, not the parent's.
             """
             effective_cwd = cwd or getattr(agent, "write_root", None) or agent.project_dir
             try:
@@ -107,6 +107,7 @@ class SandboxModule(Module):
 
         agent.register_tool(
             name="command", func=_command,
+            takes_agent=True,
             description=(
                 "Run a shell command. Default cwd is the project's write "
                 "boundary. Use this for path operations (mv / cp / rm / "
