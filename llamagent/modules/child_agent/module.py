@@ -990,27 +990,25 @@ class ChildAgentModule(Module):
 
         # v2.7: scope inheritance — share_parent inherits parent scopes,
         # isolated mode gets empty scopes (project writes denied).
-        # v3.6: for share=False ALSO add a session scope covering the
-        # child's own isolated project_dir; otherwise a child with
-        # auto_approve=True still gets denied writes against its own
-        # directory (LlamAgent.__init__'s auto-seed ran on the
-        # config-time project_dir = parent's, then the factory overwrote
-        # child.project_dir without refreshing the scope).
+        # v3.6: for share=False, refresh the auto_approve auto-scope to
+        # cover the child's NEW project_dir. ``LlamAgent.__init__`` ran the
+        # auto-seed at config-time when child.project_dir was still the
+        # parent's path; the factory then overwrites it. Without this
+        # refresh, an auto_approve=True child gets denied writes against
+        # its own isolated dir even though the user opted into auto-approval.
+        # Gated by ``auto_approve`` so users who explicitly want interactive
+        # approval for every write keep that contract — confirm_handler
+        # is propagated to the child by the factory either way.
         if share_parent_project_dir:
             parent_scopes = parent._authorization_engine.export_scopes()
             if parent_scopes:
                 child._authorization_engine.import_scopes(parent_scopes)
-        else:
+        elif getattr(child.config, "auto_approve", False):
             from llamagent.core.authorization import ApprovalScope
             child._authorization_engine.add_scope(ApprovalScope(
                 scope="session", zone="project",
                 actions=["read", "write"],
                 path_prefixes=[child.project_dir],
-            ))
-            child._authorization_engine.add_scope(ApprovalScope(
-                scope="session", zone="workspace",
-                actions=["read", "write"],
-                path_prefixes=[child.playground_dir],
             ))
         child._tools = {}
         child._tools_version = 0
@@ -1167,25 +1165,20 @@ class ChildAgentModule(Module):
         config.context_window_size = 20
 
         # 7. Import parent scopes (only when sharing the parent's project,
-        #    consistent with short child). v3.6: for share=False, seed
-        #    scopes for the child's own isolated dirs so its own writes
-        #    aren't denied by default (auto_approve auto-scope ran at
-        #    LlamAgent.__init__ time against the pre-overwrite project_dir).
+        #    consistent with short child). v3.6: for share=False with
+        #    auto_approve, refresh the auto-scope for the child's NEW
+        #    project_dir (LlamAgent.__init__ ran on the pre-overwrite path).
+        #    Gated by auto_approve so interactive-mode contract is honored.
         if share_parent_project_dir:
             parent_scopes = parent._authorization_engine.export_scopes()
             if parent_scopes:
                 child._authorization_engine.import_scopes(parent_scopes)
-        else:
+        elif getattr(child.config, "auto_approve", False):
             from llamagent.core.authorization import ApprovalScope
             child._authorization_engine.add_scope(ApprovalScope(
                 scope="session", zone="project",
                 actions=["read", "write"],
                 path_prefixes=[child.project_dir],
-            ))
-            child._authorization_engine.add_scope(ApprovalScope(
-                scope="session", zone="workspace",
-                actions=["read", "write"],
-                path_prefixes=[child.playground_dir],
             ))
 
         # 8. Inject task into system_prompt
