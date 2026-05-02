@@ -33,7 +33,14 @@ v3.7 highlights (parent-child shared persistent storage, read-only contract):
 - ``AgentExecutionPolicy.share_parent_modules: list[str] | None``.
   Per-spawn opt-in. Example: ``share_parent_modules=["memory"]`` lets
   a child read the parent's persistent memory store. Default None
-  preserves the pre-v3.7 contract: child has no persistent modules.
+  results in the child having no persistent modules — and crucially,
+  also has the framework strip any memory-tool entries that landed
+  in the child's tool table via ``copy.deepcopy(parent._tools)``.
+  Pre-v3.7, those deepcopied entries closed over the parent's
+  MemoryModule instance, so a child of a memory-loaded parent could
+  silently invoke memory tools and reach back into parent's store.
+  v3.7 closes that leak — the no-share default is now genuinely
+  isolated, not just config-disabled.
 - **Read-only contract**: shared children get only the read tools
   (``recall_memory`` / ``list_memories`` / ``read_memory``). Write
   tools (``save_memory`` / ``consolidate_memory``) are NOT registered
