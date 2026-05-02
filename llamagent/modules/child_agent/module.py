@@ -1126,11 +1126,22 @@ class ChildAgentModule(Module):
         # 5. Switch to continuous mode (creates default scope with correct project_dir)
         child.set_mode("continuous")
 
-        # 6. Override _MODE_DEFAULTS side effects with reasonable child values
+        # 6. Override _MODE_DEFAULTS side effects with reasonable child values.
         # set_mode("continuous") applies _MODE_DEFAULTS which may set unlimited values.
         # Restore child-appropriate values (budget may have specified different values).
-        budget_timeout = spec.policy.budget.max_time_seconds if spec.policy and spec.policy.budget else 600
-        budget_steps = spec.policy.budget.max_steps if spec.policy and spec.policy.budget else 10
+        # NB: must use ``or DEFAULT`` (not ``if cond else DEFAULT``) — when
+        # spec.policy.budget exists but ``max_steps`` / ``max_time_seconds`` is
+        # ``None``, the bare conditional returns ``None``, which then makes
+        # ``run_react``'s ``steps < self.config.max_react_steps`` raise
+        # ``TypeError: '<' not supported between int and NoneType``.
+        # This pattern matches the short-child path (lines 937-938) and the
+        # earlier continuous-child path (lines 1076-1077).
+        if spec.policy and spec.policy.budget:
+            budget_timeout = spec.policy.budget.max_time_seconds or 600
+            budget_steps = spec.policy.budget.max_steps or 10
+        else:
+            budget_timeout = 600
+            budget_steps = 10
         config.max_react_steps = budget_steps
         config.react_timeout = budget_timeout
         config.max_duplicate_actions = 2
