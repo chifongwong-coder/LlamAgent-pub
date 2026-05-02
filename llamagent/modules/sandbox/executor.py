@@ -32,7 +32,7 @@ class ToolExecutor:
     # Public API
     # ------------------------------------------------------------------
 
-    def execute(self, tool_info: dict, args: dict) -> str:
+    def execute(self, tool_info: dict, args: dict, agent=None) -> str:
         """
         Execute a tool described by *tool_info* with the given *args*.
 
@@ -41,7 +41,14 @@ class ToolExecutor:
                 - func: callable (the tool function)
                 - name: str (tool name)
                 - execution_policy: ExecutionPolicy | None
+                - takes_agent: bool (v3.6) — when True and ``agent`` is
+                  provided, inject ``agent`` as first positional arg.
             args: Keyword arguments to pass to the tool.
+            agent: The CALLING agent. Forwarded to the tool when
+                ``tool_info["takes_agent"]`` is True. None during sandbox
+                isolation paths (the subprocess / container has its own
+                agent identity), or when the caller doesn't need to pass
+                identity (legacy-compatible).
 
         Returns:
             A string observation suitable for the ReAct loop.
@@ -53,7 +60,12 @@ class ToolExecutor:
         # No sandbox — direct host execution (v1.1 compatible path).
         if policy is None or policy.isolation == "none":
             func = tool_info["func"]
-            result = func(**args)
+            # v3.6: takes_agent dispatch — when the tool opts in AND the
+            # caller forwarded an agent reference, inject it.
+            if tool_info.get("takes_agent") and agent is not None:
+                result = func(agent, **args)
+            else:
+                result = func(**args)
             return str(result) if result is not None else ""
 
         # Sandbox execution.

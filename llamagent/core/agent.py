@@ -755,6 +755,7 @@ class LlamAgent:
         action: str | None = None,
         timeout: float | None = None,
         truncatable: bool = True,
+        takes_agent: bool = False,
     ) -> None:
         """
         Register a tool in the registry.
@@ -770,10 +771,23 @@ class LlamAgent:
             creator_id: Creator persona_id (for agent-tier tools, used for visibility filtering)
             path_extractor: Optional function to extract file paths from tool arguments for zone checking
             timeout: Per-tool timeout in seconds; None means no per-tool timeout (global react_timeout applies)
+            takes_agent: When True, dispatcher injects the calling agent as the
+                first positional arg at ``call_tool`` time. ``func`` then must
+                have signature ``def f(agent, **args)``. Default ``False``
+                preserves the legacy ``def f(**args)`` signature — used by
+                persona-tools (toolsmith) and any tool that does not need
+                framework state. Framework-internal tools that read
+                ``agent.project_dir`` / ``agent.write_root`` / ``agent.config``
+                etc. should opt in to ``True`` so they correctly bind to the
+                child agent when called from a child's ``call_tool`` (rather
+                than the parent agent that registered them via closure).
+                See docs/llamagent-v3.6-plan.md for the full migration.
         """
-        # Infer parameter definition from function signature when empty
+        # Infer parameter definition from function signature when empty.
+        # v3.6: when takes_agent=True, drop the first positional arg from
+        # the inferred schema — it's framework-injected, not model-facing.
         if parameters is None:
-            parameters = self._infer_parameters(func)
+            parameters = self._infer_parameters(func, skip_first_arg=takes_agent)
 
         self._tools[name] = {
             "name": name,
@@ -789,6 +803,7 @@ class LlamAgent:
             "action": action,
             "timeout": timeout,
             "truncatable": truncatable,
+            "takes_agent": takes_agent,
         }
         self._tools_version += 1
         logger.debug("Tool registered: %s (tier=%s, safety_level=%d)", name, tier, safety_level)
@@ -880,9 +895,17 @@ class LlamAgent:
             if timeout_val is not None:
                 result_str = self._execute_with_timeout(tool, args, timeout_val)
             elif self.tool_executor is not None:
-                result_str = self.tool_executor.execute(tool, args)
+                result_str = self.tool_executor.execute(tool, args, agent=self)
             else:
-                result = tool["func"](**args)
+                # v3.6: takes_agent dispatch — when the tool opts in,
+                # inject the CALLING agent (self) as the first arg so
+                # the tool reads framework state from the right agent
+                # (matters for child-agent isolation; closure-style
+                # registrations always bind to the parent's agent).
+                if tool.get("takes_agent"):
+                    result = tool["func"](self, **args)
+                else:
+                    result = tool["func"](**args)
                 result_str = str(result) if result is not None else ""
 
             # 5. POST_TOOL_USE hook
@@ -950,17 +973,25 @@ class LlamAgent:
         return schemas
 
     @staticmethod
-    def _infer_parameters(func: Callable) -> dict:
+    def _infer_parameters(func: Callable, skip_first_arg: bool = False) -> dict:
         """
         Infer JSON Schema parameter definitions from a function signature.
 
         Simple mapping: str -> string, int -> integer, float -> number, bool -> boolean.
+
+        Args:
+            func: function to inspect
+            skip_first_arg: when True, the first positional parameter is
+                skipped (used for ``takes_agent=True`` tools where the
+                first arg is framework-injected and must not appear in
+                the JSON schema the model sees).
         """
         import inspect
 
         sig = inspect.signature(func)
         properties = {}
         required = []
+        first_seen = False
 
         type_mapping = {
             str: "string",
@@ -975,6 +1006,12 @@ class LlamAgent:
             # Skip *args and **kwargs — they are not named parameters in JSON Schema
             if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
                 continue
+            # v3.6: framework-injected first arg (agent) is not part of
+            # the model-facing schema.
+            if skip_first_arg and not first_seen:
+                first_seen = True
+                continue
+            first_seen = True
 
             # Type inference
             if param.annotation != inspect.Parameter.empty:
@@ -2144,9 +2181,14 @@ class LlamAgent:
 
         def _run():
             if self.tool_executor is not None:
-                return self.tool_executor.execute(tool, args)
+                return self.tool_executor.execute(tool, args, agent=self)
             else:
-                result = tool["func"](**args)
+                # v3.6: takes_agent dispatch — same policy as call_tool's
+                # direct path. ToolExecutor.execute handles its own branch.
+                if tool.get("takes_agent"):
+                    result = tool["func"](self, **args)
+                else:
+                    result = tool["func"](**args)
                 return str(result) if result is not None else ""
 
         # Lazy-create shared pool on first use (daemon threads die with process)
