@@ -17,6 +17,29 @@ Core design:
 A bare LlamAgent is a fully functional conversational Agent. Each
 module loaded grants a new capability.
 
+v3.6 highlights (tool-dispatch contract: agent identity is runtime, not closure):
+- ``register_tool(takes_agent: bool = False)`` flag. When True, the
+  framework dispatcher injects the calling agent as the first
+  positional arg at every tool-invocation site (``call_tool``,
+  ``_execute_with_timeout``, ``ToolExecutor.execute``). Tool functions
+  read ``agent.project_dir`` / ``agent.write_root`` /
+  ``agent._authorization_engine`` etc. from the param, so a child
+  agent's tools resolve against the child's own state instead of
+  closure-aliasing back to the parent that registered them.
+- ``tools/module.py``'s 13 framework tools (read/write/patch/list/
+  glob/search/rename/move/copy/delete/temp/revert) and ``sandbox``'s
+  ``command`` tool migrated to ``takes_agent=True``. Path-extractor
+  lambdas upgraded to ``(args, agent)`` signature; helpers
+  (``_safe_extract_paths``, ``_writable_root_hint``, etc.) now take
+  ``agent`` as first param.
+- ``share_parent_project_dir=False`` (isolated child) actually works
+  end-to-end now: child's ``write_files`` writes under the child's
+  ``<parent.playground>/children/<task_id>/`` directory, not
+  parent's project_dir. Verified via real-LLM RCC-V35-04.
+- Persona-tools (toolsmith) and external custom modules default to
+  ``takes_agent=False`` — backward compatible. No persona-tool
+  signature change required.
+
 v3.5 highlights (child agent collaboration: summary + artifacts, not data passing):
 - spawn_child returns structured text including child_dir so the
   parent's model can resolve relative artifact paths against the
@@ -72,7 +95,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "3.5"
+__version__ = "3.6"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager
