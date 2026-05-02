@@ -98,9 +98,13 @@ def _apply_shared_modules(parent, child, share_modules):
     # contract for the share case (parent's save_memory closure stays
     # registered) and let a no-share child indirectly read parent's
     # memory via the deepcopy'd tool entries.
-    _MEMORY_TOOLS = ("save_memory", "recall_memory", "consolidate_memory",
-                     "list_memories", "read_memory")
-    for tool_name in _MEMORY_TOOLS:
+    #
+    # v3.7 commit-7: pull the tool-name list from MemoryModule._TOOL_NAMES
+    # so helper + tests share a single source of truth — adding a new
+    # memory tool only requires updating the class attribute, not two
+    # parallel hardcoded tuples.
+    from llamagent.modules.memory.module import MemoryModule
+    for tool_name in MemoryModule._TOOL_NAMES:
         child._tools.pop(tool_name, None)
 
     if not share_modules:
