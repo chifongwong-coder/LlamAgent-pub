@@ -258,6 +258,15 @@ class Module:
     name: str = "base"
     description: str = ""
 
+    # v3.7: opt-in for parent-shared module storage. When True, the
+    # child_agent factory may copy this module's data-layer handles
+    # from a parent module instance into a child module instance via
+    # ``inherit_storage_from``. Subclasses that flip this MUST
+    # implement ``inherit_storage_from`` accordingly. Default False
+    # because most modules hold per-agent state that must NOT be
+    # shared (e.g., LLM-bound helpers, per-session caches).
+    shareable: bool = False
+
     # --- Lifecycle Callbacks ---
 
     def on_attach(self, agent: LlamAgent) -> None:
@@ -285,6 +294,54 @@ class Module:
         Used to close connections and release resources (MCP disconnect, ChromaDB close, etc.).
         """
         pass
+
+    # --- v3.7 Shareable-module hook ---
+
+    def inherit_storage_from(self, other: "Module") -> None:
+        """v3.7: copy persistent-storage handles from ``other`` (a parent
+        module of the same class) into this module instance.
+
+        Called by the child_agent factory AFTER ``on_attach`` has
+        bound this instance to its (child) agent and AFTER the child's
+        tool registry has been rebuilt — but BEFORE any tool fires.
+        Only invoked for modules listed in
+        ``AgentExecutionPolicy.share_parent_modules``.
+
+        Implementations MUST:
+        - Copy ONLY data-layer handles (FS stores, vector pipelines,
+          cached indices). NOT LLM-bound helpers (compilers, mergers,
+          judges) — those are constructed in ``on_attach`` over the
+          child's ``self.llm`` and must remain per-agent so each
+          agent's BudgetedLLM / model selection stays intact.
+        - Treat any persona-derived names baked into the inherited
+          store as authoritative. After inheritance, NEVER re-derive
+          collection names / FS subdirs from ``self.agent.persona``;
+          read them from the inherited store instead. (E.g., parent
+          may use ``persona_id="alice"`` while child has
+          ``persona=None``; reading ``self.agent.persona`` would land
+          on a different physical location than the inherited store.)
+
+        Implementations MUST NOT:
+        - Close the inherited store in ``on_shutdown``. The parent
+          owns the lifecycle. Subclasses that override ``on_shutdown``
+          and touch storage must check whether storage was inherited
+          (e.g., by tracking a ``_inherited`` flag) and skip teardown
+          accordingly. The default no-op ``on_shutdown`` already
+          satisfies this.
+
+        Thread-safety contract: implementations rely on the underlying
+        store being safe for the access pattern v3.7 supports
+        (single-writer parent, multi-reader children). For ChromaDB
+        backends, ``PersistentClient`` provides this via per-thread
+        SQLite connections + busy_timeout. For FS backends, atomic
+        writes via ``os.replace`` provide it. v3.8 may add explicit
+        per-store locks for tighter concurrency. Module-level locks
+        are NEVER appropriate — modules are not shared, stores are.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__}.inherit_storage_from is not implemented. "
+            f"Modules with shareable=True must override this method."
+        )
 
     # --- Pipeline Callbacks ---
 
