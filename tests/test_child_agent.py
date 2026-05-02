@@ -80,8 +80,15 @@ class TestModuleIntegrationAndBudget:
         )
         task_id = module.controller.spawn_child(spec, module._create_child_agent)
         record = module.controller.wait_child(task_id)
-        assert record.status == "completed"
-        assert "budget exceeded" in record.result.lower() or "Budget" in record.result
+        # v3.5 + v3.5.2: BudgetExceededError propagates from BudgetedLLM
+        # through agent.chat() (scoped exception policy lets framework
+        # signaling exceptions through) to the runner's outer
+        # ``except BudgetExceededError`` clause, which produces a v3.5-shape
+        # fallback report. record.status flips to "failed" and result
+        # carries the structured Status/Summary/Artifacts shape.
+        assert record.status == "failed"
+        assert "Status: failed" in record.result
+        assert "budget exceeded" in record.result.lower()
 
         # --- BudgetedLLM raises directly when budget exhausted ---
         mock_llm = MagicMock()

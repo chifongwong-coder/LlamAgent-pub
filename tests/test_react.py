@@ -120,10 +120,15 @@ class TestReActLoopFlow:
         assert tool_msgs6 and "truncated" in tool_msgs6[0]["content"]
 
         # --- Context window overflow ---
-        class ContextWindowExceededError(Exception):
-            pass
-
-        mock_llm_client.set_responses([ContextWindowExceededError("too big")])
+        # v3.5.2: agent.py only catches LiteLLM's real exception class via
+        # isinstance(_CONTEXT_WINDOW_ERRORS); a locally-defined class with
+        # the same name no longer matches. Use the real one.
+        import litellm
+        mock_llm_client.set_responses([
+            litellm.ContextWindowExceededError(
+                message="too big", model="mock-model", llm_provider="mock",
+            )
+        ])
         tools7 = [{"type": "function", "function": {"name": "t"}}]
         msgs7 = [{"role": "user", "content": "huge query"}]
         result7 = bare_agent.run_react(msgs7, tools7, lambda n, a: "")

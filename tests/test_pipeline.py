@@ -114,13 +114,18 @@ class TestChatPipeline:
         assert result == "spy result"
 
         # --- Context overflow recovery ---
-        class ContextWindowExceededError(Exception):
-            pass
-
+        # v3.5.2: agent.py's scoped exception policy matches the real
+        # litellm.ContextWindowExceededError class (isinstance check), not
+        # any locally-defined Exception subclass with the same name.
+        import litellm
         bare_agent.set_execution_strategy(None)
         from llamagent.core.agent import SimpleReAct
         bare_agent._execution_strategy = SimpleReAct()
-        mock_llm_client.set_responses([ContextWindowExceededError("too long")])
+        mock_llm_client.set_responses([
+            litellm.ContextWindowExceededError(
+                message="too long", model="mock-model", llm_provider="mock",
+            )
+        ])
         result = bare_agent.chat("very long query")
         assert result is not None
         assert isinstance(result, str)

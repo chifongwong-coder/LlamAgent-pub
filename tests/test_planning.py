@@ -142,7 +142,13 @@ class TestDeadlockAndReplan:
                      "expected_output": "result", "depends_on": ["s1"]},
                 ]
             })),
-            RuntimeError("LLM error"),
+            # v3.5.2: agent only catches LiteLLM's OpenAIError family at
+            # the LLM-call sites. RuntimeError now propagates instead of
+            # becoming a "ReAct execution error" string. Use a real
+            # provider-shape exception to simulate transient LLM failure.
+            __import__("litellm").APIConnectionError(
+                message="LLM error", llm_provider="mock", model="mock-model",
+            ),
         ])
         result = strategy.execute("test", "", bare_agent)
         assert "failed" in result.lower()
