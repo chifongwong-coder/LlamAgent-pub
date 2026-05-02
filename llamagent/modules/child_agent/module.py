@@ -1003,13 +1003,10 @@ class ChildAgentModule(Module):
             parent_scopes = parent._authorization_engine.export_scopes()
             if parent_scopes:
                 child._authorization_engine.import_scopes(parent_scopes)
-        elif getattr(child.config, "auto_approve", False):
-            from llamagent.core.authorization import ApprovalScope
-            child._authorization_engine.add_scope(ApprovalScope(
-                scope="session", zone="project",
-                actions=["read", "write"],
-                path_prefixes=[child.project_dir],
-            ))
+        else:
+            # Re-seed against the child's NEW project_dir; no-op when
+            # auto_approve is False (interactive contract preserved).
+            child._seed_auto_approve_scope()
         child._tools = {}
         child._tools_version = 0
         child.tool_executor = getattr(parent, "tool_executor", None)  # Inherit sandbox
@@ -1173,13 +1170,10 @@ class ChildAgentModule(Module):
             parent_scopes = parent._authorization_engine.export_scopes()
             if parent_scopes:
                 child._authorization_engine.import_scopes(parent_scopes)
-        elif getattr(child.config, "auto_approve", False):
-            from llamagent.core.authorization import ApprovalScope
-            child._authorization_engine.add_scope(ApprovalScope(
-                scope="session", zone="project",
-                actions=["read", "write"],
-                path_prefixes=[child.project_dir],
-            ))
+        else:
+            # Re-seed against the child's NEW project_dir; no-op when
+            # auto_approve is False.
+            child._seed_auto_approve_scope()
 
         # 8. Inject task into system_prompt
         config.system_prompt = (

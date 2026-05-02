@@ -478,11 +478,22 @@ class LlamAgent:
             ))
 
         # v2.7: auto_approve = full project scope
-        if getattr(self.config, "auto_approve", False):
-            self._authorization_engine.add_scope(ApprovalScope(
-                scope="session", zone="project", actions=["read", "write"],
-                path_prefixes=[self.project_dir],
-            ))
+        self._seed_auto_approve_scope()
+
+    def _seed_auto_approve_scope(self) -> None:
+        """Seed a session-scoped project read/write scope when auto_approve is on.
+
+        Called from ``__init__`` and from the child_agent factory after the
+        factory overwrites the child's ``project_dir`` (so the seeded scope
+        covers the child's own dir, not the parent's the constructor ran
+        against). No-op when auto_approve is False.
+        """
+        if not getattr(self.config, "auto_approve", False):
+            return
+        self._authorization_engine.add_scope(ApprovalScope(
+            scope="session", zone="project", actions=["read", "write"],
+            path_prefixes=[self.project_dir],
+        ))
 
     # ============================================================
     # LLM management

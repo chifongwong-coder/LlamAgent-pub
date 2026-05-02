@@ -51,8 +51,15 @@ def _make_agent_with_jobs(bare_agent, tmp_path):
 
 
 def _call_tool(agent, name, **kwargs):
-    """Invoke a registered tool by name and return the raw result string."""
-    func = agent._tools[name]["func"]
+    """Invoke a registered tool by name and return the raw result string.
+
+    v3.6: respects ``takes_agent`` — tools that opt in receive the agent
+    as first arg, matching the framework dispatcher contract.
+    """
+    tool = agent._tools[name]
+    func = tool["func"]
+    if tool.get("takes_agent"):
+        return func(agent, **kwargs)
     return func(**kwargs)
 
 

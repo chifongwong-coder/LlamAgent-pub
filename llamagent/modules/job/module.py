@@ -63,6 +63,9 @@ class JobModule(Module):
         self.service = JobService(max_active=getattr(agent.config, "job_max_active", 10))
 
         # --- start_job (sl=2, common) ---
+        # v3.6: takes_agent=True so a child agent's start_job resolves cwd
+        # against the child's project_dir / scratch_root instead of the
+        # parent's (which would happen with the legacy `self.agent` closure).
         agent.register_tool(
             name="start_job",
             func=self._start_job,
@@ -104,7 +107,8 @@ class JobModule(Module):
             },
             tier="common",
             safety_level=2,
-            path_extractor=lambda args: [self._resolve_cwd(args.get("cwd"))],
+            takes_agent=True,
+            path_extractor=lambda args, agent: [self._resolve_cwd(agent, args.get("cwd"))],
         )
 
         # --- inspect_job (sl=1, common, pack=job-followup) ---
@@ -176,11 +180,13 @@ class JobModule(Module):
     # CWD resolution
     # ================================================================
 
-    def _resolve_cwd(self, cwd: str | None) -> str:
+    def _resolve_cwd(self, agent, cwd: str | None) -> str:
         """
         Resolve the cwd parameter to an absolute directory path.
 
         v3.4 R6: cwd is path-only — no special-literal handling.
+        v3.6: ``agent`` is the calling agent (dispatcher-injected) so a
+        child agent resolves against its OWN project_dir / scratch_root.
 
         Resolution rules:
         - None / empty string -> per-session scratch root (framework default;
@@ -189,8 +195,6 @@ class JobModule(Module):
         - relative path       -> joined with project_dir (same anchoring
                                  as file tools read_files / write_files)
         """
-        agent = self.agent
-
         if cwd is None or cwd == "":
             # Default: per-session scratch root from ToolsModule
             tools_mod = agent.get_module("tools")
@@ -215,14 +219,21 @@ class JobModule(Module):
 
     def _start_job(
         self,
+        agent,
         command: str,
         cwd: str | None = None,
         wait: bool = True,
         profile: str = "default",
     ) -> str:
-        """Start a command as a managed job."""
+        """Start a command as a managed job.
+
+        v3.6: ``agent`` is dispatcher-injected (``takes_agent=True``) so a
+        child agent's start_job picks up the child's own ``tool_executor``,
+        ``safety`` module, ``project_dir`` and ``_active_packs`` — not the
+        parent's.
+        """
         # Hard dependency check: SandboxModule must be loaded
-        if self.agent.tool_executor is None:
+        if agent.tool_executor is None:
             return json.dumps({
                 "status": "error",
                 "command": command,
@@ -230,7 +241,7 @@ class JobModule(Module):
             }, ensure_ascii=False)
 
         # Safety check: if safety module is loaded, check command against blacklist
-        safety_mod = self.agent.get_module("safety")
+        safety_mod = agent.get_module("safety")
         if safety_mod is not None:
             rejection = safety_mod.check_command(command)
             if rejection:
@@ -241,14 +252,14 @@ class JobModule(Module):
                 }, ensure_ascii=False)
 
         # Resolve working directory
-        resolved_cwd = self._resolve_cwd(cwd)
+        resolved_cwd = self._resolve_cwd(agent, cwd)
         os.makedirs(resolved_cwd, exist_ok=True)
 
         # Determine timeout from profile
-        timeout = self._get_profile_timeout(profile)
+        timeout = self._get_profile_timeout(agent, profile)
 
         # Build executor function that delegates to tool_executor.run_command()
-        tool_executor = self.agent.tool_executor
+        tool_executor = agent.tool_executor
 
         def executor_fn():
             """Execute shell command via sandbox backend."""
@@ -269,7 +280,7 @@ class JobModule(Module):
             # through _truncate_observation (contract A) which persists to
             # disk and emits a uniform hint pointing at read_files.
 
-            self.agent._active_packs.add("job-followup")
+            agent._active_packs.add("job-followup")
             return json.dumps({
                 "status": "success",
                 "command": command,
@@ -286,7 +297,7 @@ class JobModule(Module):
                     "reason": str(e),
                 }, ensure_ascii=False)
 
-            self.agent._active_packs.add("job-followup")
+            agent._active_packs.add("job-followup")
             return json.dumps({
                 "job_id": handle.job_id,
                 "status": "started",
@@ -411,15 +422,17 @@ class JobModule(Module):
     # Profile resolution
     # ================================================================
 
-    def _get_profile_timeout(self, profile: str) -> float:
+    def _get_profile_timeout(self, agent, profile: str) -> float:
         """
         Resolve a profile name to a timeout value.
 
         Reads from agent config: job_default_timeout for "default" profile,
         job_profiles dict for custom profiles. Falls back to DEFAULT_JOB_TIMEOUT
         if config values are not set.
+
+        v3.6: ``agent`` is the calling agent (dispatcher-injected).
         """
-        config = self.agent.config
+        config = agent.config
         if profile == "default":
             return getattr(config, "job_default_timeout", DEFAULT_JOB_TIMEOUT)
         profiles = getattr(config, "job_profiles", {})
