@@ -324,3 +324,118 @@ class TestSecurityFixes:
         mock_llm_client.set_responses([make_llm_response("done")])
         module2._spawn_child(task="test")
         assert len(module2.controller.list_children(module2._parent_id)) == 1
+
+
+class TestShareableModulesV37:
+    """v3.7: parent-child memory sharing via share_parent_modules.
+
+    Children spawned with ``share_parent_modules=["memory"]`` re-register a
+    fresh MemoryModule on themselves and swap the parent's data-layer
+    handles in via ``inherit_storage_from``. The framework forces
+    read-only on the child (``memory_mode="off"``), so write tools
+    (``save_memory`` / ``consolidate_memory``) are never registered.
+    """
+
+    def test_share_parent_memory_child_recalls_parent_save(
+        self, bare_agent, mock_llm_client, tmp_path
+    ):
+        """Parent saves a fact via FS backend; child spawned with
+        share_parent_modules=["memory"] reads the same fact through
+        its inherited store handle."""
+        from llamagent.modules.memory.module import MemoryModule
+        from llamagent.modules.memory.fact import MemoryFact
+
+        # Parent runs FS backend with a tmp dir + a fixed persona so
+        # the test is hermetic.
+        bare_agent.config.memory_backend = "fs"
+        bare_agent.config.memory_mode = "autonomous"
+        bare_agent.config.memory_recall_mode = "tool"
+        bare_agent.config.memory_fs_dir = str(tmp_path / "memory")
+        bare_agent.persona = type("P", (), {"persona_id": "alice"})()
+
+        parent_mem = MemoryModule()
+        bare_agent.register_module(parent_mem)
+        assert parent_mem.store is not None
+        assert parent_mem.shareable is True
+
+        fact = MemoryFact(
+            fact_id="f-001",
+            kind="preference",
+            subject="user",
+            attribute="favorite_drink",
+            value="orange juice",
+            source_text="user said: i like orange juice",
+        )
+        parent_mem.store.save_fact(fact)
+
+        # Spawn share=True child via the factory directly (not the
+        # spawn_child tool, which adds LLM mock noise).
+        module = ChildAgentModule()
+        bare_agent.register_module(module)
+
+        policy = AgentExecutionPolicy(share_parent_modules=["memory"])
+        spec = ChildAgentSpec(task="recall", role="worker", policy=policy)
+        child = module._create_child_agent(spec)
+
+        # Child has its own MemoryModule instance, but the store is
+        # physically the parent's.
+        assert "memory" in child.modules
+        assert child.modules["memory"] is not parent_mem
+        assert child.modules["memory"].store is parent_mem.store
+
+        # Child's _tools contains the read tool but NOT the write tools.
+        # Read-only contract is enforced at on_attach, not denylist.
+        assert "recall_memory" in child._tools or "list_memories" in child._tools
+        assert "save_memory" not in child._tools
+        assert "consolidate_memory" not in child._tools
+
+        # Child reads the fact through its inherited store.
+        all_facts = child.modules["memory"].store.list_all_active_facts()
+        assert any(f.get("value") == "orange juice" for f in all_facts)
+
+    def test_share_parent_memory_disabled_by_default(
+        self, bare_agent, mock_llm_client, tmp_path
+    ):
+        """Without share_parent_modules, child has no memory tools at all
+        (preserves pre-v3.7 contract that the legacy memory_mode="off"
+        hardcode at the factory enforced)."""
+        from llamagent.modules.memory.module import MemoryModule
+
+        bare_agent.config.memory_backend = "fs"
+        bare_agent.config.memory_mode = "autonomous"
+        bare_agent.config.memory_recall_mode = "tool"
+        bare_agent.config.memory_fs_dir = str(tmp_path / "memory")
+
+        bare_agent.register_module(MemoryModule())
+
+        module = ChildAgentModule()
+        bare_agent.register_module(module)
+
+        # No policy override -> share_parent_modules defaults to None
+        spec = ChildAgentSpec(task="any", role="worker")
+        child = module._create_child_agent(spec)
+
+        # Child has no MemoryModule registered at all. The helper's
+        # default branch only forces memory_mode/recall_mode to "off"
+        # on the child config — it doesn't register the module.
+        assert "memory" not in child.modules
+        # And no memory tools landed in the child's tool table.
+        for write_tool in ("save_memory", "consolidate_memory"):
+            assert write_tool not in child._tools
+        for read_tool in ("recall_memory", "list_memories", "read_memory"):
+            assert read_tool not in child._tools
+
+    def test_share_parent_modules_parent_missing_raises(
+        self, bare_agent, mock_llm_client
+    ):
+        """share_parent_modules=["memory"] on a parent that has no
+        MemoryModule loaded raises ValueError at factory time
+        (loud failure, typically a typo or wrong load order)."""
+        module = ChildAgentModule()
+        bare_agent.register_module(module)
+
+        policy = AgentExecutionPolicy(share_parent_modules=["memory"])
+        spec = ChildAgentSpec(task="any", role="worker", policy=policy)
+
+        with pytest.raises(ValueError, match="parent has no such module"):
+            module._create_child_agent(spec)

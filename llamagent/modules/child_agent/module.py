@@ -88,6 +88,21 @@ def _apply_shared_modules(parent, child, share_modules):
       and store=None) -> silent graceful: child also ends up disabled,
       matching parent's intent.
     """
+    # Memory tools that may have landed in child._tools via the
+    # deepcopy(parent._tools) step earlier in the factory. We
+    # always start by clearing them, then conditionally let
+    # MemoryModule's on_attach (called below) re-register the right
+    # subset for the share case. Without this clear, parent's read
+    # AND write tools leak into the child's tool table even when the
+    # caller asked for no sharing — which would break the read-only
+    # contract for the share case (parent's save_memory closure stays
+    # registered) and let a no-share child indirectly read parent's
+    # memory via the deepcopy'd tool entries.
+    _MEMORY_TOOLS = ("save_memory", "recall_memory", "consolidate_memory",
+                     "list_memories", "read_memory")
+    for tool_name in _MEMORY_TOOLS:
+        child._tools.pop(tool_name, None)
+
     if not share_modules:
         # Default path: child has no persistent modules. This branch
         # preserves today's behavior — the hardcoded
