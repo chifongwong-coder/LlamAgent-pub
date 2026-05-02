@@ -98,9 +98,13 @@ def _apply_shared_modules(parent, child, share_modules):
     # contract for the share case (parent's save_memory closure stays
     # registered) and let a no-share child indirectly read parent's
     # memory via the deepcopy'd tool entries.
-    _MEMORY_TOOLS = ("save_memory", "recall_memory", "consolidate_memory",
-                     "list_memories", "read_memory")
-    for tool_name in _MEMORY_TOOLS:
+    #
+    # v3.7 commit-7: pull the tool-name list from MemoryModule._TOOL_NAMES
+    # so helper + tests share a single source of truth — adding a new
+    # memory tool only requires updating the class attribute, not two
+    # parallel hardcoded tuples.
+    from llamagent.modules.memory.module import MemoryModule
+    for tool_name in MemoryModule._TOOL_NAMES:
         child._tools.pop(tool_name, None)
 
     if not share_modules:
@@ -728,7 +732,13 @@ class ChildAgentModule(Module):
         spec.runlog_path = self._runlog_path_for(spec.task_id)
         try:
             task_id = self.controller.spawn_child(spec, self._create_child_agent)
-        except RuntimeError as e:
+        except (RuntimeError, ValueError) as e:
+            # v3.7 commit-8: also catch ValueError so the v3.7 helper's
+            # share_parent_modules validation errors (parent missing
+            # module / not shareable / unknown name) reach the model
+            # as a clean tool-result string instead of a stack trace.
+            # logger.exception preserves the trace for dev visibility.
+            logger.exception("Cannot spawn continuous child agent")
             return f"Cannot spawn continuous child agent: {e}"
 
         return (
@@ -803,7 +813,9 @@ class ChildAgentModule(Module):
         spec.runlog_path = self._runlog_path_for(spec.task_id)
         try:
             task_id = self.controller.spawn_child(spec, self._create_child_agent)
-        except RuntimeError as e:
+        except (RuntimeError, ValueError) as e:
+            # v3.7 commit-8: see _spawn_continuous_child for rationale.
+            logger.exception("Cannot spawn child agent")
             return f"Cannot spawn child agent: {e}"
 
         # v3.5: emit structured spawn return with child_dir for cross-agent

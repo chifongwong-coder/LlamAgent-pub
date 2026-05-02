@@ -136,6 +136,19 @@ class MemoryModule(Module):
     # never registered on the shared child — bypassing the persona-
     # keyed FS-dir auth-scope leak that write would otherwise allow.
     shareable: bool = True
+    # Complete set of tool names this module CAN register (across all
+    # mode combinations). The child_agent factory's
+    # ``_apply_shared_modules`` clears these names from the child's
+    # tool table so parent's deepcopied tool entries (which close over
+    # parent's MemoryModule instance) do not leak. Single source of
+    # truth — the helper imports this tuple instead of hardcoding.
+    _TOOL_NAMES: tuple[str, ...] = (
+        "save_memory",
+        "recall_memory",
+        "consolidate_memory",
+        "list_memories",
+        "read_memory",
+    )
 
     def __init__(self):
         self.store: MemoryStore | None = None

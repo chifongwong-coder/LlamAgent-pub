@@ -439,3 +439,99 @@ class TestShareableModulesV37:
 
         with pytest.raises(ValueError, match="parent has no such module"):
             module._create_child_agent(spec)
+
+    def test_share_does_not_replace_child_llm_or_agent(
+        self, bare_agent, mock_llm_client, tmp_path
+    ):
+        """v3.7 commit-9: pin the original BLOCKER from plan §0.1.
+
+        A naive Option B implementation that aliased the parent's
+        MemoryModule instance would leave ``self.llm`` bound to the
+        parent, silently bypassing the child's BudgetedLLM on any
+        memory-related LLM call. v3.7 instead re-registers a fresh
+        instance so ``on_attach`` binds ``self.llm = child.llm``,
+        and only the data layer is swapped via inherit_storage_from.
+
+        This test pins that property end-to-end."""
+        from llamagent.modules.memory.module import MemoryModule
+
+        bare_agent.config.memory_backend = "fs"
+        bare_agent.config.memory_mode = "autonomous"
+        bare_agent.config.memory_recall_mode = "tool"
+        bare_agent.config.memory_fs_dir = str(tmp_path / "memory")
+        parent_mem = MemoryModule()
+        bare_agent.register_module(parent_mem)
+        # Sanity: parent module's LLM is parent's LLM.
+        assert parent_mem.llm is bare_agent.llm
+
+        module = ChildAgentModule()
+        bare_agent.register_module(module)
+
+        # Budget on policy -> factory wraps child.llm in BudgetedLLM.
+        policy = AgentExecutionPolicy(
+            share_parent_modules=["memory"],
+            budget=Budget(max_llm_calls=5),
+        )
+        spec = ChildAgentSpec(task="recall", role="worker", policy=policy)
+        child = module._create_child_agent(spec)
+        child_mem = child.modules["memory"]
+
+        # Fresh module instance on the child.
+        assert child_mem is not parent_mem
+        # Child memory module's LLM is the CHILD's BudgetedLLM, not parent's.
+        assert child_mem.llm is child.llm
+        assert isinstance(child.llm, BudgetedLLM)
+        assert child_mem.llm is not parent_mem.llm
+        assert child_mem.llm is not bare_agent.llm
+        # Agent identity: child's memory module points at child, not parent.
+        assert child_mem.agent is child
+        # Data layer IS shared (the v3.7 contract).
+        assert child_mem.store is parent_mem.store
+
+    def test_continuous_factory_share_inherits_storage(
+        self, bare_agent, mock_llm_client, tmp_path
+    ):
+        """v3.7 commit-9: cover the second factory call site.
+
+        All other share tests exercise _create_short_child_agent. The
+        continuous factory at _create_continuous_child_agent invokes
+        the same _apply_shared_modules helper but with different
+        ordering (set_mode runs BEFORE the helper). Pin the contract
+        explicitly so a future set_mode change can't silently clobber
+        the helper's memory_mode/recall_mode writes."""
+        from llamagent.modules.memory.module import MemoryModule
+
+        bare_agent.config.memory_backend = "fs"
+        bare_agent.config.memory_mode = "autonomous"
+        bare_agent.config.memory_recall_mode = "tool"
+        bare_agent.config.memory_fs_dir = str(tmp_path / "memory")
+        parent_mem = MemoryModule()
+        bare_agent.register_module(parent_mem)
+
+        module = ChildAgentModule()
+        bare_agent.register_module(module)
+
+        policy = AgentExecutionPolicy(share_parent_modules=["memory"])
+        spec = ChildAgentSpec(
+            task="watch",
+            role="watcher",
+            policy=policy,
+            continuous=True,
+            trigger_type="timer",
+            trigger_interval=60,
+        )
+        # _create_child_agent dispatches to _create_continuous_child_agent
+        # when spec.continuous is True.
+        child = module._create_child_agent(spec)
+
+        # Same invariants as the short-factory share test.
+        assert "memory" in child.modules
+        assert child.modules["memory"] is not parent_mem
+        assert child.modules["memory"].store is parent_mem.store
+        assert "save_memory" not in child._tools
+        assert "consolidate_memory" not in child._tools
+        # Helper runs AFTER set_mode("continuous"); the memory_mode
+        # override survives that ordering.
+        assert child.config.memory_mode == "off"
+        assert child.modules["memory"].agent is child
+        assert child.modules["memory"].llm is child.llm

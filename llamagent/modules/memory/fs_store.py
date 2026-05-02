@@ -182,6 +182,15 @@ class FSMemoryStore:
         """FS store is always available (no external dependencies)."""
         return True
 
+    @property
+    def base_dir(self) -> str:
+        """Public accessor for the underlying FSStore's base_dir.
+
+        Avoids callers (notably tests verifying persona-keyed paths)
+        having to reach into the private ``_fs`` attribute.
+        """
+        return self._fs.base_dir
+
     # ============================================================
     # Fact-level operations
     # ============================================================
