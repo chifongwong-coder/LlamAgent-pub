@@ -53,9 +53,17 @@ def _setup_tools_and_skill(bare_agent, tmp_path):
 
 
 def _call_tool_json(agent, name, **kwargs):
-    """Invoke a registered tool by name and return parsed JSON."""
-    func = agent._tools[name]["func"]
-    raw = func(**kwargs)
+    """Invoke a registered tool by name and return parsed JSON.
+
+    v3.6: respects ``takes_agent`` flag — tools that opt in receive the
+    calling agent as first arg, matching the framework dispatcher.
+    """
+    tool = agent._tools[name]
+    func = tool["func"]
+    if tool.get("takes_agent"):
+        raw = func(agent, **kwargs)
+    else:
+        raw = func(**kwargs)
     return json.loads(raw)
 
 

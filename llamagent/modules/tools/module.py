@@ -295,23 +295,26 @@ class ToolsModule(Module):
     # ============================================================
 
     def _register_workspace_tools(self):
-        """Register file-tool surface (read/write/patch/list/revert + pack)."""
-        ws = self.scratch_service
-        # v3.3: paths from the model are always resolved against project_dir.
-        # classify_write decides the routing for writes (playground / project /
-        # rejected). Reads default to project_dir; the authorization engine's
-        # _evaluate_zone handles requests for paths outside the project.
-        agent = self.agent
+        """Register file-tool surface (read/write/patch/list/revert + pack).
 
-        def _read_resolve(raw_path: str) -> str:
-            """Resolve a read path against project_dir without an escape
-            check. Authorization engine evaluates external reads."""
+        v3.6: every tool registered here uses ``takes_agent=True`` — the
+        dispatcher injects the calling agent at call time. Tool funcs
+        receive ``agent`` as first positional arg, which shadows the
+        closure-captured ``agent = self.agent`` inside their body. This
+        rebinds path resolution / write-root / auth_engine to the agent
+        actually invoking the tool (parent vs child) instead of the
+        agent that was attached at module-registration time.
+        """
+        ws = self.scratch_service
+
+        def _read_resolve(agent, raw_path: str) -> str:
+            """Resolve a read path against the calling agent's project_dir."""
             return _resolve_path(raw_path, base=agent.project_dir)
 
-        def _safe_extract_paths(raw_paths: list[str]) -> list[str]:
-            """path_extractor-safe wrapper: drop paths that fail to resolve
-            (e.g. NUL bytes raise ValueError on POSIX). The tool body
-            re-resolves and surfaces the error to the model."""
+        def _safe_extract_paths(agent, raw_paths: list[str]) -> list[str]:
+            """path_extractor-safe wrapper: drop paths that fail to resolve.
+            v3.6: receives ``agent`` from the path_extractor's (args, agent)
+            signature so resolution uses the calling agent's project_dir."""
             out = []
             for p in raw_paths:
                 if not isinstance(p, str):
@@ -322,7 +325,7 @@ class ToolsModule(Module):
                     continue
             return out
 
-        def _writable_root_hint(p: str) -> str:
+        def _writable_root_hint(agent, p: str) -> str:
             """v3.3 §3.5 — uniform error for paths outside writable boundary."""
             return (
                 f"Path '{p}' is outside writable root "
@@ -332,9 +335,9 @@ class ToolsModule(Module):
 
         # --- Exploration tools (safety_level=1) ---
 
-        def _list_tree(root: str = ".", max_depth: int = 3) -> str:
+        def _list_tree(agent, root: str = ".", max_depth: int = 3) -> str:
             try:
-                resolved = _read_resolve(root)
+                resolved = _read_resolve(agent, root)
             except ValueError as e:
                 return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
             lines = []
@@ -360,10 +363,11 @@ class ToolsModule(Module):
                 "max_depth": {"type": "integer", "description": "Maximum depth (default: 3)", "default": 3},
             }},
             tier="common", safety_level=1,
-            path_extractor=lambda args: _safe_extract_paths([args.get("root", ".")]),
+            path_extractor=lambda args, agent: _safe_extract_paths(agent, [args.get("root", ".")]),
+            takes_agent=True,
         )
 
-        def _glob_files(pattern: str, root: str = ".") -> str:
+        def _glob_files(agent, pattern: str, root: str = ".") -> str:
             try:
                 resolved = _resolve_path(root, base=agent.project_dir)
             except (ValueError, OSError) as e:
@@ -381,10 +385,11 @@ class ToolsModule(Module):
             }, "required": ["pattern"]},
             tier="common", safety_level=1,
             pack="path-fallback",
-            path_extractor=lambda args: _safe_extract_paths([args.get("root", ".")]),
+            path_extractor=lambda args, agent: _safe_extract_paths(agent, [args.get("root", ".")]),
+            takes_agent=True,
         )
 
-        def _search_text(query: str, paths: list = None, regex: bool = False,
+        def _search_text(agent, query: str, paths: list = None, regex: bool = False,
                          case_sensitive: bool = False) -> str:
             import re as _re
             search_root = agent.project_dir
@@ -424,17 +429,18 @@ class ToolsModule(Module):
             }, "required": ["query"]},
             tier="common", safety_level=1,
             pack="path-fallback",  # v3.3: shell `command: grep -rn pattern .` is preferred
-            path_extractor=lambda args: _safe_extract_paths(args.get("paths") or []),
+            path_extractor=lambda args, agent: _safe_extract_paths(agent, args.get("paths") or []),
+            takes_agent=True,
         )
 
-        def _read_files(paths: list, ranges: dict = None, with_line_numbers: bool = True,
+        def _read_files(agent, paths: list, ranges: dict = None, with_line_numbers: bool = True,
                         mode: str = "auto") -> str:
             """Read files with automatic text/binary detection.
 
             mode: "auto" (detect by extension/content), "text" (force text), "binary" (return base64).
             Paths resolve relative to the project root; absolute paths are kept.
             """
-            budget = getattr(self.agent.config, "max_observation_tokens", 2000)
+            budget = getattr(agent.config, "max_observation_tokens", 2000)
             per_file = max(200, budget // max(len(paths), 1))
             results = []
             for p in paths:
@@ -555,10 +561,11 @@ class ToolsModule(Module):
                 "mode": {"type": "string", "description": "Read mode: 'auto' (detect type), 'text' (force text), 'binary' (return base64)", "default": "auto"},
             }, "required": ["paths"]},
             tier="common", safety_level=1,
-            path_extractor=lambda args: _safe_extract_paths(args.get("paths") or []),
+            path_extractor=lambda args, agent: _safe_extract_paths(agent, args.get("paths") or []),
+            takes_agent=True,
         )
 
-        def _stat_paths(paths: list) -> str:
+        def _stat_paths(agent, paths: list) -> str:
             results = []
             for p in paths:
                 try:
@@ -586,12 +593,13 @@ class ToolsModule(Module):
             tier="common", safety_level=1,
             pack="path-fallback",
             truncatable=False,  # short metadata; bypass _truncate_observation
-            path_extractor=lambda args: _safe_extract_paths(args.get("paths", [])),
+            path_extractor=lambda args, agent: _safe_extract_paths(agent, args.get("paths", [])),
+            takes_agent=True,
         )
 
         # --- Modification tools (safety_level=2) ---
 
-        def _write_files(files: dict, mode: str = "text") -> str:
+        def _write_files(agent, files: dict, mode: str = "text") -> str:
             """Write files relative to the project root.
 
             Path classification (via classify_write):
@@ -611,7 +619,7 @@ class ToolsModule(Module):
                     continue
                 zone_class = classify_write(resolved, agent)
                 if zone_class == "rejected":
-                    errors.append({"path": path, "error": _writable_root_hint(path)})
+                    errors.append({"path": path, "error": _writable_root_hint(agent, path)})
                     continue
                 track_changeset = (zone_class == "project")
                 # Capture pre-image for changeset if writing to project zone.
@@ -691,7 +699,8 @@ class ToolsModule(Module):
                 "mode": {"type": "string", "description": "Write mode: 'text' (default) or 'binary' (base64-encoded)", "default": "text"},
             }, "required": ["files"]},
             tier="common", safety_level=2,
-            path_extractor=lambda args: _safe_extract_paths(list((args.get("files") or {}).keys())),
+            path_extractor=lambda args, agent: _safe_extract_paths(agent, list((args.get("files") or {}).keys())),
+            takes_agent=True,
         )
 
         # v3.3 commit-13b: path-fallback tools share the core 5's path
@@ -699,7 +708,7 @@ class ToolsModule(Module):
         # changesets via ProjectSyncService when targeting write_root;
         # writes to playground are ephemeral (not tracked).
 
-        def _create_temp_file(prefix: str = "", suffix: str = "", content: str = "") -> str:
+        def _create_temp_file(agent, prefix: str = "", suffix: str = "", content: str = "") -> str:
             # Always write under playground_dir (framework scratch), no
             # model-supplied path. Returns a path relative to project_dir
             # so the model can read it back via read_files.
@@ -721,9 +730,10 @@ class ToolsModule(Module):
             }},
             tier="common", safety_level=1,
             pack="path-fallback",
+            takes_agent=True,
         )
 
-        def _rename_path(target: str, new_name: str) -> str:
+        def _rename_path(agent, target: str, new_name: str) -> str:
             # new_name must be a plain filename — no path separators allowed.
             if os.sep in new_name or "/" in new_name or "\\" in new_name:
                 return json.dumps({
@@ -740,7 +750,7 @@ class ToolsModule(Module):
             if classify_write(rsrc, agent) == "rejected":
                 return json.dumps({
                     "status": "error",
-                    "error": _writable_root_hint(target),
+                    "error": _writable_root_hint(agent, target),
                 }, ensure_ascii=False)
             rdst = os.path.realpath(os.path.join(os.path.dirname(rsrc), new_name))
             # Post-realpath guard: new_name must not escape the source directory
@@ -770,10 +780,11 @@ class ToolsModule(Module):
             }, "required": ["target", "new_name"]},
             tier="common", safety_level=2,
             pack="path-fallback",
-            path_extractor=lambda args: _safe_extract_paths([args.get("target", "")]),
+            path_extractor=lambda args, agent: _safe_extract_paths(agent, [args.get("target", "")]),
+            takes_agent=True,
         )
 
-        def _move_path(src: str, dst: str) -> str:
+        def _move_path(agent, src: str, dst: str) -> str:
             try:
                 rsrc = _resolve_path(src, base=agent.project_dir)
                 rdst = _resolve_path(dst, base=agent.project_dir)
@@ -792,7 +803,7 @@ class ToolsModule(Module):
                 if classify_write(resolved, agent) == "rejected":
                     return json.dumps({
                         "status": "error",
-                        "error": _writable_root_hint(src if raw == "src" else dst),
+                        "error": _writable_root_hint(agent, src if raw == "src" else dst),
                     }, ensure_ascii=False)
             try:
                 shutil.move(rsrc, rdst)
@@ -812,10 +823,11 @@ class ToolsModule(Module):
             }, "required": ["src", "dst"]},
             tier="common", safety_level=2,
             pack="path-fallback",
-            path_extractor=lambda args: _safe_extract_paths([args.get("src", ""), args.get("dst", "")]),
+            path_extractor=lambda args, agent: _safe_extract_paths(agent, [args.get("src", ""), args.get("dst", "")]),
+            takes_agent=True,
         )
 
-        def _copy_path(src: str, dst: str) -> str:
+        def _copy_path(agent, src: str, dst: str) -> str:
             try:
                 rsrc = _resolve_path(src, base=agent.project_dir)
                 rdst = _resolve_path(dst, base=agent.project_dir)
@@ -825,7 +837,7 @@ class ToolsModule(Module):
                 if classify_write(resolved, agent) == "rejected":
                     return json.dumps({
                         "status": "error",
-                        "error": _writable_root_hint(src if raw == "src" else dst),
+                        "error": _writable_root_hint(agent, src if raw == "src" else dst),
                     }, ensure_ascii=False)
             try:
                 if os.path.isdir(rsrc):
@@ -848,10 +860,11 @@ class ToolsModule(Module):
             }, "required": ["src", "dst"]},
             tier="common", safety_level=2,
             pack="path-fallback",
-            path_extractor=lambda args: _safe_extract_paths([args.get("src", ""), args.get("dst", "")]),
+            path_extractor=lambda args, agent: _safe_extract_paths(agent, [args.get("src", ""), args.get("dst", "")]),
+            takes_agent=True,
         )
 
-        def _delete_path(path: str) -> str:
+        def _delete_path(agent, path: str) -> str:
             # v3.5: empty directories are now removable (revert via mkdir).
             # Non-empty directories are still rejected — Changeset can't
             # capture per-file pre_image bytes for revert. Model must
@@ -863,7 +876,7 @@ class ToolsModule(Module):
             if classify_write(resolved, agent) == "rejected":
                 return json.dumps({
                     "status": "error",
-                    "error": _writable_root_hint(path),
+                    "error": _writable_root_hint(agent, path),
                 }, ensure_ascii=False)
             if os.path.isdir(resolved):
                 # Empty directory: allowed (revert via mkdir).
@@ -944,7 +957,8 @@ class ToolsModule(Module):
             }, "required": ["path"]},
             tier="common", safety_level=2,
             pack="path-fallback",
-            path_extractor=lambda args: _safe_extract_paths([args.get("path", "")]),
+            path_extractor=lambda args, agent: _safe_extract_paths(agent, [args.get("path", "")]),
+            takes_agent=True,
         )
 
     # ============================================================
@@ -952,18 +966,22 @@ class ToolsModule(Module):
     # ============================================================
 
     def _register_project_sync_tools(self):
-        """Register project sync tools (apply_patch, revert)."""
-        ps = self.project_sync_service
-        agent = self.agent
+        """Register project sync tools (apply_patch, revert).
 
-        def _writable_root_hint(p: str) -> str:
+        v3.6: tools registered here use ``takes_agent=True``; the helper
+        ``_writable_root_hint`` takes ``agent`` so the formatted error
+        message reports the calling agent's write_root, not the parent's.
+        """
+        ps = self.project_sync_service
+
+        def _writable_root_hint(agent, p: str) -> str:
             return (
                 f"Path '{p}' is outside writable root "
                 f"'{agent.write_root}'. Choose a path within "
                 f"'{agent.write_root}'."
             )
 
-        def _apply_patch(target: str, edits: list, preview: bool = False) -> str:
+        def _apply_patch(agent, target: str, edits: list, preview: bool = False) -> str:
             try:
                 resolved = _resolve_path(target, base=agent.project_dir)
             except (ValueError, OSError) as e:
@@ -971,7 +989,7 @@ class ToolsModule(Module):
             zone_class = classify_write(resolved, agent)
             if zone_class == "rejected":
                 return json.dumps({"status": "error",
-                                   "error": _writable_root_hint(target)},
+                                   "error": _writable_root_hint(agent, target)},
                                   ensure_ascii=False)
             # Snapshot trigger lives in ProjectSyncService.apply_patch
             # (see project_sync.py::_maybe_snapshot). Tool wrapper just
@@ -984,7 +1002,7 @@ class ToolsModule(Module):
                 )
             return json.dumps(result, ensure_ascii=False)
 
-        def _safe_apply_patch_extract(args):
+        def _safe_apply_patch_extract(args, agent):
             """Exception-safe path extraction for apply_patch (auth layer)."""
             try:
                 return [_resolve_path(args.get("target", ""), base=agent.project_dir)]
@@ -1008,10 +1026,11 @@ class ToolsModule(Module):
                 "preview": {"type": "boolean", "description": "If true, validate edits without writing to disk", "default": False},
             }, "required": ["target", "edits"]},
             tier="common", safety_level=2,
-            path_extractor=lambda args: _safe_apply_patch_extract(args),
+            path_extractor=lambda args, agent: _safe_apply_patch_extract(args, agent),
+            takes_agent=True,
         )
 
-        def _revert_changes(targets: list = None) -> str:
+        def _revert_changes(agent, targets: list = None) -> str:
             if targets:
                 resolved_targets = []
                 for t in targets:
@@ -1046,10 +1065,11 @@ class ToolsModule(Module):
                 "targets": {"type": "array", "items": {"type": "string"}, "description": "File paths to revert (relative to project). Omit to revert most recent changeset."},
             }},
             tier="common", safety_level=2,
-            path_extractor=lambda args: _safe_revert_extract(args),
+            path_extractor=lambda args, agent: _safe_revert_extract(args, agent),
+            takes_agent=True,
         )
 
-        def _safe_revert_extract(args):
+        def _safe_revert_extract(args, agent):
             """Exception-safe path extraction for revert_changes."""
             out = []
             for t in (args.get("targets") or []):

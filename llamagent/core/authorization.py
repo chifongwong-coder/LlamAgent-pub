@@ -655,12 +655,19 @@ class AuthorizationEngine:
     # Path extraction (moved from LlamAgent._extract_paths)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _extract_paths(tool: dict, args: dict) -> list[str]:
-        """Extract paths from tool arguments using path_extractor or auto-detection."""
+    def _extract_paths(self, tool: dict, args: dict) -> list[str]:
+        """Extract paths from tool arguments using path_extractor or auto-detection.
+
+        v3.6: when ``tool["takes_agent"]`` is True, the path_extractor is
+        invoked with ``(args, agent)`` so it can resolve paths against the
+        calling agent's project_dir. Legacy extractors keep the ``(args,)``
+        single-arg signature; framework dispatches based on the flag.
+        """
         extractor = tool.get("path_extractor")
         if extractor is not None:
             try:
+                if tool.get("takes_agent"):
+                    return [p for p in extractor(args, self.agent) if p]
                 return [p for p in extractor(args) if p]
             except Exception as e:
                 logger.warning("path_extractor raised exception for tool '%s': %s",
