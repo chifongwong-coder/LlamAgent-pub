@@ -31,13 +31,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-rag = ["chromadb>=0.4.0"]
+rag = ["chromadb>=0.6.1"]
 cli = ["rich>=13.0.0"]
 web = ["gradio>=4.0.0"]
 api = ["fastapi>=0.100.0", "uvicorn>=0.20.0"]
 mcp = ["mcp>=1.0.0"]
 all = [
-    "chromadb>=0.4.0",
+    "chromadb>=0.6.1",
     "rich>=13.0.0",
     "gradio>=4.0.0",
     "fastapi>=0.100.0",

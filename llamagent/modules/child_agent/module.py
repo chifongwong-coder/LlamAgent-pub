@@ -50,6 +50,114 @@ from llamagent.modules.child_agent.task_board import TaskBoard, TaskRecord
 logger = logging.getLogger(__name__)
 
 
+def _apply_shared_modules(parent, child, share_modules):
+    """v3.7: re-register shareable parent modules on the child and
+    swap in the parent's storage handles.
+
+    Called by both ``_create_short_child_agent`` and
+    ``_create_continuous_child_agent`` AFTER ``child._tools`` has been
+    rebuilt (deepcopy from parent + filter by allowlist/denylist) and
+    BEFORE the child runs any tool. Mutates ``child.config`` and
+    ``child.modules`` in place.
+
+    The ordering matters: ``child.modules = {}`` earlier in the factory
+    wiped any module __init__ created. Here we re-register a fresh
+    module instance so ``on_attach`` runs against the child's agent /
+    LLM binding (preserves child's BudgetedLLM / model selection),
+    then swap in the parent's storage via ``inherit_storage_from`` so
+    the child reads the parent's persistent data.
+
+    Read-only contract: for each shareable module, this helper forces
+    the child's write mode to "off" before re-registering. The
+    module's ``on_attach`` checks the mode and skips write-tool
+    registration entirely — there is no ``save_memory`` /
+    ``consolidate_memory`` on the shared child. The child does inherit
+    parent's read mode (``parent.config.memory_recall_mode``) so a
+    parent that disabled reads keeps the child equally locked out.
+
+    Default branch (``share_modules`` is None / empty): preserves the
+    pre-v3.7 behavior of disabling all persistent modules on the
+    child. The legacy hardcoded ``config.memory_mode = "off"`` at the
+    short / continuous factory bodies is now applied here.
+
+    Errors:
+    - parent has no module named X -> ValueError (loud failure;
+      typically a typo or wrong module load order).
+    - parent module's class is not declared shareable -> ValueError.
+    - parent module is loaded but disabled (e.g. memory_mode="off"
+      and store=None) -> silent graceful: child also ends up disabled,
+      matching parent's intent.
+    """
+    # Memory tools that may have landed in child._tools via the
+    # deepcopy(parent._tools) step earlier in the factory. We
+    # always start by clearing them, then conditionally let
+    # MemoryModule's on_attach (called below) re-register the right
+    # subset for the share case. Without this clear, parent's read
+    # AND write tools leak into the child's tool table even when the
+    # caller asked for no sharing — which would break the read-only
+    # contract for the share case (parent's save_memory closure stays
+    # registered) and let a no-share child indirectly read parent's
+    # memory via the deepcopy'd tool entries.
+    _MEMORY_TOOLS = ("save_memory", "recall_memory", "consolidate_memory",
+                     "list_memories", "read_memory")
+    for tool_name in _MEMORY_TOOLS:
+        child._tools.pop(tool_name, None)
+
+    if not share_modules:
+        # Default path: child has no persistent modules. This branch
+        # preserves today's behavior — the hardcoded
+        # ``config.memory_mode = "off"`` at the legacy lines 929 / 1077
+        # of the short and continuous factories is now applied here.
+        # ``tests_internal/test_child_agent_mock.py:745`` (asserts
+        # default child has ``memory_mode == "off"``) still passes.
+        child.config.memory_mode = "off"
+        child.config.memory_recall_mode = "off"
+        return
+
+    for mod_name in share_modules:
+        parent_mod = parent.modules.get(mod_name)
+        if parent_mod is None:
+            raise ValueError(
+                f"share_parent_modules={mod_name!r}: parent has no "
+                f"such module loaded. Load it on the parent before "
+                f"spawning the child."
+            )
+        if not getattr(type(parent_mod), "shareable", False):
+            raise ValueError(
+                f"Module {mod_name!r} (type {type(parent_mod).__name__}) "
+                f"is not declared shareable; cannot pass via "
+                f"share_parent_modules."
+            )
+
+        # Module-specific config overrides + child module construction.
+        # Each shareable module gets its own branch — keeps the read-
+        # only forcing logic explicit instead of magic.
+        if mod_name == "memory":
+            from llamagent.modules.memory.module import MemoryModule
+            # Read-only contract: child never writes to shared memory.
+            child.config.memory_mode = "off"
+            # Inherit parent's read mode (parent off -> child off).
+            child.config.memory_recall_mode = getattr(
+                parent.config, "memory_recall_mode", "off"
+            )
+            child.register_module(MemoryModule())
+        else:
+            # Defensive: future modules (reflection in v3.7.1) need
+            # their own branch above. If we reach this with an
+            # unrecognized name, the shareable flag was set but the
+            # factory wasn't taught how to register it. Fail loudly.
+            raise ValueError(
+                f"Module {mod_name!r} is declared shareable but the "
+                f"child_agent factory does not know how to register "
+                f"it on the child. Add a branch in _apply_shared_modules."
+            )
+
+        # Swap in parent's storage handles. inherit_storage_from is
+        # the contract that decides which fields are "data layer"
+        # (copied) vs "LLM-bound" (kept per-agent).
+        child.modules[mod_name].inherit_storage_from(parent_mod)
+
+
 # LLM guide injected via on_context when runner is async (thread or process)
 CHILD_AGENT_GUIDE_ASYNC = (
     "[Child Agent] You can spawn multiple child agents in parallel.\n"
@@ -926,7 +1034,10 @@ class ChildAgentModule(Module):
         config.compress_keep_turns = 2
         config.max_duplicate_actions = 2
         config.max_observation_tokens = 1500
-        config.memory_mode = "off"
+        # v3.7: memory_mode / memory_recall_mode are now set by
+        # _apply_shared_modules below — default branch forces "off" for
+        # the no-share case, share branch forces write-off + read-
+        # inherits-parent.
         config.reflection_write_mode = "off"
         config.reflection_read_mode = "off"
         config.max_plan_adjustments = 3
@@ -1036,6 +1147,15 @@ class ChildAgentModule(Module):
                 if tool.get("execution_policy") is None:
                     tool["execution_policy"] = spec.policy.execution_policy
 
+        # v3.7: re-register parent-shared persistent modules on the
+        # child (memory today; reflection in v3.7.1). Default branch
+        # (no share_modules) preserves pre-v3.7 behavior of disabling
+        # all persistent modules on the child.
+        share_modules = (
+            spec.policy.share_parent_modules if spec.policy else None
+        )
+        _apply_shared_modules(parent, child, share_modules)
+
         # v3.5: propagate delegation depth so a recursive ChildAgentModule
         # in the child can enforce max_delegation_depth on grandchildren.
         child._delegation_depth = spec.delegation_depth
@@ -1074,7 +1194,8 @@ class ChildAgentModule(Module):
         if not hasattr(config, 'api_retry_count'):
             config.api_retry_count = 1
         config.authorization_mode = "interactive"  # Clean construction
-        config.memory_mode = "off"
+        # v3.7: memory_mode / memory_recall_mode set by
+        # _apply_shared_modules below.
         config.reflection_write_mode = "off"
         config.reflection_read_mode = "off"
         config.max_plan_adjustments = 3
@@ -1215,6 +1336,14 @@ class ChildAgentModule(Module):
             for tool_name, tool in child._tools.items():
                 if tool.get("execution_policy") is None:
                     tool["execution_policy"] = spec.policy.execution_policy
+
+        # v3.7: re-register parent-shared persistent modules on the
+        # child (memory today; reflection in v3.7.1). Mirrors the
+        # short-child factory's wiring.
+        share_modules = (
+            spec.policy.share_parent_modules if spec.policy else None
+        )
+        _apply_shared_modules(parent, child, share_modules)
 
         # v3.5.1: propagate delegation_depth so a hypothetical relaxation of
         # the spawn-tool pruning would still let the cap fire on grandchildren.

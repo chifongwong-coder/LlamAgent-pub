@@ -17,6 +17,46 @@ Core design:
 A bare LlamAgent is a fully functional conversational Agent. Each
 module loaded grants a new capability.
 
+v3.7 highlights (parent-child shared persistent storage, read-only contract):
+- ``Module.shareable: bool = False`` class attribute. Modules opt in
+  by flipping to True. The child_agent factory consults this flag
+  before invoking ``inherit_storage_from`` and raises ValueError on
+  modules that aren't declared shareable. Reflection on the v3.7.1
+  roadmap will be the second consumer of this contract — keeps the
+  abstraction earning its keep per P6 ("reserve extension interfaces
+  for foreseeable cases").
+- ``Module.inherit_storage_from(other)`` lifecycle hook. Default
+  raises NotImplementedError. Subclasses (today: ``MemoryModule``)
+  override to copy ONLY data-layer handles (stores, vector pipelines)
+  — NOT LLM-bound helpers (compilers, mergers). This keeps each
+  agent's BudgetedLLM / model selection intact across the inherit.
+- ``AgentExecutionPolicy.share_parent_modules: list[str] | None``.
+  Per-spawn opt-in. Example: ``share_parent_modules=["memory"]`` lets
+  a child read the parent's persistent memory store. Default None
+  preserves the pre-v3.7 contract: child has no persistent modules.
+- **Read-only contract**: shared children get only the read tools
+  (``recall_memory`` / ``list_memories`` / ``read_memory``). Write
+  tools (``save_memory`` / ``consolidate_memory``) are NOT registered
+  on the shared child. The framework forces ``memory_mode = "off"``
+  via ``_apply_shared_modules`` so the on_attach branch that registers
+  write tools never fires. Bypasses the auth-scope leak that direct
+  child writes to the parent's persona-keyed FS dir would otherwise
+  open. Children that need to write must send a message to the parent
+  and let the parent persist on their behalf.
+- Parent recall mode is inherited (parent ``memory_recall_mode="off"``
+  → child also off). Children never have permissions the parent
+  itself has disabled.
+- Concurrency safety relies on storage-layer primitives (Chroma's
+  ``PerThreadPool`` + busy_timeout for vector backends; ``os.replace``
+  atomic writes for FS backends). Pinned ``chromadb>=0.6.1`` so the
+  PR #3335 LRU Segment Cache thread-safety fix is guaranteed. v3.8
+  will add explicit per-store locks; module-level locks are NEVER
+  appropriate (modules are not shared, stores are).
+- Documentation: see ``docs/llamagent-v3.7-plan.md`` (private) for the
+  full design rationale, three rounds of reviewer findings, and the
+  per-decision audit. v3.6 plan ``docs/llamagent-v3.6-plan.md`` is
+  the orthogonal predecessor (dispatch identity vs. storage ownership).
+
 v3.6 highlights (tool-dispatch contract: agent identity is runtime, not closure):
 - ``register_tool(takes_agent: bool = False)`` flag. When True, the
   framework dispatcher injects the calling agent as the first
@@ -95,7 +135,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "3.6"
+__version__ = "3.7"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager

@@ -129,6 +129,13 @@ class MemoryModule(Module):
 
     name: str = "memory"
     description: str = "Long-term memory: structured facts with extraction, merging, and auto-recall"
+    # v3.7: parent-child storage sharing. Child agents spawned with
+    # share_parent_modules=["memory"] read the parent's facts. The
+    # framework forces read-only on the child (memory_mode="off") so
+    # this module's write tools (save_memory, consolidate_memory) are
+    # never registered on the shared child — bypassing the persona-
+    # keyed FS-dir auth-scope leak that write would otherwise allow.
+    shareable: bool = True
 
     def __init__(self):
         self.store: MemoryStore | None = None
@@ -266,6 +273,33 @@ class MemoryModule(Module):
         except Exception as e:
             logger.warning("[Memory] Failed to build retrieval pipeline: %s", e)
             return None
+
+    def inherit_storage_from(self, other: "MemoryModule") -> None:
+        """v3.7: replace this module's data layer with the parent's.
+
+        Called by the child_agent factory when this MemoryModule lives
+        on a child agent spawned with ``share_parent_modules=["memory"]``.
+        The factory has already forced ``config.memory_mode = "off"`` on
+        the child so the write-tool branch of ``on_attach`` did NOT run
+        — there is no ``self.compiler`` / ``self.merger`` to worry about.
+        Read-tool registration honors the inherited ``_read_mode`` and
+        the swapped-in ``self.store``.
+
+        Persona invariant (locked): after this method returns, all
+        persona-derived names (FS base_dir suffix, RAG collection
+        name) MUST come from ``self.store`` and the inherited pipeline.
+        Today's read tools all read ``self.store`` directly so this is
+        structurally safe; any future helper that re-derives names
+        from ``self.agent.persona`` after sharing is a bug — the
+        child's persona may differ from the parent's, landing reads on
+        a different physical location than the inherited data.
+
+        on_shutdown is the no-op default — child does NOT close the
+        store (parent owns the lifecycle).
+        """
+        self.store = other.store
+        self._available = other._available
+        self._backend = other._backend
 
     def on_input(self, user_input: str) -> str:
         """Check if memory consolidation is needed (hybrid mode auto-trigger)."""
