@@ -141,7 +141,7 @@ class TestCrossModule:
         assert "job-followup" in bare_agent._active_packs
 
         # Clean up
-        bare_agent._tools["cancel_job"]["func"](job_id=job_id)
+        _call_tool_json(bare_agent, "cancel_job", job_id=job_id)
 
     def test_workspace_project_flow(self, bare_agent, tmp_path):
         """Patch+revert flow on project files (v3.3: sync_workspace_to_project deleted)."""
