@@ -41,9 +41,17 @@ from llamagent.modules.sandbox import SandboxModule
 # =============================================================
 
 def call_tool(agent, name, **kwargs):
-    """Call a tool registered on the agent and return the parsed result."""
-    func = agent._tools[name]["func"]
-    raw = func(**kwargs)
+    """Call a tool registered on the agent and return the parsed result.
+
+    v3.6: respects ``takes_agent`` — tools that opt in receive the agent
+    as first arg, matching the framework dispatcher contract.
+    """
+    tool = agent._tools[name]
+    func = tool["func"]
+    if tool.get("takes_agent"):
+        raw = func(agent, **kwargs)
+    else:
+        raw = func(**kwargs)
     try:
         return json.loads(raw)
     except (json.JSONDecodeError, TypeError):

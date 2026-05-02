@@ -529,7 +529,8 @@ class TestChangesetLRU:
         assert "command" in bare_agent._tools
 
         # Run a benign command — engine classifies as ALLOW (default).
-        raw = bare_agent._tools["command"]["func"](cmd="echo hello")
+        # v3.6: command tool is takes_agent=True, dispatch via helper.
+        raw = _call_tool(bare_agent, "command", cmd="echo hello")
         result = json.loads(raw)
         assert result["status"] == "success"
         assert "hello" in result["stdout"]
