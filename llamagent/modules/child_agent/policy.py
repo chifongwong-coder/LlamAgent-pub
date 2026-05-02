@@ -50,6 +50,16 @@ class AgentExecutionPolicy:
     # ("sandbox" with SandboxModule, "project" with classify_write's
     # zone, "workspace" itself being retired in v3.4).
     share_parent_project_dir: bool = False
+    # v3.7: opt-in list of parent module names whose persistent storage
+    # the child should inherit (read-only). Each named module on the
+    # parent must have ``Module.shareable = True``. Today's only
+    # supported entry is "memory"; v3.7.1 will add "reflection". The
+    # framework forces read-only semantics on the shared child by
+    # disabling the corresponding write mode (e.g. memory_mode="off")
+    # so write tools are never registered on the child. None / empty
+    # list (default) preserves the pre-v3.7 contract: child gets no
+    # persistent modules. See docs/llamagent-v3.7-plan.md §1.3.
+    share_parent_modules: list[str] | None = None
     model: str | None = None  # None = inherit parent's model
 
 
