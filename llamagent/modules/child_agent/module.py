@@ -989,11 +989,29 @@ class ChildAgentModule(Module):
         child.mode = "interactive"  # Short-task children always use interactive mode
 
         # v2.7: scope inheritance — share_parent inherits parent scopes,
-        # isolated mode gets empty scopes (project writes denied)
+        # isolated mode gets empty scopes (project writes denied).
+        # v3.6: for share=False ALSO add a session scope covering the
+        # child's own isolated project_dir; otherwise a child with
+        # auto_approve=True still gets denied writes against its own
+        # directory (LlamAgent.__init__'s auto-seed ran on the
+        # config-time project_dir = parent's, then the factory overwrote
+        # child.project_dir without refreshing the scope).
         if share_parent_project_dir:
             parent_scopes = parent._authorization_engine.export_scopes()
             if parent_scopes:
                 child._authorization_engine.import_scopes(parent_scopes)
+        else:
+            from llamagent.core.authorization import ApprovalScope
+            child._authorization_engine.add_scope(ApprovalScope(
+                scope="session", zone="project",
+                actions=["read", "write"],
+                path_prefixes=[child.project_dir],
+            ))
+            child._authorization_engine.add_scope(ApprovalScope(
+                scope="session", zone="workspace",
+                actions=["read", "write"],
+                path_prefixes=[child.playground_dir],
+            ))
         child._tools = {}
         child._tools_version = 0
         child.tool_executor = getattr(parent, "tool_executor", None)  # Inherit sandbox
@@ -1149,11 +1167,26 @@ class ChildAgentModule(Module):
         config.context_window_size = 20
 
         # 7. Import parent scopes (only when sharing the parent's project,
-        #    consistent with short child)
+        #    consistent with short child). v3.6: for share=False, seed
+        #    scopes for the child's own isolated dirs so its own writes
+        #    aren't denied by default (auto_approve auto-scope ran at
+        #    LlamAgent.__init__ time against the pre-overwrite project_dir).
         if share_parent_project_dir:
             parent_scopes = parent._authorization_engine.export_scopes()
             if parent_scopes:
                 child._authorization_engine.import_scopes(parent_scopes)
+        else:
+            from llamagent.core.authorization import ApprovalScope
+            child._authorization_engine.add_scope(ApprovalScope(
+                scope="session", zone="project",
+                actions=["read", "write"],
+                path_prefixes=[child.project_dir],
+            ))
+            child._authorization_engine.add_scope(ApprovalScope(
+                scope="session", zone="workspace",
+                actions=["read", "write"],
+                path_prefixes=[child.playground_dir],
+            ))
 
         # 8. Inject task into system_prompt
         config.system_prompt = (
