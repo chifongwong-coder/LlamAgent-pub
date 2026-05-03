@@ -165,14 +165,23 @@ class ProcessRunnerBackend(AgentRunnerBackend):
                 getattr(self._parent_config, "child_agent_runlog_max_bytes", 10 * 1024 * 1024)
                 if self._parent_config else 10 * 1024 * 1024
             ),
-            "project_dir": getattr(self._parent_config, "project_dir", None) if self._parent_config else None,
-            "playground_dir": getattr(self._parent_config, "playground_dir", None) if self._parent_config else None,
+            # ``project_dir`` and ``playground_dir`` live on the agent (set in
+            # ``LlamAgent.__init__``), not on Config — reading via ``getattr`` from
+            # ``self._parent_config`` always returned None, so the subprocess
+            # silently fell back to its inherited cwd. Source from
+            # ``self._parent_agent`` so the child actually inherits the parent's
+            # paths (or the parent_playground for isolated children).
+            "project_dir": (
+                self._parent_agent.project_dir if self._parent_agent else None
+            ),
+            "playground_dir": (
+                self._parent_agent.playground_dir if self._parent_agent else None
+            ),
             "share_parent_project_dir": (
                 spec.policy.share_parent_project_dir if spec.policy else False
             ),
             "parent_playground_dir": (
-                getattr(self._parent_config, "playground_dir", None)
-                if self._parent_config else None
+                self._parent_agent.playground_dir if self._parent_agent else None
             ),
         }
 
