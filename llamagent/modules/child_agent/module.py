@@ -217,10 +217,11 @@ def _apply_shared_modules(parent, child, share_modules):
             )
             child.register_module(MemoryModule())
         else:
-            # Defensive: future modules (reflection in v3.7.1) need
-            # their own branch above. If we reach this with an
-            # unrecognized name, the shareable flag was set but the
-            # factory wasn't taught how to register it. Fail loudly.
+            # Defensive: future shareable modules (e.g. reflection,
+            # if it ever gains shareable=True) need their own branch
+            # above. If we reach this with an unrecognized name, the
+            # shareable flag was set on a module class but the factory
+            # wasn't taught how to register it. Fail loudly.
             raise ValueError(
                 f"Module {mod_name!r} is declared shareable but the "
                 f"child_agent factory does not know how to register "
@@ -796,7 +797,7 @@ class ChildAgentModule(Module):
         # a clean tool-result string.
         # NOTE: ``policy`` is constructed via
         # ``copy.copy(ROLE_POLICIES.get(role, AgentExecutionPolicy()))``
-        # (line 768) and is therefore never None at this point;
+        # at the top of this method and is therefore never None here;
         # ``policy.share_parent_modules`` itself can still be None
         # (the field default), which ``_check_share_modules`` handles.
         err = _check_share_modules(
@@ -901,7 +902,7 @@ class ChildAgentModule(Module):
         # full rationale (runner exception-swallowing turns the
         # helper's ValueError into a misleading false-success header).
         # ``policy`` is never None here (constructed via
-        # ROLE_POLICIES.get default at line 877).
+        # ROLE_POLICIES.get default at the top of this method).
         err = _check_share_modules(
             self.agent, policy.share_parent_modules, self._runner_name
         )
@@ -933,7 +934,12 @@ class ChildAgentModule(Module):
         # v3.5: emit structured spawn return with child_dir for cross-agent
         # path resolution. share_parent_project_dir=True → child_dir is
         # parent.project_dir; False → parent.playground/children/<task_id>/.
-        share = policy.share_parent_project_dir if policy else True
+        # v3.7.1 commit-17: ``policy`` is constructed via
+        # ROLE_POLICIES.get default at the top of this method, so
+        # never None here. The legacy ``if policy else True`` fallback
+        # was dead code with non-default semantics (returned True on
+        # the unreachable None case while the field default is False).
+        share = policy.share_parent_project_dir
         if share:
             child_dir = self.agent.project_dir
         else:
@@ -1393,8 +1399,8 @@ class ChildAgentModule(Module):
         # ``None``, the bare conditional returns ``None``, which then makes
         # ``run_react``'s ``steps < self.config.max_react_steps`` raise
         # ``TypeError: '<' not supported between int and NoneType``.
-        # This pattern matches the short-child path (lines 937-938) and the
-        # earlier continuous-child path (lines 1076-1077).
+        # This pattern mirrors the budget defaulting in the short-child
+        # factory and in the earlier continuous-child setup block.
         if spec.policy and spec.policy.budget:
             budget_timeout = spec.policy.budget.max_time_seconds or 600
             budget_steps = spec.policy.budget.max_steps or 10

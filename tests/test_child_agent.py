@@ -541,6 +541,12 @@ class TestShareableModulesV37:
         # Sanity: default path with no policy works (no share check
         # triggers).
         assert "Cannot spawn" not in out
+        # v3.7.1 commit-17: pin that the worker spawn actually reached
+        # controller.spawn_child (proves the "task_id:" header).
+        # Without this, a future regression that breaks the worker
+        # spawn could leave both n_before and n_after at 0, making
+        # the post-failure invariant assertion vacuously true.
+        assert "task_id:" in out
 
         # Now exercise the failing path through the real spawn tool.
         # We call _spawn_child via Python (the model's call path), but
@@ -551,6 +557,11 @@ class TestShareableModulesV37:
         # spawn_child and then post-formatted the runner's swallowed
         # error.
         n_before = len(module.controller.list_children(module._parent_id))
+        # v3.7.1 commit-17: hard-pin the precondition. The worker spawn
+        # above must have produced at least one task_board entry, so a
+        # regressed-to-zero baseline can't make the invariant pass
+        # vacuously.
+        assert n_before >= 1
         policy = AgentExecutionPolicy(share_parent_modules=["memory"])
         ROLE_POLICIES["v371_share_test"] = policy
         try:
@@ -591,6 +602,13 @@ class TestShareableModulesV37:
         # because we never reach controller.spawn_child.
         module._runner_name = "process"
 
+        # v3.7.1 commit-17: snapshot task_board count so we assert no
+        # record was added by the refused spawn. Same defense as
+        # test_spawn_child_pre_validates_share_parent_modules -- a
+        # future regression that runs controller.spawn_child and then
+        # post-formats the runner's swallowed error would slip past
+        # the string-only assertions below.
+        n_before = len(module.controller.list_children(module._parent_id))
         policy = AgentExecutionPolicy(share_parent_modules=["memory"])
         ROLE_POLICIES["v371_proc_test"] = policy
         try:
@@ -604,6 +622,8 @@ class TestShareableModulesV37:
         assert "Cannot spawn child agent:" in out
         assert "not supported on the process runner" in out
         assert "task_id:" not in out
+        # State invariant: pre-check returned BEFORE controller.spawn_child.
+        assert len(module.controller.list_children(module._parent_id)) == n_before
 
     def test_continuous_factory_share_inherits_storage(
         self, bare_agent, mock_llm_client, tmp_path
