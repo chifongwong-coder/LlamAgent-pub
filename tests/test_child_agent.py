@@ -541,10 +541,27 @@ class TestShareableModulesV37:
         # Sanity: default path with no policy works (no share check
         # triggers).
         assert "Cannot spawn" not in out
+        # v3.7.1 commit-17: pin that the worker spawn actually reached
+        # controller.spawn_child (proves the "task_id:" header).
+        # Without this, a future regression that breaks the worker
+        # spawn could leave both n_before and n_after at 0, making
+        # the post-failure invariant assertion vacuously true.
+        assert "task_id:" in out
 
         # Now exercise the failing path through the real spawn tool.
         # We call _spawn_child via Python (the model's call path), but
         # supply a custom policy by injecting a ROLE_POLICIES override.
+        # v3.7.1 commit-16: also snapshot the task_board so we can
+        # assert no record was created -- the string-only check below
+        # would still pass if a future regression ran controller.
+        # spawn_child and then post-formatted the runner's swallowed
+        # error.
+        n_before = len(module.controller.list_children(module._parent_id))
+        # v3.7.1 commit-17: hard-pin the precondition. The worker spawn
+        # above must have produced at least one task_board entry, so a
+        # regressed-to-zero baseline can't make the invariant pass
+        # vacuously.
+        assert n_before >= 1
         policy = AgentExecutionPolicy(share_parent_modules=["memory"])
         ROLE_POLICIES["v371_share_test"] = policy
         try:
@@ -560,6 +577,9 @@ class TestShareableModulesV37:
         assert "Cannot spawn child agent:" in out
         assert "parent has no such module" in out
         assert "task_id:" not in out  # NOT a spawn success
+        # State invariant: pre-check returned BEFORE controller.spawn_child,
+        # so the task_board got no new entry from the failing call.
+        assert len(module.controller.list_children(module._parent_id)) == n_before
 
     def test_spawn_child_refuses_process_runner_with_share(
         self, bare_agent, mock_llm_client, tmp_path
@@ -577,11 +597,34 @@ class TestShareableModulesV37:
 
         module = ChildAgentModule()
         bare_agent.register_module(module)
-        # Force the runner_name to "process" — the spawn tool checks
-        # this directly. The runner backend itself isn't exercised
-        # because we never reach controller.spawn_child.
+
+        # v3.7.1 commit-18: run a baseline spawn FIRST (with default
+        # inline runner) so the task_board has at least one record.
+        # Without this, n_before would always be 0 and the post-refuse
+        # invariant ``n_after == n_before`` would pass vacuously even
+        # if the controller itself regressed for all inputs. Mirrors
+        # the n_before >= 1 hardening in
+        # test_spawn_child_pre_validates_share_parent_modules.
+        out_baseline = module._spawn_child(
+            task="baseline", role="worker", context=""
+        )
+        assert "task_id:" in out_baseline
+
+        # Force the runner_name to "process" — the spawn tool's
+        # pre-check reads this directly, so _runner doesn't need to
+        # actually be a ProcessRunnerBackend. Set AFTER the baseline
+        # so the baseline spawn used the real (inline) runner and
+        # truly added a board entry.
         module._runner_name = "process"
 
+        # v3.7.1 commit-17: snapshot task_board count so we assert no
+        # record was added by the refused spawn. Same defense as
+        # test_spawn_child_pre_validates_share_parent_modules -- a
+        # future regression that runs controller.spawn_child and then
+        # post-formats the runner's swallowed error would slip past
+        # the string-only assertions below.
+        n_before = len(module.controller.list_children(module._parent_id))
+        assert n_before >= 1  # baseline produced a record
         policy = AgentExecutionPolicy(share_parent_modules=["memory"])
         ROLE_POLICIES["v371_proc_test"] = policy
         try:
@@ -595,6 +638,8 @@ class TestShareableModulesV37:
         assert "Cannot spawn child agent:" in out
         assert "not supported on the process runner" in out
         assert "task_id:" not in out
+        # State invariant: pre-check returned BEFORE controller.spawn_child.
+        assert len(module.controller.list_children(module._parent_id)) == n_before
 
     def test_continuous_factory_share_inherits_storage(
         self, bare_agent, mock_llm_client, tmp_path
@@ -606,8 +651,19 @@ class TestShareableModulesV37:
         the same _apply_shared_modules helper but with different
         ordering (set_mode runs BEFORE the helper). Pin the contract
         explicitly so a future set_mode change can't silently clobber
-        the helper's memory_mode/recall_mode writes."""
+        the helper's memory_mode/recall_mode writes.
+
+        v3.7.1 commit-16: pin BudgetedLLM-tracker invariant under the
+        production wire-order (Budget on policy + runlog_path set).
+        Mirrors the fix commit-13 applied to
+        ``test_share_does_not_replace_child_llm_or_agent``. Without
+        this, the prior version's ``child.modules["memory"].llm is
+        child.llm`` assertion passed only because ``runlog_path=""``
+        skipped ``_attach_runlog`` and ``budget=None`` skipped
+        ``BudgetedLLM`` -- both wraps were absent so identity held by
+        coincidence on a non-production code path."""
         from llamagent.modules.memory.module import MemoryModule
+        from llamagent.core.logging_llm import LoggingLLM
 
         bare_agent.config.memory_backend = "fs"
         bare_agent.config.memory_mode = "autonomous"
@@ -619,7 +675,15 @@ class TestShareableModulesV37:
         module = ChildAgentModule()
         bare_agent.register_module(module)
 
-        policy = AgentExecutionPolicy(share_parent_modules=["memory"])
+        # Budget on policy -> factory wraps child.llm in BudgetedLLM.
+        # runlog_path set -> factory then wraps in LoggingLLM(BudgetedLLM).
+        # Production _spawn_continuous_child always sets runlog_path
+        # via _runlog_path_for(spec.task_id), so this matches the
+        # real wire-order.
+        policy = AgentExecutionPolicy(
+            share_parent_modules=["memory"],
+            budget=Budget(max_llm_calls=5),
+        )
         spec = ChildAgentSpec(
             task="watch",
             role="watcher",
@@ -627,6 +691,7 @@ class TestShareableModulesV37:
             continuous=True,
             trigger_type="timer",
             trigger_interval=60,
+            runlog_path=str(tmp_path / "cont.log.jsonl"),
         )
         # _create_child_agent dispatches to _create_continuous_child_agent
         # when spec.continuous is True.
@@ -642,4 +707,11 @@ class TestShareableModulesV37:
         # override survives that ordering.
         assert child.config.memory_mode == "off"
         assert child.modules["memory"].agent is child
-        assert child.modules["memory"].llm is child.llm
+        # Production wire-order: child.llm is LoggingLLM(BudgetedLLM(...))
+        # while child_mem.llm is BudgetedLLM (set during register_module
+        # inside _apply_shared_modules, BEFORE _attach_runlog wraps).
+        # The actual budget invariant: same BudgetTracker drives both
+        # paths. tracker resolves via LoggingLLM.__getattr__ proxy.
+        assert isinstance(child.llm, LoggingLLM)
+        assert isinstance(child.modules["memory"].llm, BudgetedLLM)
+        assert child.modules["memory"].llm.tracker is child.llm.tracker

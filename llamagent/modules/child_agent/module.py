@@ -217,10 +217,11 @@ def _apply_shared_modules(parent, child, share_modules):
             )
             child.register_module(MemoryModule())
         else:
-            # Defensive: future modules (reflection in v3.7.1) need
-            # their own branch above. If we reach this with an
-            # unrecognized name, the shareable flag was set but the
-            # factory wasn't taught how to register it. Fail loudly.
+            # Defensive: future shareable modules (e.g. reflection,
+            # if it ever gains shareable=True) need their own branch
+            # above. If we reach this with an unrecognized name, the
+            # shareable flag was set on a module class but the factory
+            # wasn't taught how to register it. Fail loudly.
             raise ValueError(
                 f"Module {mod_name!r} is declared shareable but the "
                 f"child_agent factory does not know how to register "
@@ -794,10 +795,14 @@ class ChildAgentModule(Module):
         # ...\nResult: ...execution error: ValueError..." (false
         # success header). Pre-validating here surfaces the error as
         # a clean tool-result string.
-        share_modules = (
-            policy.share_parent_modules if policy else None
+        # NOTE: ``policy`` is constructed via
+        # ``copy.copy(ROLE_POLICIES.get(role, AgentExecutionPolicy()))``
+        # at the top of this method and is therefore never None here;
+        # ``policy.share_parent_modules`` itself can still be None
+        # (the field default), which ``_check_share_modules`` handles.
+        err = _check_share_modules(
+            self.agent, policy.share_parent_modules, self._runner_name
         )
-        err = _check_share_modules(self.agent, share_modules, self._runner_name)
         if err:
             return f"Cannot spawn continuous child agent: {err}"
 
@@ -896,10 +901,11 @@ class ChildAgentModule(Module):
         # controller.spawn_child. See _spawn_continuous_child for the
         # full rationale (runner exception-swallowing turns the
         # helper's ValueError into a misleading false-success header).
-        share_modules = (
-            policy.share_parent_modules if policy else None
+        # ``policy`` is never None here (constructed via
+        # ROLE_POLICIES.get default at the top of this method).
+        err = _check_share_modules(
+            self.agent, policy.share_parent_modules, self._runner_name
         )
-        err = _check_share_modules(self.agent, share_modules, self._runner_name)
         if err:
             return f"Cannot spawn child agent: {err}"
 
@@ -928,7 +934,12 @@ class ChildAgentModule(Module):
         # v3.5: emit structured spawn return with child_dir for cross-agent
         # path resolution. share_parent_project_dir=True → child_dir is
         # parent.project_dir; False → parent.playground/children/<task_id>/.
-        share = policy.share_parent_project_dir if policy else True
+        # v3.7.1 commit-17: ``policy`` is constructed via
+        # ROLE_POLICIES.get default at the top of this method, so
+        # never None here. The legacy ``if policy else True`` fallback
+        # was dead code with non-default semantics (returned True on
+        # the unreachable None case while the field default is False).
+        share = policy.share_parent_project_dir
         if share:
             child_dir = self.agent.project_dir
         else:
@@ -1196,6 +1207,13 @@ class ChildAgentModule(Module):
         # isolated project_dir under the parent's playground; True means
         # the child shares the parent's project_dir + scopes.
         # When policy is None (backward compat), default to True (share).
+        # Note: this differs from runners/process.py serialization which
+        # uses ``else False`` -- intentional: factory back-compat path
+        # was historically "trusted child sharing" while the process
+        # serializer treats missing-policy as isolation-by-default for
+        # cross-process safety. Both fallbacks are dead in production
+        # paths (spec.policy is always set by the spawn tools), so the
+        # divergence only surfaces in test/external-caller paths.
         import os
         share_parent_project_dir = (
             spec.policy.share_parent_project_dir if spec.policy else True
@@ -1267,9 +1285,12 @@ class ChildAgentModule(Module):
                     tool["execution_policy"] = spec.policy.execution_policy
 
         # v3.7: re-register parent-shared persistent modules on the
-        # child (memory today; reflection in v3.7.1). Default branch
-        # (no share_modules) preserves pre-v3.7 behavior of disabling
-        # all persistent modules on the child.
+        # child (memory today; reflection if/when it ever gains
+        # shareable=True -- originally targeted for v3.7.1, deferred
+        # indefinitely). Default branch (no share_modules) forces
+        # memory_mode="off" AND strips parent's deepcopied memory tool
+        # entries from child._tools (closes a pre-v3.7 silent leak via
+        # parent-bound closures).
         share_modules = (
             spec.policy.share_parent_modules if spec.policy else None
         )
@@ -1387,8 +1408,8 @@ class ChildAgentModule(Module):
         # ``None``, the bare conditional returns ``None``, which then makes
         # ``run_react``'s ``steps < self.config.max_react_steps`` raise
         # ``TypeError: '<' not supported between int and NoneType``.
-        # This pattern matches the short-child path (lines 937-938) and the
-        # earlier continuous-child path (lines 1076-1077).
+        # This pattern mirrors the budget defaulting in the short-child
+        # factory and in the earlier continuous-child setup block.
         if spec.policy and spec.policy.budget:
             budget_timeout = spec.policy.budget.max_time_seconds or 600
             budget_steps = spec.policy.budget.max_steps or 10
@@ -1457,8 +1478,8 @@ class ChildAgentModule(Module):
                     tool["execution_policy"] = spec.policy.execution_policy
 
         # v3.7: re-register parent-shared persistent modules on the
-        # child (memory today; reflection in v3.7.1). Mirrors the
-        # short-child factory's wiring.
+        # child (memory today; reflection deferred indefinitely).
+        # Mirrors the short-child factory's wiring.
         share_modules = (
             spec.policy.share_parent_modules if spec.policy else None
         )

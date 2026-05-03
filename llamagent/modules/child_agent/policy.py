@@ -53,7 +53,9 @@ class AgentExecutionPolicy:
     # v3.7: opt-in list of parent module names whose persistent storage
     # the child should inherit (read-only). Each named module on the
     # parent must have ``Module.shareable = True``. Today's only
-    # supported entry is "memory"; v3.7.1 will add "reflection". The
+    # supported entry is "memory"; a future version may add
+    # "reflection" (v3.7.1 originally targeted reflection but did not
+    # ship it -- it's deferred indefinitely). The
     # framework forces read-only semantics on the shared child by
     # disabling the corresponding write mode (e.g. memory_mode="off")
     # so write tools are never registered on the child. None / empty
