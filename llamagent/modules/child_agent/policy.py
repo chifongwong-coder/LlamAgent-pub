@@ -57,8 +57,13 @@ class AgentExecutionPolicy:
     # framework forces read-only semantics on the shared child by
     # disabling the corresponding write mode (e.g. memory_mode="off")
     # so write tools are never registered on the child. None / empty
-    # list (default) preserves the pre-v3.7 contract: child gets no
-    # persistent modules. See docs/llamagent-v3.7-plan.md §1.3.
+    # list (default) gives the child no persistent modules AND strips
+    # any deepcopied entries from the parent's tool table — closing a
+    # pre-v3.7 silent leak where a child of a memory-loaded parent
+    # could indirectly read parent's store via parent-bound closures.
+    # Only inline / thread runners support sharing; the process runner
+    # does not (subprocess can't alias an in-process Python store
+    # handle). See docs/llamagent-v3.7-plan.md §1.3.
     share_parent_modules: list[str] | None = None
     model: str | None = None  # None = inherit parent's model
 

@@ -50,6 +50,70 @@ from llamagent.modules.child_agent.task_board import TaskBoard, TaskRecord
 logger = logging.getLogger(__name__)
 
 
+def _check_share_modules(parent, share_modules, runner_name=None):
+    """v3.7: validate ``share_parent_modules`` against parent state.
+
+    Returns a clean error string suitable for tool-result output, or
+    ``None`` if validation passes. Used at two call sites:
+
+    1. **Spawn-tool pre-check** (``_spawn_child`` /
+       ``_spawn_continuous_child``) — before ``controller.spawn_child``,
+       so the model receives a clean error string instead of the
+       runner's exception-swallowing path producing a misleading
+       "Spawned child agent.\\nResult: ...execution error: ValueError"
+       (which falsely reads as success). Pass ``runner_name`` so the
+       process-runner refusal (B2) fires here.
+    2. **Factory-side defense** (``_apply_shared_modules``) — as a
+       sanity check that callers raise on. Defends ``_create_child_agent``
+       direct invocations (e.g. tests) that bypass the spawn tool. Pass
+       ``runner_name=None`` to skip the runner check (the factory does
+       not have direct access to the runner backend; the spawn-tool
+       layer already validated for the production path).
+
+    Args:
+        parent: parent agent (provides ``modules`` registry).
+        share_modules: ``policy.share_parent_modules`` value
+            (``list[str] | None``). ``None`` and ``[]`` are both valid
+            and return ``None`` (default no-share path).
+        runner_name: when ``"process"`` and ``share_modules`` is non-
+            empty, returns a clean error. The process runner cannot
+            alias an in-process Python store handle; v3.7 plan §6.2
+            explicitly leaves cross-process sharing out of scope.
+            Pass ``None`` to skip the runner check.
+
+    Returns:
+        ``str | None``: error message or ``None`` on valid.
+    """
+    if not share_modules:
+        # Default path is always valid.
+        return None
+
+    if runner_name == "process":
+        return (
+            "share_parent_modules is not supported on the process "
+            "runner (the subprocess cannot alias an in-process store "
+            "handle). Use child_agent_runner='inline' or 'thread', "
+            "or remove share_parent_modules from the policy."
+        )
+
+    for mod_name in share_modules:
+        parent_mod = parent.modules.get(mod_name)
+        if parent_mod is None:
+            return (
+                f"share_parent_modules={mod_name!r}: parent has no "
+                f"such module loaded. Load it on the parent before "
+                f"spawning the child."
+            )
+        if not getattr(type(parent_mod), "shareable", False):
+            return (
+                f"Module {mod_name!r} (type {type(parent_mod).__name__}) "
+                f"is not declared shareable; cannot pass via "
+                f"share_parent_modules."
+            )
+
+    return None
+
+
 def _apply_shared_modules(parent, child, share_modules):
     """v3.7: re-register shareable parent modules on the child and
     swap in the parent's storage handles.
@@ -75,10 +139,16 @@ def _apply_shared_modules(parent, child, share_modules):
     parent's read mode (``parent.config.memory_recall_mode``) so a
     parent that disabled reads keeps the child equally locked out.
 
-    Default branch (``share_modules`` is None / empty): preserves the
-    pre-v3.7 behavior of disabling all persistent modules on the
-    child. The legacy hardcoded ``config.memory_mode = "off"`` at the
-    short / continuous factory bodies is now applied here.
+    Default branch (``share_modules`` is None / empty): forces
+    ``memory_mode = "off"`` on the child config AND strips any memory
+    tool entries that landed in ``child._tools`` via the
+    deepcopy(parent._tools) step earlier in the factory. Pre-v3.7,
+    those deepcopied entries were closure-bound to parent's
+    MemoryModule instance, so a child of a memory-loaded parent could
+    silently invoke ``recall_memory`` / ``list_memories`` and reach
+    back into parent's store -- bypassing the config-level lockout.
+    v3.7 closes that leak: the no-share default is now genuinely
+    isolated, not just config-disabled.
 
     Errors:
     - parent has no module named X -> ValueError (loud failure;
@@ -108,36 +178,37 @@ def _apply_shared_modules(parent, child, share_modules):
         child._tools.pop(tool_name, None)
 
     if not share_modules:
-        # Default path: child has no persistent modules. This branch
-        # preserves today's behavior — the hardcoded
-        # ``config.memory_mode = "off"`` at the legacy lines 929 / 1077
-        # of the short and continuous factories is now applied here.
-        # ``tests_internal/test_child_agent_mock.py:745`` (asserts
-        # default child has ``memory_mode == "off"``) still passes.
+        # Default path: child has no persistent modules + the tool-
+        # clearing above genuinely isolates the child's tool table.
+        # Forces ``memory_mode = "off"`` (semantic equivalent of the
+        # legacy hardcode at lines 929 / 1077 of the short and
+        # continuous factories, with the addition of the tool-table
+        # tightening). ``tests_internal/test_child_agent_mock.py:745``
+        # (asserts default child has ``memory_mode == "off"``) still
+        # passes.
         child.config.memory_mode = "off"
         child.config.memory_recall_mode = "off"
         return
 
+    # v3.7.1: validate via shared helper. Production callers go through
+    # the spawn-tool pre-check (which produces a clean tool-result
+    # string for the model); this raise here defends the
+    # ``_create_child_agent`` direct path (used by tests).
+    err = _check_share_modules(parent, share_modules)
+    if err:
+        raise ValueError(err)
+
     for mod_name in share_modules:
-        parent_mod = parent.modules.get(mod_name)
-        if parent_mod is None:
-            raise ValueError(
-                f"share_parent_modules={mod_name!r}: parent has no "
-                f"such module loaded. Load it on the parent before "
-                f"spawning the child."
-            )
-        if not getattr(type(parent_mod), "shareable", False):
-            raise ValueError(
-                f"Module {mod_name!r} (type {type(parent_mod).__name__}) "
-                f"is not declared shareable; cannot pass via "
-                f"share_parent_modules."
-            )
+        parent_mod = parent.modules[mod_name]  # _check_share_modules confirmed presence
 
         # Module-specific config overrides + child module construction.
         # Each shareable module gets its own branch — keeps the read-
         # only forcing logic explicit instead of magic.
         if mod_name == "memory":
-            from llamagent.modules.memory.module import MemoryModule
+            # MemoryModule already imported at the top of this helper
+            # for the unconditional tool-clear loop -- no need to
+            # re-import here.
+            #
             # Read-only contract: child never writes to shared memory.
             child.config.memory_mode = "off"
             # Inherit parent's read mode (parent off -> child off).
@@ -714,6 +785,22 @@ class ChildAgentModule(Module):
                 f"exceeded. Current depth: {my_depth}. Restructure your task to be flatter."
             )
 
+        # v3.7.1: pre-validate share_parent_modules BEFORE
+        # controller.spawn_child. The runners' ``except Exception`` at
+        # (inline.py:117 / thread.py:211) wraps factory errors into
+        # TaskRecord(status="failed") instead of propagating, so a
+        # ValueError from _apply_shared_modules would otherwise reach
+        # the model as a misleading "Spawned child agent.\n- task_id:
+        # ...\nResult: ...execution error: ValueError..." (false
+        # success header). Pre-validating here surfaces the error as
+        # a clean tool-result string.
+        share_modules = (
+            policy.share_parent_modules if policy else None
+        )
+        err = _check_share_modules(self.agent, share_modules, self._runner_name)
+        if err:
+            return f"Cannot spawn continuous child agent: {err}"
+
         spec = ChildAgentSpec(
             task=task,
             role=role,
@@ -732,12 +819,19 @@ class ChildAgentModule(Module):
         spec.runlog_path = self._runlog_path_for(spec.task_id)
         try:
             task_id = self.controller.spawn_child(spec, self._create_child_agent)
-        except (RuntimeError, ValueError) as e:
-            # v3.7 commit-8: also catch ValueError so the v3.7 helper's
-            # share_parent_modules validation errors (parent missing
-            # module / not shareable / unknown name) reach the model
-            # as a clean tool-result string instead of a stack trace.
-            # logger.exception preserves the trace for dev visibility.
+        except RuntimeError as e:
+            # v3.7.1: catch is back to RuntimeError-only. v3.7 commit-8
+            # broadened to (RuntimeError, ValueError) believing the
+            # helper's ValueError would reach here — but the runners'
+            # ``except Exception`` (inline.py:117, thread.py:211) wrap
+            # factory errors into TaskRecord BEFORE they propagate, so
+            # the broadened catch was dead code for that scenario.
+            # v3.7.1 commit-12 moves share_parent_modules validation
+            # to a pre-check above (via _check_share_modules) which
+            # surfaces clean errors before controller.spawn_child runs.
+            # logger.exception kept — preserves traceback for the
+            # remaining live path (RuntimeError from controller's own
+            # max_children guard, etc.).
             logger.exception("Cannot spawn continuous child agent")
             return f"Cannot spawn continuous child agent: {e}"
 
@@ -798,6 +892,17 @@ class ChildAgentModule(Module):
                 f"Current depth: {my_depth}. Restructure your task to be flatter."
             )
 
+        # v3.7.1: pre-validate share_parent_modules BEFORE
+        # controller.spawn_child. See _spawn_continuous_child for the
+        # full rationale (runner exception-swallowing turns the
+        # helper's ValueError into a misleading false-success header).
+        share_modules = (
+            policy.share_parent_modules if policy else None
+        )
+        err = _check_share_modules(self.agent, share_modules, self._runner_name)
+        if err:
+            return f"Cannot spawn child agent: {err}"
+
         spec = ChildAgentSpec(
             task=task,
             role=role,
@@ -813,8 +918,10 @@ class ChildAgentModule(Module):
         spec.runlog_path = self._runlog_path_for(spec.task_id)
         try:
             task_id = self.controller.spawn_child(spec, self._create_child_agent)
-        except (RuntimeError, ValueError) as e:
-            # v3.7 commit-8: see _spawn_continuous_child for rationale.
+        except RuntimeError as e:
+            # v3.7.1: see _spawn_continuous_child for the catch-narrowing
+            # rationale (commit-8 broadening was dead code; pre-check
+            # above handles the share_parent_modules error path now).
             logger.exception("Cannot spawn child agent")
             return f"Cannot spawn child agent: {e}"
 
