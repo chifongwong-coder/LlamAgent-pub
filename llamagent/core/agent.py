@@ -334,9 +334,8 @@ class Module:
         (single-writer parent, multi-reader children). For ChromaDB
         backends, ``PersistentClient`` provides this via per-thread
         SQLite connections + busy_timeout. For FS backends, atomic
-        writes via ``os.replace`` provide it. v3.8 may add explicit
-        per-store locks for tighter concurrency. Module-level locks
-        are NEVER appropriate — modules are not shared, stores are.
+        writes via ``os.replace`` provide it. Module-level locks are
+        NEVER appropriate — modules are not shared, stores are.
         """
         raise NotImplementedError(
             f"{type(self).__name__}.inherit_storage_from is not implemented. "
@@ -369,7 +368,7 @@ class Module:
         """
         return response
 
-    # --- Deprecated Callbacks (backward compatible, will be removed in future versions) ---
+    # --- Deprecated Callbacks (backward-compatible shims for un-migrated modules) ---
 
     def on_execute(self, query: str, context: str) -> str | None:
         """

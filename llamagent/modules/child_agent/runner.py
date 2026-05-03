@@ -48,6 +48,21 @@ def maybe_request_completion_report(child, result_text: str) -> str:
         return result_text
 
 
+def build_metrics(elapsed: float, child=None) -> dict:
+    """Build metrics dict with elapsed time and budget tracker stats if available.
+
+    Used by every runner backend (inline, thread) to populate ``TaskRecord.metrics``
+    consistently. Lives here so runners stay byte-aligned on the metric shape.
+    """
+    metrics = {"elapsed_seconds": round(elapsed, 2)}
+    if child is not None and hasattr(child, "llm") and hasattr(child.llm, "tracker"):
+        t = child.llm.tracker
+        metrics["tokens_used"] = t.tokens_used
+        metrics["llm_calls"] = t.llm_calls
+        metrics["steps_used"] = t.steps_used
+    return metrics
+
+
 def format_fallback_report(
     reason_kind: str,
     reason_detail: str,

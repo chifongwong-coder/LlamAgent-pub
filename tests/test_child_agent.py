@@ -644,14 +644,14 @@ class TestShareableModulesV37:
     def test_continuous_factory_share_inherits_storage(
         self, bare_agent, mock_llm_client, tmp_path
     ):
-        """v3.7 commit-9: cover the second factory call site.
+        """v3.7 commit-9: cover the continuous branch of the factory.
 
-        All other share tests exercise _create_short_child_agent. The
-        continuous factory at _create_continuous_child_agent invokes
-        the same _apply_shared_modules helper but with different
-        ordering (set_mode runs BEFORE the helper). Pin the contract
-        explicitly so a future set_mode change can't silently clobber
-        the helper's memory_mode/recall_mode writes.
+        All other share tests exercise the short branch. The continuous
+        branch of ``_create_child_agent`` invokes the same
+        ``_apply_shared_modules`` helper but with different ordering
+        (``set_mode("continuous")`` runs BEFORE the helper). Pin the
+        contract explicitly so a future set_mode change can't silently
+        clobber the helper's memory_mode/recall_mode writes.
 
         v3.7.1 commit-16: pin BudgetedLLM-tracker invariant under the
         production wire-order (Budget on policy + runlog_path set).
@@ -693,8 +693,7 @@ class TestShareableModulesV37:
             trigger_interval=60,
             runlog_path=str(tmp_path / "cont.log.jsonl"),
         )
-        # _create_child_agent dispatches to _create_continuous_child_agent
-        # when spec.continuous is True.
+        # _create_child_agent branches on spec.continuous internally.
         child = module._create_child_agent(spec)
 
         # Same invariants as the short-factory share test.
