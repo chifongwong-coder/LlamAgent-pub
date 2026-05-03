@@ -443,17 +443,25 @@ class TestShareableModulesV37:
     def test_share_does_not_replace_child_llm_or_agent(
         self, bare_agent, mock_llm_client, tmp_path
     ):
-        """v3.7 commit-9: pin the original BLOCKER from plan §0.1.
+        """v3.7.1: pin the original BLOCKER from plan §0.1 along the
+        PRODUCTION wire-order.
 
-        A naive Option B implementation that aliased the parent's
-        MemoryModule instance would leave ``self.llm`` bound to the
-        parent, silently bypassing the child's BudgetedLLM on any
-        memory-related LLM call. v3.7 instead re-registers a fresh
-        instance so ``on_attach`` binds ``self.llm = child.llm``,
-        and only the data layer is swapped via inherit_storage_from.
+        v3.7 commit-9 added this test but called ``_create_child_agent``
+        directly with an empty ``runlog_path`` — that bypassed the
+        production path's ``_attach_runlog`` step which wraps
+        ``child.llm`` with ``LoggingLLM``. After that wrap,
+        ``child_mem.llm`` (BudgetedLLM, set before wrap) is no longer
+        ``is`` ``child.llm`` (LoggingLLM(BudgetedLLM)) -- so the
+        commit-9 ``is`` assertion was passing only on a non-production
+        code path.
 
-        This test pins that property end-to-end."""
+        v3.7.1 fix: set ``spec.runlog_path`` explicitly so
+        ``_attach_runlog`` runs. Use ``.tracker`` identity (which
+        proxies through ``LoggingLLM.__getattr__``) instead of LLM
+        identity -- the BudgetTracker is the actual invariant to pin.
+        """
         from llamagent.modules.memory.module import MemoryModule
+        from llamagent.core.logging_llm import LoggingLLM
 
         bare_agent.config.memory_backend = "fs"
         bare_agent.config.memory_mode = "autonomous"
@@ -472,15 +480,31 @@ class TestShareableModulesV37:
             share_parent_modules=["memory"],
             budget=Budget(max_llm_calls=5),
         )
-        spec = ChildAgentSpec(task="recall", role="worker", policy=policy)
+        # v3.7.1: set runlog_path so _attach_runlog runs (production
+        # path always sets this in _spawn_child via _runlog_path_for).
+        spec = ChildAgentSpec(
+            task="recall", role="worker", policy=policy,
+            runlog_path=str(tmp_path / "child.log.jsonl"),
+        )
         child = module._create_child_agent(spec)
         child_mem = child.modules["memory"]
 
         # Fresh module instance on the child.
         assert child_mem is not parent_mem
-        # Child memory module's LLM is the CHILD's BudgetedLLM, not parent's.
-        assert child_mem.llm is child.llm
-        assert isinstance(child.llm, BudgetedLLM)
+        # Production wire-order verified: _attach_runlog ran AFTER
+        # _apply_shared_modules, so child.llm is the LoggingLLM wrap.
+        assert isinstance(child.llm, LoggingLLM), (
+            "child.llm should be LoggingLLM-wrapped in production path"
+        )
+        # The MemoryModule's llm was bound BEFORE the LoggingLLM wrap
+        # (during register_module, which runs inside the helper),
+        # so it stays at the BudgetedLLM layer.
+        assert isinstance(child_mem.llm, BudgetedLLM)
+        # The actual budget invariant: same BudgetTracker drives both
+        # the memory module's calls and the child's main-loop calls.
+        # tracker resolves through LoggingLLM.__getattr__ -> BudgetedLLM.
+        assert child_mem.llm.tracker is child.llm.tracker
+        # Neither path points at parent's plain LLM (the BLOCKER).
         assert child_mem.llm is not parent_mem.llm
         assert child_mem.llm is not bare_agent.llm
         # Agent identity: child's memory module points at child, not parent.
