@@ -488,6 +488,85 @@ class TestShareableModulesV37:
         # Data layer IS shared (the v3.7 contract).
         assert child_mem.store is parent_mem.store
 
+    def test_spawn_child_pre_validates_share_parent_modules(
+        self, bare_agent, mock_llm_client
+    ):
+        """v3.7.1: ``_spawn_child`` validates ``share_parent_modules``
+        BEFORE ``controller.spawn_child``. Without the pre-check, the
+        runners' ``except Exception`` would wrap the helper's
+        ValueError into TaskRecord(status="failed") and the model would
+        see a misleading "Spawned child agent.\\n- task_id: ...\\nResult:
+        ...execution error: ValueError..." (a false success header).
+
+        With the pre-check, the model sees a clean
+        ``Cannot spawn child agent: <reason>`` string."""
+        module = ChildAgentModule()
+        bare_agent.register_module(module)
+
+        # Parent has no MemoryModule loaded; share=["memory"] in policy.
+        out = module._spawn_child(
+            task="recall",
+            role="worker",
+            context="",
+        )
+        # Sanity: default path with no policy works (no share check
+        # triggers).
+        assert "Cannot spawn" not in out
+
+        # Now exercise the failing path through the real spawn tool.
+        # We call _spawn_child via Python (the model's call path), but
+        # supply a custom policy by injecting a ROLE_POLICIES override.
+        policy = AgentExecutionPolicy(share_parent_modules=["memory"])
+        ROLE_POLICIES["v371_share_test"] = policy
+        try:
+            out = module._spawn_child(
+                task="recall",
+                role="v371_share_test",
+            )
+        finally:
+            ROLE_POLICIES.pop("v371_share_test", None)
+
+        # Pre-check produced the clean error string, NOT the runner-
+        # swallowed false-success header.
+        assert "Cannot spawn child agent:" in out
+        assert "parent has no such module" in out
+        assert "task_id:" not in out  # NOT a spawn success
+
+    def test_spawn_child_refuses_process_runner_with_share(
+        self, bare_agent, mock_llm_client, tmp_path
+    ):
+        """v3.7.1: process runner cannot alias an in-process store
+        handle. Spawn tool returns a clean error instead of silently
+        ignoring the share intent (the pre-v3.7.1 behavior)."""
+        from llamagent.modules.memory.module import MemoryModule
+
+        bare_agent.config.memory_backend = "fs"
+        bare_agent.config.memory_mode = "autonomous"
+        bare_agent.config.memory_recall_mode = "tool"
+        bare_agent.config.memory_fs_dir = str(tmp_path / "memory")
+        bare_agent.register_module(MemoryModule())
+
+        module = ChildAgentModule()
+        bare_agent.register_module(module)
+        # Force the runner_name to "process" — the spawn tool checks
+        # this directly. The runner backend itself isn't exercised
+        # because we never reach controller.spawn_child.
+        module._runner_name = "process"
+
+        policy = AgentExecutionPolicy(share_parent_modules=["memory"])
+        ROLE_POLICIES["v371_proc_test"] = policy
+        try:
+            out = module._spawn_child(
+                task="recall",
+                role="v371_proc_test",
+            )
+        finally:
+            ROLE_POLICIES.pop("v371_proc_test", None)
+
+        assert "Cannot spawn child agent:" in out
+        assert "not supported on the process runner" in out
+        assert "task_id:" not in out
+
     def test_continuous_factory_share_inherits_storage(
         self, bare_agent, mock_llm_client, tmp_path
     ):
