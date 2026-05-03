@@ -17,6 +17,53 @@ Core design:
 A bare LlamAgent is a fully functional conversational Agent. Each
 module loaded grants a new capability.
 
+v3.7.1 highlights (post-merge hardening of v3.7):
+- **Spawn-tool pre-validation** of ``share_parent_modules``: a new
+  module-level helper ``_check_share_modules(parent, share_modules,
+  runner_name)`` is called from ``_spawn_child`` /
+  ``_spawn_continuous_child`` BEFORE ``controller.spawn_child``.
+  Without this, the helper's ``ValueError`` (parent missing module /
+  not shareable) was swallowed by the runners'
+  ``except Exception`` block at ``runners/{inline,thread}.py`` and
+  reached the model as a misleading ``"Spawned child agent.\n
+  task_id: ...\nResult: ...execution error: ValueError..."`` (false
+  success header). The same helper still backs
+  ``_apply_shared_modules`` factory-side, so direct
+  ``_create_child_agent`` callers (tests) keep their loud-failure
+  contract.
+- **Process runner refusal** (B2): the same pre-check returns a clean
+  refusal string when ``runner_name=="process"`` and
+  ``share_parent_modules`` is non-empty. The subprocess can't alias
+  an in-process Python store handle, and chromadb's
+  ``PersistentClient`` is not multi-process-safe — cross-process
+  sharing is left to v3.8+. Pre-v3.7.1, this combination silently
+  ignored ``share_parent_modules``; v3.7.1 makes it loud.
+- **Tool-name role split** on ``MemoryModule``: now exposes
+  ``_WRITE_TOOL_NAMES`` (save / consolidate) and
+  ``_READ_TOOL_NAMES`` (recall / list / read), with
+  ``_TOOL_NAMES`` as the union. Role-aware tests can assert against
+  the narrow set without confusing the reader by using the union
+  for everything.
+- **BudgetedLLM invariant pinned on production wire-order**: v3.7
+  commit-9's test bypassed ``_attach_runlog`` by leaving
+  ``spec.runlog_path`` empty. v3.7.1 sets ``runlog_path`` explicitly
+  so ``LoggingLLM`` actually wraps ``child.llm``, then asserts
+  ``child_mem.llm.tracker is child.llm.tracker`` (proxies through
+  ``LoggingLLM.__getattr__``) instead of LLM-instance identity.
+- **Reverted v3.7 commit-8**'s broaden of the spawn-tool catch from
+  ``RuntimeError`` to ``(RuntimeError, ValueError)``. With the new
+  pre-check fronting the share path, the broaden is dead code (the
+  share-related ``ValueError`` no longer reaches the catch site).
+  Per P6, dead code is worse than no code. ``logger.exception`` is
+  kept for the live ``RuntimeError`` path.
+- **Documentation tightening**: ``_apply_shared_modules`` docstring
+  + ``AgentExecutionPolicy.share_parent_modules`` field comment now
+  explicitly state that the no-share default also strips
+  parent's deepcopied memory tool entries (closes a pre-v3.7
+  silent leak via parent-bound closures). v3.7 ``__init__.py``
+  highlights captured this in commit-10; v3.7.1 finishes the
+  doc-update across the adjacent surfaces.
+
 v3.7 highlights (parent-child shared persistent storage, read-only contract):
 - ``Module.shareable: bool = False`` class attribute. Modules opt in
   by flipping to True. The child_agent factory consults this flag
@@ -142,7 +189,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "3.7"
+__version__ = "3.7.1"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager
