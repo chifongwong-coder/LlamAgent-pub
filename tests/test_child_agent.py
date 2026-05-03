@@ -420,9 +420,14 @@ class TestShareableModulesV37:
         # on the child config — it doesn't register the module.
         assert "memory" not in child.modules
         # And no memory tools landed in the child's tool table.
-        for write_tool in ("save_memory", "consolidate_memory"):
+        # v3.7.1: iterate via class attrs so a future tool addition
+        # is automatically covered (the helper's clear list + this
+        # assertion both pull from MemoryModule._WRITE_TOOL_NAMES /
+        # _READ_TOOL_NAMES).
+        from llamagent.modules.memory.module import MemoryModule
+        for write_tool in MemoryModule._WRITE_TOOL_NAMES:
             assert write_tool not in child._tools
-        for read_tool in ("recall_memory", "list_memories", "read_memory"):
+        for read_tool in MemoryModule._READ_TOOL_NAMES:
             assert read_tool not in child._tools
 
     def test_share_parent_modules_parent_missing_raises(

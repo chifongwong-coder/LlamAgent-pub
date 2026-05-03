@@ -136,19 +136,35 @@ class MemoryModule(Module):
     # never registered on the shared child — bypassing the persona-
     # keyed FS-dir auth-scope leak that write would otherwise allow.
     shareable: bool = True
-    # Complete set of tool names this module CAN register (across all
-    # mode combinations). The child_agent factory's
-    # ``_apply_shared_modules`` clears these names from the child's
-    # tool table so parent's deepcopied tool entries (which close over
-    # parent's MemoryModule instance) do not leak. Single source of
-    # truth — the helper imports this tuple instead of hardcoding.
-    _TOOL_NAMES: tuple[str, ...] = (
+    # v3.7.1: split tool names by registration path so the helper's
+    # always-clear list, the test-table assertions, and any future
+    # role-aware test (e.g. "did the model only call read tools?")
+    # can each consume the right granularity. Naive use of the union
+    # in role-specific assertions was flagged as a regression risk
+    # in v3.7 hardening review — the union loses test specificity
+    # (e.g. recall_memory passing a "save was triggered" assertion).
+    _WRITE_TOOL_NAMES: tuple[str, ...] = (
+        # _register_save_tool / _register_consolidate_tool — gated on
+        # ``_write_mode != "off"`` (and consolidate additionally on
+        # _write_mode in {"autonomous", "hybrid"}).
         "save_memory",
-        "recall_memory",
         "consolidate_memory",
+    )
+    _READ_TOOL_NAMES: tuple[str, ...] = (
+        # _register_recall_tool (RAG backend) or
+        # _register_fs_recall_tools (FS backend) — gated on
+        # ``_read_mode != "off"``. FS-mode "tool" registers both
+        # list_memories + read_memory; FS-mode "auto" registers only
+        # read_memory; RAG registers recall_memory.
+        "recall_memory",
         "list_memories",
         "read_memory",
     )
+    # Complete set the child_agent factory's ``_apply_shared_modules``
+    # clears from the child's tool table (so parent's deepcopied
+    # closure-bound entries don't leak). Single source of truth — the
+    # helper imports this tuple instead of hardcoding.
+    _TOOL_NAMES: tuple[str, ...] = _WRITE_TOOL_NAMES + _READ_TOOL_NAMES
 
     def __init__(self):
         self.store: MemoryStore | None = None
