@@ -1,8 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="images/llamagent_dark.png">
-    <img src="images/llamagent.png" width="220" alt="LlamAgent">
-  </picture>
+  <img src="images/llamagent.png" width="220" alt="LlamAgent">
 </p>
 
 <p align="center">
@@ -65,10 +62,7 @@ agent.register_module(PlanningModule())   # DAG-based task decomposition
 ## Modules
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="images/llamagent_work_dark.png">
-    <img src="images/llamagent_work.png" alt="LlamAgent module architecture">
-  </picture>
+  <img src="images/llamagent_work.png" alt="LlamAgent module architecture">
 </p>
 
 | Module | What it does |
