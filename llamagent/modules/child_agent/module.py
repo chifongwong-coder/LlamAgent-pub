@@ -1207,6 +1207,13 @@ class ChildAgentModule(Module):
         # isolated project_dir under the parent's playground; True means
         # the child shares the parent's project_dir + scopes.
         # When policy is None (backward compat), default to True (share).
+        # Note: this differs from runners/process.py serialization which
+        # uses ``else False`` -- intentional: factory back-compat path
+        # was historically "trusted child sharing" while the process
+        # serializer treats missing-policy as isolation-by-default for
+        # cross-process safety. Both fallbacks are dead in production
+        # paths (spec.policy is always set by the spawn tools), so the
+        # divergence only surfaces in test/external-caller paths.
         import os
         share_parent_project_dir = (
             spec.policy.share_parent_project_dir if spec.policy else True
@@ -1278,10 +1285,12 @@ class ChildAgentModule(Module):
                     tool["execution_policy"] = spec.policy.execution_policy
 
         # v3.7: re-register parent-shared persistent modules on the
-        # child (memory today; reflection in v3.7.1+). Default branch
-        # (no share_modules) forces memory_mode="off" AND strips
-        # parent's deepcopied memory tool entries from child._tools
-        # (closes a pre-v3.7 silent leak via parent-bound closures).
+        # child (memory today; reflection if/when it ever gains
+        # shareable=True -- originally targeted for v3.7.1, deferred
+        # indefinitely). Default branch (no share_modules) forces
+        # memory_mode="off" AND strips parent's deepcopied memory tool
+        # entries from child._tools (closes a pre-v3.7 silent leak via
+        # parent-bound closures).
         share_modules = (
             spec.policy.share_parent_modules if spec.policy else None
         )
@@ -1469,8 +1478,8 @@ class ChildAgentModule(Module):
                     tool["execution_policy"] = spec.policy.execution_policy
 
         # v3.7: re-register parent-shared persistent modules on the
-        # child (memory today; reflection in v3.7.1). Mirrors the
-        # short-child factory's wiring.
+        # child (memory today; reflection deferred indefinitely).
+        # Mirrors the short-child factory's wiring.
         share_modules = (
             spec.policy.share_parent_modules if spec.policy else None
         )

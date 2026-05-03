@@ -597,9 +597,24 @@ class TestShareableModulesV37:
 
         module = ChildAgentModule()
         bare_agent.register_module(module)
-        # Force the runner_name to "process" — the spawn tool checks
-        # this directly. The runner backend itself isn't exercised
-        # because we never reach controller.spawn_child.
+
+        # v3.7.1 commit-18: run a baseline spawn FIRST (with default
+        # inline runner) so the task_board has at least one record.
+        # Without this, n_before would always be 0 and the post-refuse
+        # invariant ``n_after == n_before`` would pass vacuously even
+        # if the controller itself regressed for all inputs. Mirrors
+        # the n_before >= 1 hardening in
+        # test_spawn_child_pre_validates_share_parent_modules.
+        out_baseline = module._spawn_child(
+            task="baseline", role="worker", context=""
+        )
+        assert "task_id:" in out_baseline
+
+        # Force the runner_name to "process" — the spawn tool's
+        # pre-check reads this directly, so _runner doesn't need to
+        # actually be a ProcessRunnerBackend. Set AFTER the baseline
+        # so the baseline spawn used the real (inline) runner and
+        # truly added a board entry.
         module._runner_name = "process"
 
         # v3.7.1 commit-17: snapshot task_board count so we assert no
@@ -609,6 +624,7 @@ class TestShareableModulesV37:
         # post-formats the runner's swallowed error would slip past
         # the string-only assertions below.
         n_before = len(module.controller.list_children(module._parent_id))
+        assert n_before >= 1  # baseline produced a record
         policy = AgentExecutionPolicy(share_parent_modules=["memory"])
         ROLE_POLICIES["v371_proc_test"] = policy
         try:

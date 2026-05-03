@@ -68,10 +68,11 @@ v3.7 highlights (parent-child shared persistent storage, read-only contract):
 - ``Module.shareable: bool = False`` class attribute. Modules opt in
   by flipping to True. The child_agent factory consults this flag
   before invoking ``inherit_storage_from`` and raises ValueError on
-  modules that aren't declared shareable. Reflection on the v3.7.1
-  roadmap will be the second consumer of this contract — keeps the
-  abstraction earning its keep per P6 ("reserve extension interfaces
-  for foreseeable cases").
+  modules that aren't declared shareable. Reflection was originally
+  the planned second consumer (v3.7.1) but is deferred indefinitely;
+  the abstraction's extension-interface justification now rests on
+  P6 ("reserve extension interfaces for foreseeable cases") plus the
+  in-tree first consumer being non-trivial.
 - ``Module.inherit_storage_from(other)`` lifecycle hook. Default
   raises NotImplementedError. Subclasses (today: ``MemoryModule``)
   override to copy ONLY data-layer handles (stores, vector pipelines)
