@@ -75,10 +75,16 @@ def _apply_shared_modules(parent, child, share_modules):
     parent's read mode (``parent.config.memory_recall_mode``) so a
     parent that disabled reads keeps the child equally locked out.
 
-    Default branch (``share_modules`` is None / empty): preserves the
-    pre-v3.7 behavior of disabling all persistent modules on the
-    child. The legacy hardcoded ``config.memory_mode = "off"`` at the
-    short / continuous factory bodies is now applied here.
+    Default branch (``share_modules`` is None / empty): forces
+    ``memory_mode = "off"`` on the child config AND strips any memory
+    tool entries that landed in ``child._tools`` via the
+    deepcopy(parent._tools) step earlier in the factory. Pre-v3.7,
+    those deepcopied entries were closure-bound to parent's
+    MemoryModule instance, so a child of a memory-loaded parent could
+    silently invoke ``recall_memory`` / ``list_memories`` and reach
+    back into parent's store -- bypassing the config-level lockout.
+    v3.7 closes that leak: the no-share default is now genuinely
+    isolated, not just config-disabled.
 
     Errors:
     - parent has no module named X -> ValueError (loud failure;
@@ -108,12 +114,14 @@ def _apply_shared_modules(parent, child, share_modules):
         child._tools.pop(tool_name, None)
 
     if not share_modules:
-        # Default path: child has no persistent modules. This branch
-        # preserves today's behavior — the hardcoded
-        # ``config.memory_mode = "off"`` at the legacy lines 929 / 1077
-        # of the short and continuous factories is now applied here.
-        # ``tests_internal/test_child_agent_mock.py:745`` (asserts
-        # default child has ``memory_mode == "off"``) still passes.
+        # Default path: child has no persistent modules + the tool-
+        # clearing above genuinely isolates the child's tool table.
+        # Forces ``memory_mode = "off"`` (semantic equivalent of the
+        # legacy hardcode at lines 929 / 1077 of the short and
+        # continuous factories, with the addition of the tool-table
+        # tightening). ``tests_internal/test_child_agent_mock.py:745``
+        # (asserts default child has ``memory_mode == "off"``) still
+        # passes.
         child.config.memory_mode = "off"
         child.config.memory_recall_mode = "off"
         return
@@ -137,7 +145,10 @@ def _apply_shared_modules(parent, child, share_modules):
         # Each shareable module gets its own branch — keeps the read-
         # only forcing logic explicit instead of magic.
         if mod_name == "memory":
-            from llamagent.modules.memory.module import MemoryModule
+            # MemoryModule already imported at the top of this helper
+            # for the unconditional tool-clear loop -- no need to
+            # re-import here.
+            #
             # Read-only contract: child never writes to shared memory.
             child.config.memory_mode = "off"
             # Inherit parent's read mode (parent off -> child off).
