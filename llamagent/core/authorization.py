@@ -636,11 +636,16 @@ class AuthorizationEngine:
         v3.3: the `command` shell tool routes through `_evaluate_command`
         rather than path-based zone evaluation; the safety check is shlex
         tokenization + structural pattern matching against rules in
-        ``config.hooks_config["command_safety"]``.
+        ``config.hooks_config["command_safety"]``. v3.7.3: ``start_job``
+        routes through the same path so its shell command is subject to
+        the same safety rules — without this, a child agent with
+        ``start_job`` allowlisted (e.g. ROLE_POLICIES["coder"]) bypassed
+        the auth engine's command-safety entirely and only the
+        opt-in SafetyModule check stood between the model and ``rm -rf /``.
 
         Returns AuthorizationResult with decision (None=allow, str=rejection) and events.
         """
-        if tool.get("name") == "command":
+        if tool.get("name") in ("command", "start_job"):
             evaluation = self._evaluate_command(args)
         else:
             paths = self._extract_paths(tool, args)

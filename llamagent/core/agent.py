@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 import uuid
 from collections import OrderedDict
@@ -495,10 +496,15 @@ class LlamAgent:
         # Tool registry version number, incremented on each register_tool/remove_tool, used for cache invalidation
         self._tools_version: int = 0
 
-        # v1.8: event hook system
+        # v1.8: event hook system. Reentry protection state lives on the
+        # CLASS (``LlamAgent._hook_thread_state``), not the instance — see
+        # the ``emit_hook`` docstring. Storing per-thread state on the
+        # instance would block ``copy.deepcopy(parent._tools)`` during
+        # child construction, because deepcopy walks through bound-method
+        # closures back to the parent agent and ``threading.local`` is
+        # unpickleable.
         self._hooks: dict[HookEvent, list[HookRegistration]] = {}
         self._session_started: bool = False
-        self._in_hook: bool = False  # Reentry protection
 
         # Register YAML-configured hooks
         self._register_yaml_hooks()
@@ -1141,11 +1147,30 @@ class LlamAgent:
 
         logger.debug("Hook registered: event=%s, source=%s, priority=%d", event.value, source, priority)
 
+    # v3.7.3: class-level per-thread reentry tracker. Each thread sees its
+    # own ``set`` of agent ids currently inside a hook handler. Storing on
+    # the class (not the instance) means ``copy.deepcopy`` of an agent
+    # never has to copy the unpickleable ``threading.local``.
+    _hook_thread_state = threading.local()
+
     def emit_hook(self, event: HookEvent, data: dict) -> HookResult:
         """
         Emit a hook event, executing all matching handlers.
 
-        Reentry protection: if called from within a hook handler, returns CONTINUE immediately.
+        Reentry protection: if called from within a hook handler on the same
+        thread for the same agent, returns CONTINUE immediately. v3.7.3:
+        the reentry flag is per-thread + per-agent (via a class-level
+        ``threading.local`` keyed on ``id(self)``), so concurrent hook
+        emissions across threads each see a clean ``False`` state and run
+        independently (instead of the older shared-bool behaviour where
+        one thread's True silently dropped another thread's handler
+        invocation).
+
+        Handler exceptions are caught + logged here (v3.7.3): a buggy
+        observability hook (audit log handler / runlog writer) must not
+        be able to corrupt the model's view of tool outcomes. Pre-fix,
+        a raise from one handler propagated through ``call_tool``'s broad
+        ``except Exception`` and turned every tool result into a fake error.
 
         Args:
             event: Event type
@@ -1155,14 +1180,19 @@ class LlamAgent:
             SKIP if any handler blocked the operation (only for PRE_TOOL_USE),
             CONTINUE otherwise
         """
-        if self._in_hook:
+        active = getattr(self._hook_thread_state, "active_ids", None)
+        if active is None:
+            active = set()
+            self._hook_thread_state.active_ids = active
+        agent_key = id(self)
+        if agent_key in active:
             return HookResult.CONTINUE
 
         registrations = self._hooks.get(event)
         if not registrations:
             return HookResult.CONTINUE
 
-        self._in_hook = True
+        active.add(agent_key)
         try:
             for reg in registrations:
                 # Matcher filtering
@@ -1176,7 +1206,14 @@ class LlamAgent:
                     matcher=reg.matcher,
                 )
 
-                result = reg.handler.execute(ctx)
+                try:
+                    result = reg.handler.execute(ctx)
+                except Exception as handler_exc:
+                    logger.error(
+                        "Hook handler raised for event %s: %s",
+                        event.value, handler_exc,
+                    )
+                    continue
 
                 # SKIP is only effective for skippable events (PRE_TOOL_USE)
                 if result == HookResult.SKIP:
@@ -1190,7 +1227,7 @@ class LlamAgent:
 
             return HookResult.CONTINUE
         finally:
-            self._in_hook = False
+            active.discard(agent_key)
 
     def _register_yaml_hooks(self) -> None:
         """Register hooks declared in YAML config (config.hooks_config)."""
@@ -2225,9 +2262,16 @@ class LlamAgent:
         results_dir = os.path.join(self.playground_dir, "tool_results")
         try:
             os.makedirs(results_dir, exist_ok=True)
+            # v3.7.3: append a uuid suffix on top of the millisecond timestamp.
+            # The bare-timestamp filename collided when two threads (e.g. tool
+            # timeout pool, future async dispatch) persisted in the same ms
+            # window — an exclusive ``open(..., "w")`` would overwrite. The
+            # 8-char uuid suffix makes collisions essentially impossible while
+            # keeping filenames short enough to read.
             ts = int(_time.time() * 1000)
+            unique = uuid.uuid4().hex[:8]
             safe_name = tool_name.replace("/", "_").replace("\\", "_") or "unknown"
-            filename = f"{safe_name}_{ts}.txt"
+            filename = f"{safe_name}_{ts}_{unique}.txt"
             filepath = os.path.realpath(os.path.join(results_dir, filename))
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(text)
@@ -2429,7 +2473,10 @@ class LlamAgent:
     def shutdown(self) -> None:
         """
         Agent shutdown: emits SESSION_END, then calls on_shutdown() on all modules
-        in reverse order to release resources (onion model).
+        in reverse order to release resources (onion model). v3.7.3: also
+        shuts down the lazily-created ``_tool_timeout_pool`` so long-running
+        hosts that spawn many short-lived agents don't accumulate executor
+        worker threads + queued ``Future`` references.
         """
         self.emit_hook(HookEvent.SESSION_END, {"modules": list(self.modules.keys())})
 
@@ -2438,6 +2485,12 @@ class LlamAgent:
                 mod.on_shutdown()
             except Exception as e:
                 logger.error("Module '%s' on_shutdown error: %s", mod.name, e)
+        # Defensive getattr: tests bypass ``__init__`` via ``__new__`` so the
+        # attribute may not exist at all on those agents.
+        pool = getattr(self, "_tool_timeout_pool", None)
+        if pool is not None:
+            pool.shutdown(wait=False)
+            self._tool_timeout_pool = None
         logger.info("Agent shut down")
 
     # ============================================================

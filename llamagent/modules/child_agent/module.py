@@ -837,7 +837,13 @@ class ChildAgentModule(Module):
         label = "continuous child agent" if continuous else "child agent"
         short_label = "continuous child" if continuous else "child"
 
-        policy = copy.copy(ROLE_POLICIES.get(role, AgentExecutionPolicy()))
+        # v3.7.3: deepcopy (was shallow ``copy.copy``). Shallow copy shared
+        # ``tool_allowlist`` / ``tool_denylist`` / ``budget`` / ``share_parent_modules``
+        # references with the global preset; today only ``policy.model``
+        # is mutated below (scalar) but any future ``policy.budget.max_steps = X``
+        # or ``policy.tool_allowlist.append(...)`` would silently mutate
+        # the global preset for all subsequent agents.
+        policy = copy.deepcopy(ROLE_POLICIES.get(role, AgentExecutionPolicy()))
         model_override = self._role_model_overrides.get(role)
         if model_override:
             policy.model = model_override

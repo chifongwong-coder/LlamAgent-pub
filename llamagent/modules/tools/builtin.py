@@ -99,18 +99,88 @@ def web_search(query: str, num_results: int = 5) -> str:
     safety_level=1,
     pack="web",
 )
+def _is_private_or_local_host(host: str) -> bool:
+    """v3.7.3: reject SSRF targets — loopback, link-local (169.254.0.0/16,
+    where AWS / GCP / Azure metadata services live), RFC1918 private
+    networks, and IPv6 equivalents. Hostnames that don't resolve to an IP
+    are passed through (the model may be fetching by name); resolution
+    happens lazily inside requests / urllib.
+    """
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # Hostname (not bare IP) — only reject the common metadata
+        # shorthand explicitly; leave generic DNS resolution to requests.
+        lowered = host.lower()
+        return lowered in {"localhost", "metadata.google.internal", "metadata"}
+    return (
+        ip.is_loopback or ip.is_link_local
+        or ip.is_private or ip.is_multicast
+        or ip.is_reserved or ip.is_unspecified
+    )
+
+
 def web_fetch(url: str) -> str:
     """Fetch page content from a specified URL. Requires the requests library."""
     try:
         import requests
+        from urllib.parse import urlparse
     except ImportError:
         return json.dumps({"error": "Missing requests library. Please install: pip install requests"}, ensure_ascii=False)
+
+    # v3.7.3: SSRF guard. The bare requests.get(url) accepted any URL
+    # including 169.254.169.254 (AWS metadata) and rfc1918 internal IPs.
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return json.dumps(
+            {"error": f"web_fetch only supports http/https; got scheme {parsed.scheme!r}"},
+            ensure_ascii=False,
+        )
+    host = parsed.hostname or ""
+    if not host:
+        return json.dumps({"error": "URL is missing a host component"}, ensure_ascii=False)
+    if _is_private_or_local_host(host):
+        return json.dumps(
+            {"error": f"web_fetch refuses private / loopback / link-local hosts (got {host!r})"},
+            ensure_ascii=False,
+        )
+
+    # v3.7.3: hard size cap. Without this, a single response could hold an
+    # arbitrary amount of memory (10GB pages, infinite-scroll endpoints).
+    # We check Content-Length up-front when the server reports it; if the
+    # server omits the header, we still cap the post-read body length below.
+    MAX_BYTES = 4 * 1024 * 1024  # 4 MiB
 
     try:
         resp = requests.get(url, timeout=15, headers={
             "User-Agent": "Mozilla/5.0 (compatible; LlamAgent/1.0)"
         })
         resp.raise_for_status()
+        # Re-validate after redirects landed on the final host: the model
+        # could fetch a public URL that 302s to 169.254.169.254. Best-effort
+        # — some response objects (esp. mock-built test doubles) may not
+        # carry a usable ``url`` attribute.
+        final_url = getattr(resp, "url", None) or url
+        try:
+            final_host = urlparse(final_url).hostname or ""
+        except Exception:
+            final_host = ""
+        if final_host and _is_private_or_local_host(final_host):
+            return json.dumps(
+                {"error": f"web_fetch refuses redirect to private host {final_host!r}"},
+                ensure_ascii=False,
+            )
+        # Up-front size check via Content-Length when present.
+        try:
+            content_length = int(resp.headers.get("Content-Length", "") or "0")
+        except (TypeError, ValueError):
+            content_length = 0
+        if content_length and content_length > MAX_BYTES:
+            return json.dumps(
+                {"error": f"web_fetch refuses response of {content_length} bytes (> {MAX_BYTES})"},
+                ensure_ascii=False,
+            )
 
         # Try to extract plain text (prefer BeautifulSoup)
         content_type = resp.headers.get("Content-Type", "")
@@ -129,6 +199,16 @@ def web_fetch(url: str) -> str:
                 text = re.sub(r"\s+", " ", text).strip()
         else:
             text = resp.text
+
+        # Post-read size cap (v3.7.3): when servers omit Content-Length
+        # we still bound memory by truncating the body string. The
+        # framework-side ``_truncate_observation`` further compresses the
+        # observation passed to the model, but that runs AFTER web_fetch
+        # has already loaded the full text into memory; this cap protects
+        # the parent process from a 50MB blob hidden behind a 0-Content-
+        # Length header.
+        if isinstance(text, str) and len(text) > MAX_BYTES:
+            text = text[:MAX_BYTES] + "\n\n[truncated by web_fetch size cap]"
 
         # v3.3 P2: no internal char truncation. Long pages flow through
         # _truncate_observation (contract A) which persists to disk and

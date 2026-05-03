@@ -391,6 +391,12 @@ class ProcessRunnerBackend(AgentRunnerBackend):
         Called during parent agent shutdown to ensure clean termination.
         Also cleans up any remaining spec files.
 
+        v3.7.3: after the SIGTERM + monitor-join phase, escalate to
+        SIGKILL on any process still alive — pre-fix, a subprocess that
+        ignored SIGTERM (custom signal handlers, native blocking I/O)
+        outlived parent shutdown as an orphan. Mirrors ``cancel()``'s
+        SIGTERM → wait → SIGKILL pattern for the bulk-shutdown path.
+
         Args:
             timeout: Total time budget for joining all monitor threads.
         """
@@ -410,6 +416,15 @@ class ProcessRunnerBackend(AgentRunnerBackend):
         for task_id, thread in monitors_snapshot:
             remaining = max(0, deadline - time.time())
             thread.join(timeout=remaining)
+
+        # Escalate to SIGKILL on any process that's still alive after the
+        # join window expired.
+        for task_id, proc in running_procs:
+            try:
+                if proc.poll() is None:
+                    proc.kill()
+            except OSError:
+                pass
 
         # Cleanup any remaining spec files
         with self._lock:
