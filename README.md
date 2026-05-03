@@ -1,4 +1,8 @@
 <p align="center">
+  <img src="images/llamagent.png" width="220" alt="LlamAgent">
+</p>
+
+<p align="center">
   <h1 align="center">LlamAgent</h1>
   <p align="center"><strong>Start with nothing. Add only what you need.</strong></p>
 </p>
@@ -56,6 +60,10 @@ agent.register_module(PlanningModule())   # DAG-based task decomposition
 **Three interfaces** — Interactive CLI with tab completion, Gradio Web UI with real-time panels, FastAPI server with REST + SSE streaming + WebSocket. All share the same smart module presets.
 
 ## Modules
+
+<p align="center">
+  <img src="images/llamagent_work.png" alt="LlamAgent module architecture">
+</p>
 
 | Module | What it does |
 |--------|-------------|
