@@ -794,10 +794,14 @@ class ChildAgentModule(Module):
         # ...\nResult: ...execution error: ValueError..." (false
         # success header). Pre-validating here surfaces the error as
         # a clean tool-result string.
-        share_modules = (
-            policy.share_parent_modules if policy else None
+        # NOTE: ``policy`` is constructed via
+        # ``copy.copy(ROLE_POLICIES.get(role, AgentExecutionPolicy()))``
+        # (line 768) and is therefore never None at this point;
+        # ``policy.share_parent_modules`` itself can still be None
+        # (the field default), which ``_check_share_modules`` handles.
+        err = _check_share_modules(
+            self.agent, policy.share_parent_modules, self._runner_name
         )
-        err = _check_share_modules(self.agent, share_modules, self._runner_name)
         if err:
             return f"Cannot spawn continuous child agent: {err}"
 
@@ -896,10 +900,11 @@ class ChildAgentModule(Module):
         # controller.spawn_child. See _spawn_continuous_child for the
         # full rationale (runner exception-swallowing turns the
         # helper's ValueError into a misleading false-success header).
-        share_modules = (
-            policy.share_parent_modules if policy else None
+        # ``policy`` is never None here (constructed via
+        # ROLE_POLICIES.get default at line 877).
+        err = _check_share_modules(
+            self.agent, policy.share_parent_modules, self._runner_name
         )
-        err = _check_share_modules(self.agent, share_modules, self._runner_name)
         if err:
             return f"Cannot spawn child agent: {err}"
 
@@ -1267,9 +1272,10 @@ class ChildAgentModule(Module):
                     tool["execution_policy"] = spec.policy.execution_policy
 
         # v3.7: re-register parent-shared persistent modules on the
-        # child (memory today; reflection in v3.7.1). Default branch
-        # (no share_modules) preserves pre-v3.7 behavior of disabling
-        # all persistent modules on the child.
+        # child (memory today; reflection in v3.7.1+). Default branch
+        # (no share_modules) forces memory_mode="off" AND strips
+        # parent's deepcopied memory tool entries from child._tools
+        # (closes a pre-v3.7 silent leak via parent-bound closures).
         share_modules = (
             spec.policy.share_parent_modules if spec.policy else None
         )
