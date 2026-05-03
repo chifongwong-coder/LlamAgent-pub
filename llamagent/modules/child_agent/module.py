@@ -118,11 +118,10 @@ def _apply_shared_modules(parent, child, share_modules):
     """v3.7: re-register shareable parent modules on the child and
     swap in the parent's storage handles.
 
-    Called by both ``_create_short_child_agent`` and
-    ``_create_continuous_child_agent`` AFTER ``child._tools`` has been
-    rebuilt (deepcopy from parent + filter by allowlist/denylist) and
-    BEFORE the child runs any tool. Mutates ``child.config`` and
-    ``child.modules`` in place.
+    Called by ``_create_child_agent`` (both branches of ``spec.continuous``)
+    AFTER ``child._tools`` has been rebuilt (deepcopy from parent + filter
+    by allowlist/denylist) and BEFORE the child runs any tool. Mutates
+    ``child.config`` and ``child.modules`` in place.
 
     The ordering matters: ``child.modules = {}`` earlier in the factory
     wiped any module __init__ created. Here we re-register a fresh
@@ -178,14 +177,10 @@ def _apply_shared_modules(parent, child, share_modules):
         child._tools.pop(tool_name, None)
 
     if not share_modules:
-        # Default path: child has no persistent modules + the tool-
-        # clearing above genuinely isolates the child's tool table.
-        # Forces ``memory_mode = "off"`` (semantic equivalent of the
-        # legacy hardcode at lines 929 / 1077 of the short and
-        # continuous factories, with the addition of the tool-table
-        # tightening). ``tests_internal/test_child_agent_mock.py:745``
-        # (asserts default child has ``memory_mode == "off"``) still
-        # passes.
+        # Default path: child has no persistent modules + the tool-clearing
+        # above genuinely isolates the child's tool table. Forces
+        # ``memory_mode = "off"`` and ``memory_recall_mode = "off"`` so a
+        # default child cannot reach into parent's persistent memory.
         child.config.memory_mode = "off"
         child.config.memory_recall_mode = "off"
         return
@@ -217,11 +212,9 @@ def _apply_shared_modules(parent, child, share_modules):
             )
             child.register_module(MemoryModule())
         else:
-            # Defensive: future shareable modules (e.g. reflection,
-            # if it ever gains shareable=True) need their own branch
-            # above. If we reach this with an unrecognized name, the
-            # shareable flag was set on a module class but the factory
-            # wasn't taught how to register it. Fail loudly.
+            # Any future shareable module needs its own ``elif`` branch above.
+            # Reaching this point means a module class was declared shareable
+            # but the factory was not taught how to register it. Fail loudly.
             raise ValueError(
                 f"Module {mod_name!r} is declared shareable but the "
                 f"child_agent factory does not know how to register "
@@ -757,92 +750,26 @@ class ChildAgentModule(Module):
                                trigger_type: str = "timer",
                                trigger_interval: float = 60,
                                trigger_watch_dir: str | None = None) -> str:
-        """Spawn a long-running continuous child agent driven by triggers."""
+        """Spawn a long-running continuous child agent driven by triggers.
+
+        Continuous-mode-only entry point. Delegates the shared spawn body
+        (policy build, depth check, share_parent_modules pre-check,
+        spec construction, controller.spawn_child) to ``_spawn_impl``.
+        """
         # Runtime guard: only continuous mode parents
         if self.agent.mode != "continuous":
             return "Only continuous mode agents can spawn continuous children."
-
         # Runner guard: continuous children need thread runner (inline would block forever)
         if self._runner_name == "inline":
             return "Continuous children require thread or process runner (set child_agent_runner='thread')."
-
-        policy = copy.copy(ROLE_POLICIES.get(role, AgentExecutionPolicy()))
-
-        # Apply config-level model override for this role
-        model_override = self._role_model_overrides.get(role)
-        if model_override:
-            policy.model = model_override
-
-        # v3.5.1: enforce max_delegation_depth and propagate delegation_depth
-        # symmetrically with _spawn_child. Currently moot because continuous
-        # children have spawn tools pruned in the factory, but defensive — a
-        # future relaxation that re-enables grandchild spawning would
-        # otherwise silently bypass the cap.
-        max_depth = getattr(self.agent.config, "child_agent_max_delegation_depth", 2)
-        my_depth = getattr(self.agent, "_delegation_depth", 0)
-        if my_depth + 1 > max_depth:
-            return (
-                f"Cannot spawn continuous child: max_delegation_depth ({max_depth}) "
-                f"exceeded. Current depth: {my_depth}. Restructure your task to be flatter."
-            )
-
-        # v3.7.1: pre-validate share_parent_modules BEFORE
-        # controller.spawn_child. The runners' ``except Exception`` at
-        # (inline.py:117 / thread.py:211) wraps factory errors into
-        # TaskRecord(status="failed") instead of propagating, so a
-        # ValueError from _apply_shared_modules would otherwise reach
-        # the model as a misleading "Spawned child agent.\n- task_id:
-        # ...\nResult: ...execution error: ValueError..." (false
-        # success header). Pre-validating here surfaces the error as
-        # a clean tool-result string.
-        # NOTE: ``policy`` is constructed via
-        # ``copy.copy(ROLE_POLICIES.get(role, AgentExecutionPolicy()))``
-        # at the top of this method and is therefore never None here;
-        # ``policy.share_parent_modules`` itself can still be None
-        # (the field default), which ``_check_share_modules`` handles.
-        err = _check_share_modules(
-            self.agent, policy.share_parent_modules, self._runner_name
-        )
-        if err:
-            return f"Cannot spawn continuous child agent: {err}"
-
-        spec = ChildAgentSpec(
+        return self._spawn_impl(
             task=task,
             role=role,
             context="",
-            policy=policy,
-            parent_task_id=self._parent_id,
-            delegation_depth=my_depth + 1,
             continuous=True,
             trigger_type=trigger_type,
             trigger_interval=trigger_interval,
             trigger_watch_dir=trigger_watch_dir,
-        )
-        # v3.5 B2: pre-allocate task_id + runlog_path so the long-running
-        # continuous child gets the same observability sink as short children.
-        self._ensure_task_id(spec)
-        spec.runlog_path = self._runlog_path_for(spec.task_id)
-        try:
-            task_id = self.controller.spawn_child(spec, self._create_child_agent)
-        except RuntimeError as e:
-            # v3.7.1: catch is back to RuntimeError-only. v3.7 commit-8
-            # broadened to (RuntimeError, ValueError) believing the
-            # helper's ValueError would reach here — but the runners'
-            # ``except Exception`` (inline.py:117, thread.py:211) wrap
-            # factory errors into TaskRecord BEFORE they propagate, so
-            # the broadened catch was dead code for that scenario.
-            # v3.7.1 commit-12 moves share_parent_modules validation
-            # to a pre-check above (via _check_share_modules) which
-            # surfaces clean errors before controller.spawn_child runs.
-            # logger.exception kept — preserves traceback for the
-            # remaining live path (RuntimeError from controller's own
-            # max_children guard, etc.).
-            logger.exception("Cannot spawn continuous child agent")
-            return f"Cannot spawn continuous child agent: {e}"
-
-        return (
-            f"Spawned continuous child agent [task_id: {task_id}] with role={role}, "
-            f"trigger={trigger_type}. Use send_message to communicate with it."
         )
 
     def on_context(self, query: str, context: str) -> str:
@@ -878,36 +805,66 @@ class ChildAgentModule(Module):
     # ============================================================
 
     def _spawn_child(self, task: str, role: str = "worker", context: str = "") -> str:
-        """Spawn a child agent for the given task."""
-        policy = copy.copy(ROLE_POLICIES.get(role, AgentExecutionPolicy()))
+        """Spawn a short-lived child agent for the given task.
 
-        # Apply config-level model override for this role
+        Public tool entry point. Delegates the shared spawn body to
+        ``_spawn_impl``.
+        """
+        return self._spawn_impl(
+            task=task, role=role, context=context, continuous=False,
+        )
+
+    def _spawn_impl(self, *, task: str, role: str, context: str, continuous: bool,
+                    trigger_type: str | None = None, trigger_interval: float = 60,
+                    trigger_watch_dir: str | None = None) -> str:
+        """Shared spawn body for ``_spawn_child`` / ``_spawn_continuous_child``.
+
+        Owns: role-policy build + model override, max_delegation_depth check,
+        ``_check_share_modules`` pre-check, ``ChildAgentSpec`` construction,
+        ``_ensure_task_id`` + ``runlog_path`` pre-allocation, and the
+        ``controller.spawn_child`` invocation with its RuntimeError catch.
+        Mode-specific guards (``agent.mode``, runner name) live in the public
+        wrapper; mode-specific return formatting is the tail of this method.
+
+        v3.7.1: pre-validates share_parent_modules BEFORE controller.spawn_child.
+        Without this, the runners' ``except Exception`` block wraps the
+        helper's ValueError into TaskRecord(status="failed") and the model
+        sees a misleading "Spawned child agent.\\n...Result: ...execution
+        error: ValueError..." (false success header). The catch below is
+        RuntimeError-only — v3.7 commit-8's (RuntimeError, ValueError)
+        broaden was dead code for the share path and reverted in v3.7.1.
+        """
+        label = "continuous child agent" if continuous else "child agent"
+        short_label = "continuous child" if continuous else "child"
+
+        # v3.7.3: deepcopy (was shallow ``copy.copy``). Shallow copy shared
+        # ``tool_allowlist`` / ``tool_denylist`` / ``budget`` / ``share_parent_modules``
+        # references with the global preset; today only ``policy.model``
+        # is mutated below (scalar) but any future ``policy.budget.max_steps = X``
+        # or ``policy.tool_allowlist.append(...)`` would silently mutate
+        # the global preset for all subsequent agents.
+        policy = copy.deepcopy(ROLE_POLICIES.get(role, AgentExecutionPolicy()))
         model_override = self._role_model_overrides.get(role)
         if model_override:
             policy.model = model_override
 
         # v3.5: enforce max_delegation_depth before spawn. Default cap = 2
-        # (Hermes-style). The cap is applied when *this* agent is itself a
-        # child agent (i.e. has a delegation_depth set on its own spec).
+        # (Hermes-style). v3.5.1: continuous children also enforce this
+        # symmetrically — currently moot because the factory prunes spawn
+        # tools, but a future relaxation would otherwise bypass the cap.
         max_depth = getattr(self.agent.config, "child_agent_max_delegation_depth", 2)
         my_depth = getattr(self.agent, "_delegation_depth", 0)
         if my_depth + 1 > max_depth:
             return (
-                f"Cannot spawn child: max_delegation_depth ({max_depth}) exceeded. "
-                f"Current depth: {my_depth}. Restructure your task to be flatter."
+                f"Cannot spawn {short_label}: max_delegation_depth ({max_depth}) "
+                f"exceeded. Current depth: {my_depth}. Restructure your task to be flatter."
             )
 
-        # v3.7.1: pre-validate share_parent_modules BEFORE
-        # controller.spawn_child. See _spawn_continuous_child for the
-        # full rationale (runner exception-swallowing turns the
-        # helper's ValueError into a misleading false-success header).
-        # ``policy`` is never None here (constructed via
-        # ROLE_POLICIES.get default at the top of this method).
         err = _check_share_modules(
             self.agent, policy.share_parent_modules, self._runner_name
         )
         if err:
-            return f"Cannot spawn child agent: {err}"
+            return f"Cannot spawn {label}: {err}"
 
         spec = ChildAgentSpec(
             task=task,
@@ -916,31 +873,32 @@ class ChildAgentModule(Module):
             policy=policy,
             parent_task_id=self._parent_id,
             delegation_depth=my_depth + 1,
+            continuous=continuous,
+            trigger_type=trigger_type,
+            trigger_interval=trigger_interval,
+            trigger_watch_dir=trigger_watch_dir,
         )
-        # v3.5: pre-allocate runlog path. Controller sets spec.task_id before
-        # factory invocation, but we need the path string ahead of spawn so
-        # the runner finally block can write the "end" record after a crash.
+        # v3.5 B2: pre-allocate task_id + runlog_path so the runner's finally
+        # block can write the "end" record even after a crash.
         self._ensure_task_id(spec)
         spec.runlog_path = self._runlog_path_for(spec.task_id)
         try:
             task_id = self.controller.spawn_child(spec, self._create_child_agent)
         except RuntimeError as e:
-            # v3.7.1: see _spawn_continuous_child for the catch-narrowing
-            # rationale (commit-8 broadening was dead code; pre-check
-            # above handles the share_parent_modules error path now).
-            logger.exception("Cannot spawn child agent")
-            return f"Cannot spawn child agent: {e}"
+            logger.exception("Cannot spawn %s", label)
+            return f"Cannot spawn {label}: {e}"
 
-        # v3.5: emit structured spawn return with child_dir for cross-agent
-        # path resolution. share_parent_project_dir=True → child_dir is
-        # parent.project_dir; False → parent.playground/children/<task_id>/.
-        # v3.7.1 commit-17: ``policy`` is constructed via
-        # ROLE_POLICIES.get default at the top of this method, so
-        # never None here. The legacy ``if policy else True`` fallback
-        # was dead code with non-default semantics (returned True on
-        # the unreachable None case while the field default is False).
-        share = policy.share_parent_project_dir
-        if share:
+        if continuous:
+            return (
+                f"Spawned continuous child agent [task_id: {task_id}] with role={role}, "
+                f"trigger={trigger_type}. Use send_message to communicate with it."
+            )
+
+        # Short-child success path: emit structured return with child_dir for
+        # cross-agent path resolution. share_parent_project_dir=True → child_dir
+        # is parent.project_dir; False → parent.playground/children/<task_id>/.
+        # ``policy`` is never None (constructed via ROLE_POLICIES.get default).
+        if policy.share_parent_project_dir:
             child_dir = self.agent.project_dir
         else:
             child_dir = os.path.join(self.agent.playground_dir, "children", task_id)
@@ -952,17 +910,15 @@ class ChildAgentModule(Module):
             f"- Note: if the child reports relative artifact paths, resolve them against child_dir.\n"
         )
 
-        # Check if already completed (inline runner, or very fast thread execution)
+        # Inline runner / very fast thread execution: child may already be done.
         record = self.controller.task_board.get(task_id)
         if record and record.status in ("completed", "failed"):
             body = record.result or f"Child agent ({role}) completed with no output."
             return f"{header}\nResult: {body}"
-        else:
-            # Thread runner: return task_id for async collection
-            return (
-                f"{header}\n"
-                f"Use wait_child(task_id=\"{task_id}\") or collect_results() to get results."
-            )
+        return (
+            f"{header}\n"
+            f"Use wait_child(task_id=\"{task_id}\") or collect_results() to get results."
+        )
 
     def _wait_child(self, task_id: str) -> str:
         """Wait for a specific child agent and return its result.
@@ -1120,81 +1076,88 @@ class ChildAgentModule(Module):
     # ============================================================
 
     def _create_child_agent(self, spec: ChildAgentSpec):
+        """Factory: create a constrained LlamAgent for child execution.
+
+        Branches on ``spec.continuous`` only at the points that genuinely
+        differ. Short children are constructed directly in interactive
+        mode; continuous children are constructed in interactive mode for
+        a clean scope, then ``set_mode("continuous")`` re-establishes the
+        continuous default scope (with the child's correct project_dir),
+        followed by a re-application of budget / duplicate / observation
+        / window overrides that ``_MODE_DEFAULTS`` would otherwise clobber.
+        Continuous children additionally register to ``AgentRegistry``,
+        publish their ``agent_id`` to the task_board, and bind their own
+        messaging tools.
         """
-        Factory: create a constrained LlamAgent for child execution.
-
-        For short-task children: inherits parent's LLM and selected tools,
-        operates with minimal config.
-
-        For continuous children: created in interactive mode first (clean state),
-        then switched to continuous mode with proper scope setup.
-        """
-        if spec.continuous:
-            return self._create_continuous_child_agent(spec)
-        return self._create_short_child_agent(spec)
-
-    def _create_short_child_agent(self, spec: ChildAgentSpec):
-        """Factory for short-lived child agents (existing logic)."""
         from llamagent.core.agent import LlamAgent, SimpleReAct
-        from llamagent.core.config import Config
+        import os
 
         parent = self.agent
+        is_continuous = spec.continuous
 
-        # Build config by shallow-copying parent's, then overriding child-specific fields.
-        # Avoids the fragile __new__ pattern that breaks when Config adds new attributes.
+        # Default budgets differ by mode (continuous gets a longer ceiling).
+        default_steps = 10 if is_continuous else 5
+        default_timeout = 600 if is_continuous else 60
+
+        # ---- 1. Build config ----
         config = copy.copy(parent.config)
-        # Ensure api_retry_count exists (may be missing if parent config was manually constructed)
-        if not hasattr(config, 'api_retry_count'):
+        if not hasattr(config, "api_retry_count"):
             config.api_retry_count = 1
-        # v3.5: report_template config gates the completion-report convention.
-        #   "system_prompt" (default): inject CHILD_SYSTEM_PROMPT (template B)
-        #   "auto"                  : same default + framework auto-prompt at end of run (template A, commit-6)
-        #   "off"                   : no completion-report shaping (legacy behavior)
-        report_template = getattr(parent.config, "child_agent_report_template", "system_prompt")
-        if spec.system_prompt:
-            config.system_prompt = spec.system_prompt
-        elif report_template in ("system_prompt", "auto"):
-            config.system_prompt = CHILD_SYSTEM_PROMPT.format(role=spec.role)
-        else:
-            config.system_prompt = (
-                f"You are a {spec.role}. Complete the assigned task concisely."
-            )
-        config.context_window_size = 10
+        if is_continuous:
+            # Force clean construction; set_mode below establishes the continuous scope.
+            config.authorization_mode = "interactive"
+
         config.context_compress_threshold = 0.7
         config.compress_keep_turns = 2
         config.max_duplicate_actions = 2
         config.max_observation_tokens = 1500
-        # v3.7: memory_mode / memory_recall_mode are now set by
-        # _apply_shared_modules below — default branch forces "off" for
-        # the no-share case, share branch forces write-off + read-
-        # inherits-parent.
+        # v3.7: memory_mode / memory_recall_mode are set by _apply_shared_modules
+        # below — default branch forces "off" for the no-share case, share branch
+        # forces write-off + read-inherits-parent.
         config.reflection_write_mode = "off"
         config.reflection_read_mode = "off"
         config.max_plan_adjustments = 3
         config.permission_level = 1
 
-        # Apply budget constraints
-        if spec.policy and spec.policy.budget:
-            config.max_react_steps = spec.policy.budget.max_steps or 5
-            config.react_timeout = spec.policy.budget.max_time_seconds or 60
-        else:
-            config.max_react_steps = 5
-            config.react_timeout = 60
+        if not is_continuous:
+            # Short-child window; continuous-child window is set after set_mode below.
+            config.context_window_size = 10
+            # v3.5: report_template gates the completion-report convention.
+            #   "system_prompt" (default): inject CHILD_SYSTEM_PROMPT (template B)
+            #   "auto"                  : same default + framework auto-prompt at end of run (template A)
+            #   "off"                   : no completion-report shaping
+            report_template = getattr(
+                parent.config, "child_agent_report_template", "system_prompt"
+            )
+            if spec.system_prompt:
+                config.system_prompt = spec.system_prompt
+            elif report_template in ("system_prompt", "auto"):
+                config.system_prompt = CHILD_SYSTEM_PROMPT.format(role=spec.role)
+            else:
+                config.system_prompt = (
+                    f"You are a {spec.role}. Complete the assigned task concisely."
+                )
 
-        # Determine base LLM for child (model override or inherited)
+        if spec.policy and spec.policy.budget:
+            config.max_react_steps = spec.policy.budget.max_steps or default_steps
+            config.react_timeout = spec.policy.budget.max_time_seconds or default_timeout
+        else:
+            config.max_react_steps = default_steps
+            config.react_timeout = default_timeout
+
+        # ---- 2. Determine base LLM (with optional budget tracking) ----
         if spec.policy and spec.policy.model:
             base_llm = parent._get_llm(spec.policy.model)
         else:
             base_llm = self.llm  # module LLM (inherits parent or module_models)
 
-        # Wrap with budget tracking if needed
         if spec.policy and spec.policy.budget:
             tracker = BudgetTracker(spec.policy.budget)
             child_llm = BudgetedLLM(base_llm, tracker)
         else:
             child_llm = base_llm
 
-        # Create child agent via normal constructor, then replace internals
+        # ---- 3. Construct child + reset internals ----
         child = LlamAgent(config)
         child.llm = child_llm
         child.persona = None
@@ -1203,63 +1166,76 @@ class ChildAgentModule(Module):
         child.summary = None
         child.conversation = child.history
         child._execution_strategy = SimpleReAct()
-        # FS isolation: when share_parent_project_dir=False, child gets an
-        # isolated project_dir under the parent's playground; True means
-        # the child shares the parent's project_dir + scopes.
-        # When policy is None (backward compat), default to True (share).
-        # Note: this differs from runners/process.py serialization which
-        # uses ``else False`` -- intentional: factory back-compat path
-        # was historically "trusted child sharing" while the process
-        # serializer treats missing-policy as isolation-by-default for
-        # cross-process safety. Both fallbacks are dead in production
-        # paths (spec.policy is always set by the spawn tools), so the
-        # divergence only surfaces in test/external-caller paths.
-        import os
+
+        # ---- 4. project_dir / playground_dir ----
+        # share_parent_project_dir: production paths always set policy via
+        # ROLE_POLICIES; this fallback handles direct test/external callers.
+        # Note: divergence with runners/process.py (which uses ``else False``
+        # for cross-process safety) is intentional — both fallbacks are dead
+        # in production, surfacing only in test/external paths.
         share_parent_project_dir = (
             spec.policy.share_parent_project_dir if spec.policy else True
         )
         if share_parent_project_dir:
-            # Trusted role or no policy: full project access
             child.project_dir = parent.project_dir
             child.playground_dir = parent.playground_dir
         else:
-            # Isolated: child gets its own project_dir under parent's playground
             child_task_id = self._ensure_task_id(spec)
-            child_root = os.path.join(
-                parent.playground_dir, "children", child_task_id
-            )
+            child_root = os.path.join(parent.playground_dir, "children", child_task_id)
             os.makedirs(child_root, exist_ok=True)
             child.project_dir = child_root
             child.playground_dir = os.path.join(child_root, "llama_playground")
             os.makedirs(child.playground_dir, exist_ok=True)
-        child.confirm_handler = parent.confirm_handler
-        child.interaction_handler = getattr(parent, "interaction_handler", None)
-        child.mode = "interactive"  # Short-task children always use interactive mode
 
-        # v2.7: scope inheritance — share_parent inherits parent scopes,
-        # isolated mode gets empty scopes (project writes denied).
-        # v3.6: for share=False, refresh the auto_approve auto-scope to
-        # cover the child's NEW project_dir. ``LlamAgent.__init__`` ran the
-        # auto-seed at config-time when child.project_dir was still the
-        # parent's path; the factory then overwrites it. Without this
-        # refresh, an auto_approve=True child gets denied writes against
-        # its own isolated dir even though the user opted into auto-approval.
-        # Gated by ``auto_approve`` so users who explicitly want interactive
-        # approval for every write keep that contract — confirm_handler
-        # is propagated to the child by the factory either way.
+        # ---- 5. Mode setup ----
+        if is_continuous:
+            child.confirm_handler = None
+            child.interaction_handler = None
+            # set_mode("continuous") applies _MODE_DEFAULTS which may overwrite
+            # earlier budget / duplicate / observation values. Re-apply them after.
+            # v3.5.3: must use ``or DEFAULT`` (not ``if cond else DEFAULT``) — when
+            # spec.policy.budget exists but max_steps / max_time_seconds is None,
+            # a bare conditional returns None, which makes run_react's
+            # ``steps < self.config.max_react_steps`` raise TypeError.
+            child.set_mode("continuous")
+            if spec.policy and spec.policy.budget:
+                budget_steps = spec.policy.budget.max_steps or default_steps
+                budget_timeout = spec.policy.budget.max_time_seconds or default_timeout
+            else:
+                budget_steps = default_steps
+                budget_timeout = default_timeout
+            config.max_react_steps = budget_steps
+            config.react_timeout = budget_timeout
+            config.max_duplicate_actions = 2
+            config.max_observation_tokens = 1500
+            config.context_window_size = 20
+            # Inject the ongoing-task system_prompt AFTER set_mode so the template is final.
+            config.system_prompt = (
+                f"You are a {spec.role}. Your ongoing task: {spec.task}\n"
+                f"You will receive trigger events. Process them according to your task."
+            )
+        else:
+            child.confirm_handler = parent.confirm_handler
+            child.interaction_handler = getattr(parent, "interaction_handler", None)
+            child.mode = "interactive"
+
+        # ---- 6. Authorization scope ----
+        # share_parent inherits parent scopes; isolated mode re-seeds the
+        # auto_approve auto-scope against the child's NEW project_dir
+        # (LlamAgent.__init__ ran on the pre-overwrite path). Gated by
+        # auto_approve so the interactive contract is preserved.
         if share_parent_project_dir:
             parent_scopes = parent._authorization_engine.export_scopes()
             if parent_scopes:
                 child._authorization_engine.import_scopes(parent_scopes)
         else:
-            # Re-seed against the child's NEW project_dir; no-op when
-            # auto_approve is False (interactive contract preserved).
             child._seed_auto_approve_scope()
+
+        # ---- 7. Tools: deepcopy from parent, filter, prune ----
         child._tools = {}
         child._tools_version = 0
         child.tool_executor = getattr(parent, "tool_executor", None)  # Inherit sandbox
 
-        # Filter tools by allowlist/denylist (deep copy to prevent parent mutation)
         if spec.policy and spec.policy.tool_allowlist is not None:
             for tool_name in spec.policy.tool_allowlist:
                 if tool_name in parent._tools:
@@ -1271,244 +1247,59 @@ class ChildAgentModule(Module):
             for tool_name in spec.policy.tool_denylist:
                 child._tools.pop(tool_name, None)
 
-        # Don't give child the spawn_child tool (unless can_spawn_children)
         if spec.policy and not spec.policy.can_spawn_children:
             child._tools.pop("spawn_child", None)
             child._tools.pop("list_children", None)
             child._tools.pop("collect_results", None)
             child._tools.pop("wait_child", None)
+            if is_continuous:
+                child._tools.pop("spawn_continuous_child", None)
 
-        # Apply role-level execution_policy to child's tools (e.g., coder -> POLICY_SANDBOXED_CODER)
+        if is_continuous:
+            # Strip parent's messaging tools — child gets its own bound to its agent_id.
+            child._tools.pop("send_message", None)
+            child._tools.pop("check_messages", None)
+            child._tools.pop("list_agents", None)
+
         if spec.policy and spec.policy.execution_policy is not None:
-            for tool_name, tool in child._tools.items():
+            for tool in child._tools.values():
                 if tool.get("execution_policy") is None:
                     tool["execution_policy"] = spec.policy.execution_policy
 
-        # v3.7: re-register parent-shared persistent modules on the
-        # child (memory today; reflection if/when it ever gains
-        # shareable=True -- originally targeted for v3.7.1, deferred
-        # indefinitely). Default branch (no share_modules) forces
-        # memory_mode="off" AND strips parent's deepcopied memory tool
-        # entries from child._tools (closes a pre-v3.7 silent leak via
-        # parent-bound closures).
-        share_modules = (
-            spec.policy.share_parent_modules if spec.policy else None
-        )
+        # ---- 8. Re-register shareable parent modules ----
+        # Default branch (no share_modules) forces memory_mode="off" AND strips
+        # parent's deepcopied memory tool entries from child._tools (closes a
+        # pre-v3.7 silent leak via parent-bound closures).
+        share_modules = spec.policy.share_parent_modules if spec.policy else None
         _apply_shared_modules(parent, child, share_modules)
 
-        # v3.5: propagate delegation depth so a recursive ChildAgentModule
-        # in the child can enforce max_delegation_depth on grandchildren.
+        # ---- 9. Delegation depth propagation ----
+        # Allows a recursive ChildAgentModule to enforce max_delegation_depth on
+        # grandchildren. For continuous children today this is moot (spawn tools
+        # are pruned in step 7), but a future relaxation would still hit the cap.
         child._delegation_depth = spec.delegation_depth
 
-        # v3.5: wrap child.llm with LoggingLLM to record each reply to the
-        # runlog file, and register a POST_TOOL_USE hook to record each tool
-        # call. The runlog is observability-only — never exposed to parent
-        # agent through the tool surface.
-        if spec.runlog_path:
-            self._attach_runlog(child, spec.runlog_path)
-
-        return child
-
-    def _create_continuous_child_agent(self, spec: ChildAgentSpec):
-        """
-        Factory for continuous child agents.
-
-        Creation sequence:
-        1. Build config with authorization_mode="interactive" (clean construction)
-        2. Create LlamAgent (interactive mode, clean state)
-        3. Set project_dir/playground_dir
-        4. Set confirm_handler = None (no user interaction)
-        5. Call set_mode("continuous") — creates default scope with correct project_dir
-        6. Override config values that set_mode's _MODE_DEFAULTS may have set
-        7. Import parent scopes (layered on top of default scope)
-        8. Inject task into system_prompt
-        9. Register to AgentRegistry + register messaging tools
-        """
-        from llamagent.core.agent import LlamAgent, SimpleReAct
-        import os
-
-        parent = self.agent
-
-        # 1. Build config
-        config = copy.copy(parent.config)
-        if not hasattr(config, 'api_retry_count'):
-            config.api_retry_count = 1
-        config.authorization_mode = "interactive"  # Clean construction
-        # v3.7: memory_mode / memory_recall_mode set by
-        # _apply_shared_modules below.
-        config.reflection_write_mode = "off"
-        config.reflection_read_mode = "off"
-        config.max_plan_adjustments = 3
-        config.permission_level = 1
-        config.context_compress_threshold = 0.7
-        config.compress_keep_turns = 2
-        config.max_duplicate_actions = 2
-        config.max_observation_tokens = 1500
-
-        # Apply budget constraints for initial config
-        if spec.policy and spec.policy.budget:
-            config.max_react_steps = spec.policy.budget.max_steps or 10
-            config.react_timeout = spec.policy.budget.max_time_seconds or 600
-        else:
-            config.max_react_steps = 10
-            config.react_timeout = 600
-
-        # Determine base LLM
-        if spec.policy and spec.policy.model:
-            base_llm = parent._get_llm(spec.policy.model)
-        else:
-            base_llm = self.llm
-
-        # Wrap with budget tracking if needed
-        if spec.policy and spec.policy.budget:
-            tracker = BudgetTracker(spec.policy.budget)
-            child_llm = BudgetedLLM(base_llm, tracker)
-        else:
-            child_llm = base_llm
-
-        # 2. Create child agent in interactive mode (clean state)
-        child = LlamAgent(config)
-        child.llm = child_llm
-        child.persona = None
-        child.modules = {}
-        child.history = []
-        child.summary = None
-        child.conversation = child.history
-        child._execution_strategy = SimpleReAct()
-
-        # 3. Set project_dir/playground_dir
-        share_parent_project_dir = (
-            spec.policy.share_parent_project_dir if spec.policy else True
-        )
-        if share_parent_project_dir:
-            child.project_dir = parent.project_dir
-            child.playground_dir = parent.playground_dir
-        else:
-            child_task_id = self._ensure_task_id(spec)
-            child_root = os.path.join(
-                parent.playground_dir, "children", child_task_id
-            )
-            os.makedirs(child_root, exist_ok=True)
-            child.project_dir = child_root
-            child.playground_dir = os.path.join(child_root, "llama_playground")
-            os.makedirs(child.playground_dir, exist_ok=True)
-
-        # 4. No user interaction for continuous children
-        child.confirm_handler = None
-        child.interaction_handler = None
-
-        # 5. Switch to continuous mode (creates default scope with correct project_dir)
-        child.set_mode("continuous")
-
-        # 6. Override _MODE_DEFAULTS side effects with reasonable child values.
-        # set_mode("continuous") applies _MODE_DEFAULTS which may set unlimited values.
-        # Restore child-appropriate values (budget may have specified different values).
-        # NB: must use ``or DEFAULT`` (not ``if cond else DEFAULT``) — when
-        # spec.policy.budget exists but ``max_steps`` / ``max_time_seconds`` is
-        # ``None``, the bare conditional returns ``None``, which then makes
-        # ``run_react``'s ``steps < self.config.max_react_steps`` raise
-        # ``TypeError: '<' not supported between int and NoneType``.
-        # This pattern mirrors the budget defaulting in the short-child
-        # factory and in the earlier continuous-child setup block.
-        if spec.policy and spec.policy.budget:
-            budget_timeout = spec.policy.budget.max_time_seconds or 600
-            budget_steps = spec.policy.budget.max_steps or 10
-        else:
-            budget_timeout = 600
-            budget_steps = 10
-        config.max_react_steps = budget_steps
-        config.react_timeout = budget_timeout
-        config.max_duplicate_actions = 2
-        config.max_observation_tokens = 1500
-        config.context_window_size = 20
-
-        # 7. Import parent scopes (only when sharing the parent's project,
-        #    consistent with short child). v3.6: for share=False with
-        #    auto_approve, refresh the auto-scope for the child's NEW
-        #    project_dir (LlamAgent.__init__ ran on the pre-overwrite path).
-        #    Gated by auto_approve so interactive-mode contract is honored.
-        if share_parent_project_dir:
-            parent_scopes = parent._authorization_engine.export_scopes()
-            if parent_scopes:
-                child._authorization_engine.import_scopes(parent_scopes)
-        else:
-            # Re-seed against the child's NEW project_dir; no-op when
-            # auto_approve is False.
-            child._seed_auto_approve_scope()
-
-        # 8. Inject task into system_prompt
-        config.system_prompt = (
-            f"You are a {spec.role}. Your ongoing task: {spec.task}\n"
-            f"You will receive trigger events. Process them according to your task."
-        )
-
-        # Set up tools
-        child._tools = {}
-        child._tools_version = 0
-        child.tool_executor = getattr(parent, "tool_executor", None)
-
-        # Filter tools by allowlist/denylist
-        if spec.policy and spec.policy.tool_allowlist is not None:
-            for tool_name in spec.policy.tool_allowlist:
-                if tool_name in parent._tools:
-                    child._tools[tool_name] = copy.deepcopy(parent._tools[tool_name])
-        else:
-            child._tools = copy.deepcopy(parent._tools)
-
-        if spec.policy and spec.policy.tool_denylist:
-            for tool_name in spec.policy.tool_denylist:
-                child._tools.pop(tool_name, None)
-
-        # Remove parent-only tools from child
-        if spec.policy and not spec.policy.can_spawn_children:
-            child._tools.pop("spawn_child", None)
-            child._tools.pop("spawn_continuous_child", None)
-            child._tools.pop("list_children", None)
-            child._tools.pop("collect_results", None)
-            child._tools.pop("wait_child", None)
-        # Also remove parent's messaging tools (child gets its own below)
-        child._tools.pop("send_message", None)
-        child._tools.pop("check_messages", None)
-        child._tools.pop("list_agents", None)
-
-        # Apply role-level execution_policy
-        if spec.policy and spec.policy.execution_policy is not None:
-            for tool_name, tool in child._tools.items():
-                if tool.get("execution_policy") is None:
-                    tool["execution_policy"] = spec.policy.execution_policy
-
-        # v3.7: re-register parent-shared persistent modules on the
-        # child (memory today; reflection deferred indefinitely).
-        # Mirrors the short-child factory's wiring.
-        share_modules = (
-            spec.policy.share_parent_modules if spec.policy else None
-        )
-        _apply_shared_modules(parent, child, share_modules)
-
-        # v3.5.1: propagate delegation_depth so a hypothetical relaxation of
-        # the spawn-tool pruning would still let the cap fire on grandchildren.
-        # Mirrors the short-child factory.
-        child._delegation_depth = spec.delegation_depth
-
-        # 9. Register to AgentRegistry and publish agent_id to task_board.
-        if self._registry:
-            self._registry.register(child.agent_id, role=spec.role, mode="continuous")
-        # v3.5 B1: write the task_board agent_id metric IMMEDIATELY after
-        # registry.register so that any subsequent setup step's failure
-        # (messaging-tools registration, runlog attach) still leaves the
-        # metric present — the on-complete callback uses it to unregister
-        # the registry entry, avoiding a registry leak on factory crash.
-        if spec.task_id:
-            try:
-                self.controller.task_board.update(
-                    spec.task_id, metrics={"agent_id": child.agent_id}
+        # ---- 10. Continuous-only registration + messaging ----
+        if is_continuous:
+            if self._registry:
+                self._registry.register(
+                    child.agent_id, role=spec.role, mode="continuous"
                 )
-            except KeyError:
-                pass  # Board entry not yet created (shouldn't happen)
+            # v3.5 B1: write task_board agent_id metric IMMEDIATELY after
+            # registry.register so a later setup-step failure (messaging /
+            # runlog) still leaves the metric present — the on-complete
+            # callback uses it to unregister the registry entry, avoiding
+            # a registry leak on factory crash.
+            if spec.task_id:
+                try:
+                    self.controller.task_board.update(
+                        spec.task_id, metrics={"agent_id": child.agent_id}
+                    )
+                except KeyError:
+                    pass  # Board entry not yet created (shouldn't happen)
+            self._register_child_messaging_tools(child)
 
-        self._register_child_messaging_tools(child)
-
-        # v3.5: attach runlog (observability-only, not parent-visible)
+        # ---- 11. Runlog (observability-only, parent-invisible) ----
         if spec.runlog_path:
             self._attach_runlog(child, spec.runlog_path)
 
@@ -1579,9 +1370,9 @@ class ChildAgentModule(Module):
 
         # Unregister continuous child agent from AgentRegistry. Source the
         # agent_id from the task_board (single source of truth) rather than
-        # the runner's record: the factory writes the metric early in
-        # ``_create_continuous_child_agent``, so it is present even when the
-        # child crashes before the runner had a chance to populate
+        # the runner's record: the continuous branch of ``_create_child_agent``
+        # writes the metric early, so it is present even when the child
+        # crashes before the runner had a chance to populate
         # ``record.metrics`` with agent_id (which only happens on a clean
         # ContinuousRunner exit). The board's ``update`` merge semantics
         # preserve the early write through later runner-side metric writes.

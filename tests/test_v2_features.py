@@ -3529,7 +3529,7 @@ def test_continuous_child_sandbox_no_parent_scope(bare_agent, mock_llm_client, t
         continuous=True,
     )
 
-    child = module._create_continuous_child_agent(spec)
+    child = module._create_child_agent(spec)
 
     # Sandbox child should NOT have parent scopes
     exported = child._authorization_engine.export_scopes()
@@ -3550,7 +3550,7 @@ def test_continuous_child_sandbox_no_parent_scope(bare_agent, mock_llm_client, t
         policy=project_policy,
         continuous=True,
     )
-    child_project = module._create_continuous_child_agent(spec_project)
+    child_project = module._create_child_agent(spec_project)
     exported_project = child_project._authorization_engine.export_scopes()
     # Should have at least the parent scope
     has_parent_path = any(

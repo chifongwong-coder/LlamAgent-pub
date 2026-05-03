@@ -157,6 +157,28 @@ class BudgetedLLM:
         """Delegate token counting to the underlying LLM (no budget check)."""
         return self._llm.count_tokens(messages)
 
+    def chat_stream(self, messages, **kwargs):
+        """v3.7.3: budget-checked streaming chat. Pre-fix this method
+        proxied to the bare ``_llm.chat_stream`` via ``__getattr__``,
+        bypassing ``tracker.check`` and ``record_llm_call`` — a child
+        agent that ever switched to streaming silently uncapped itself.
+
+        Streaming output is generated lazily; we record the call up-front
+        based on a pessimistic-zero-token estimate (better than not
+        recording at all). Callers that want exact token accounting per
+        stream should consume the stream and feed the final response
+        object back through ``_estimate_tokens`` themselves; for
+        ChildAgentModule today, the call-count cap is the dominant
+        budget enforcer, so the up-front zero-token record is sufficient.
+        """
+        reason = self.tracker.check()
+        if reason:
+            raise BudgetExceededError(reason)
+        # Record the LLM call before yielding so a downstream consumer
+        # that abandons the stream still increments the call count.
+        self.tracker.record_llm_call(0)
+        return self._llm.chat_stream(messages, **kwargs)
+
     def __getattr__(self, name):
         """Proxy unknown attributes to the underlying LLM."""
         return getattr(self._llm, name)

@@ -138,8 +138,8 @@ class HookHandler(ABC):
     """
     Abstract base for hook handler implementations.
 
-    v1.8 implements CallableHandler and ShellHandler.
-    Future versions may add HttpHandler, AgentHandler, etc.
+    Today's concrete handlers: ``CallableHandler`` (Python callables)
+    and ``ShellHandler`` (subprocess commands).
     """
 
     @abstractmethod

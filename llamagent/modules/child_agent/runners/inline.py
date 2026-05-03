@@ -15,23 +15,13 @@ from llamagent.modules.child_agent.budget import BudgetExceededError
 from llamagent.modules.child_agent.policy import ChildAgentSpec
 from llamagent.modules.child_agent.runner import (
     AgentRunnerBackend,
+    build_metrics,
     format_fallback_report,
     maybe_request_completion_report,
 )
 from llamagent.modules.child_agent.task_board import TaskRecord
 
 logger = logging.getLogger(__name__)
-
-
-def _build_metrics(elapsed: float, child=None) -> dict:
-    """Build metrics dict with elapsed time and budget tracker stats if available."""
-    metrics = {"elapsed_seconds": round(elapsed, 2)}
-    if child is not None and hasattr(child, 'llm') and hasattr(child.llm, 'tracker'):
-        t = child.llm.tracker
-        metrics["tokens_used"] = t.tokens_used
-        metrics["llm_calls"] = t.llm_calls
-        metrics["steps_used"] = t.steps_used
-    return metrics
 
 
 class InlineRunnerBackend(AgentRunnerBackend):
@@ -84,7 +74,7 @@ class InlineRunnerBackend(AgentRunnerBackend):
                 status="completed",
                 result=result_text,
                 history=list(child.history),
-                metrics=_build_metrics(elapsed, child),
+                metrics=build_metrics(elapsed, child),
                 created_at=start_time,
                 completed_at=time.time(),
             )
@@ -105,7 +95,7 @@ class InlineRunnerBackend(AgentRunnerBackend):
                     "budget exceeded", str(e), spec.runlog_path or None
                 ),
                 history=list(child.history) if child else [],
-                metrics=_build_metrics(elapsed, child),
+                metrics=build_metrics(elapsed, child),
                 created_at=start_time,
                 completed_at=time.time(),
             )
@@ -127,7 +117,7 @@ class InlineRunnerBackend(AgentRunnerBackend):
                     spec.runlog_path or None,
                 ),
                 history=list(child.history) if child else [],
-                metrics=_build_metrics(elapsed, child),
+                metrics=build_metrics(elapsed, child),
                 created_at=start_time,
                 completed_at=time.time(),
             )

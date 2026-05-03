@@ -17,6 +17,32 @@ Core design:
 A bare LlamAgent is a fully functional conversational Agent. Each
 module loaded grants a new capability.
 
+v3.7.2 highlights (factory + spawn-tool merge, structural debt cleanup):
+- **Factory merge**: the twin private factories ``_create_short_child_agent``
+  and ``_create_continuous_child_agent`` (~80% structurally identical;
+  recurring source of v3.5–v3.7.1 sibling-miss bugs) collapse into one
+  ``_create_child_agent(spec)`` that branches on ``spec.continuous`` only
+  where the logic genuinely differs (set_mode + post-set_mode override,
+  registry register + messaging-tool wiring, system_prompt template,
+  spawn / messaging tool prune list).
+- **Spawn-tool merge**: ``_spawn_child`` and ``_spawn_continuous_child``
+  remain as public tool entry points but delegate to a shared
+  ``_spawn_impl(continuous=...)`` body. Mode-specific guards
+  (``agent.mode == "continuous"``, runner != ``inline``) and return-message
+  formatting (continuous one-liner vs short multi-line ``child_dir``
+  header) stay in the public wrappers; the rest is one path. Closes the
+  v3.7.1 pre-check + RuntimeError-narrowing parallel maintenance.
+- **`build_metrics` lift**: byte-identical helper from
+  ``runners/inline.py`` and ``runners/thread.py`` now lives once in
+  ``runners/runner.py`` next to ``format_fallback_report`` /
+  ``maybe_request_completion_report``. Single source of truth across
+  every runner backend.
+- **Prophecy purge**: stale "v3.8 will / may add" + "deferred indefinitely"
+  references removed from highlights, ``Module.inherit_storage_from``
+  docstring, ``share_parent_modules`` field comment, and the factory's
+  shareable-module fallthrough comment. The codebase now states what
+  it does, not what a hypothetical future version was promised to do.
+
 v3.7.1 highlights (post-merge hardening of v3.7):
 - **Spawn-tool pre-validation** of ``share_parent_modules``: a new
   module-level helper ``_check_share_modules(parent, share_modules,
@@ -36,8 +62,8 @@ v3.7.1 highlights (post-merge hardening of v3.7):
   ``share_parent_modules`` is non-empty. The subprocess can't alias
   an in-process Python store handle, and chromadb's
   ``PersistentClient`` is not multi-process-safe — cross-process
-  sharing is left to v3.8+. Pre-v3.7.1, this combination silently
-  ignored ``share_parent_modules``; v3.7.1 makes it loud.
+  sharing is intentionally not supported. Pre-v3.7.1, this combination
+  silently ignored ``share_parent_modules``; v3.7.1 makes it loud.
 - **Tool-name role split** on ``MemoryModule``: now exposes
   ``_WRITE_TOOL_NAMES`` (save / consolidate) and
   ``_READ_TOOL_NAMES`` (recall / list / read), with
@@ -68,11 +94,10 @@ v3.7 highlights (parent-child shared persistent storage, read-only contract):
 - ``Module.shareable: bool = False`` class attribute. Modules opt in
   by flipping to True. The child_agent factory consults this flag
   before invoking ``inherit_storage_from`` and raises ValueError on
-  modules that aren't declared shareable. Reflection was originally
-  the planned second consumer (v3.7.1) but is deferred indefinitely;
-  the abstraction's extension-interface justification now rests on
-  P6 ("reserve extension interfaces for foreseeable cases") plus the
-  in-tree first consumer being non-trivial.
+  modules that aren't declared shareable. Today's only in-tree
+  consumer is ``MemoryModule``; the abstraction's extension-interface
+  justification rests on P6 ("reserve extension interfaces for
+  foreseeable cases") plus the first consumer being non-trivial.
 - ``Module.inherit_storage_from(other)`` lifecycle hook. Default
   raises NotImplementedError. Subclasses (today: ``MemoryModule``)
   override to copy ONLY data-layer handles (stores, vector pipelines)
@@ -104,9 +129,9 @@ v3.7 highlights (parent-child shared persistent storage, read-only contract):
 - Concurrency safety relies on storage-layer primitives (Chroma's
   ``PerThreadPool`` + busy_timeout for vector backends; ``os.replace``
   atomic writes for FS backends). Pinned ``chromadb>=0.6.1`` so the
-  PR #3335 LRU Segment Cache thread-safety fix is guaranteed. v3.8
-  will add explicit per-store locks; module-level locks are NEVER
-  appropriate (modules are not shared, stores are).
+  PR #3335 LRU Segment Cache thread-safety fix is guaranteed.
+  Module-level locks are NEVER appropriate (modules are not shared,
+  stores are).
 - Documentation: see ``docs/llamagent-v3.7-plan.md`` (private) for the
   full design rationale, three rounds of reviewer findings, and the
   per-decision audit. v3.6 plan ``docs/llamagent-v3.6-plan.md`` is
@@ -190,7 +215,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "3.7.1"
+__version__ = "3.7.2"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager

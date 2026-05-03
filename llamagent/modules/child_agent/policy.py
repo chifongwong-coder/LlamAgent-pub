@@ -53,19 +53,17 @@ class AgentExecutionPolicy:
     # v3.7: opt-in list of parent module names whose persistent storage
     # the child should inherit (read-only). Each named module on the
     # parent must have ``Module.shareable = True``. Today's only
-    # supported entry is "memory"; a future version may add
-    # "reflection" (v3.7.1 originally targeted reflection but did not
-    # ship it -- it's deferred indefinitely). The
-    # framework forces read-only semantics on the shared child by
-    # disabling the corresponding write mode (e.g. memory_mode="off")
-    # so write tools are never registered on the child. None / empty
-    # list (default) gives the child no persistent modules AND strips
-    # any deepcopied entries from the parent's tool table — closing a
-    # pre-v3.7 silent leak where a child of a memory-loaded parent
-    # could indirectly read parent's store via parent-bound closures.
-    # Only inline / thread runners support sharing; the process runner
-    # does not (subprocess can't alias an in-process Python store
-    # handle). See docs/llamagent-v3.7-plan.md §1.3.
+    # supported entry is "memory". The framework forces read-only
+    # semantics on the shared child by disabling the corresponding
+    # write mode (e.g. memory_mode="off") so write tools are never
+    # registered on the child. None / empty list (default) gives the
+    # child no persistent modules AND strips any deepcopied entries
+    # from the parent's tool table — closing a pre-v3.7 silent leak
+    # where a child of a memory-loaded parent could indirectly read
+    # parent's store via parent-bound closures. Only inline / thread
+    # runners support sharing; the process runner refuses (subprocess
+    # cannot alias an in-process Python store handle). See
+    # docs/llamagent-v3.7-plan.md §1.3.
     share_parent_modules: list[str] | None = None
     model: str | None = None  # None = inherit parent's model
 

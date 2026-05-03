@@ -165,14 +165,23 @@ class ProcessRunnerBackend(AgentRunnerBackend):
                 getattr(self._parent_config, "child_agent_runlog_max_bytes", 10 * 1024 * 1024)
                 if self._parent_config else 10 * 1024 * 1024
             ),
-            "project_dir": getattr(self._parent_config, "project_dir", None) if self._parent_config else None,
-            "playground_dir": getattr(self._parent_config, "playground_dir", None) if self._parent_config else None,
+            # ``project_dir`` and ``playground_dir`` live on the agent (set in
+            # ``LlamAgent.__init__``), not on Config — reading via ``getattr`` from
+            # ``self._parent_config`` always returned None, so the subprocess
+            # silently fell back to its inherited cwd. Source from
+            # ``self._parent_agent`` so the child actually inherits the parent's
+            # paths (or the parent_playground for isolated children).
+            "project_dir": (
+                self._parent_agent.project_dir if self._parent_agent else None
+            ),
+            "playground_dir": (
+                self._parent_agent.playground_dir if self._parent_agent else None
+            ),
             "share_parent_project_dir": (
                 spec.policy.share_parent_project_dir if spec.policy else False
             ),
             "parent_playground_dir": (
-                getattr(self._parent_config, "playground_dir", None)
-                if self._parent_config else None
+                self._parent_agent.playground_dir if self._parent_agent else None
             ),
         }
 
@@ -382,6 +391,12 @@ class ProcessRunnerBackend(AgentRunnerBackend):
         Called during parent agent shutdown to ensure clean termination.
         Also cleans up any remaining spec files.
 
+        v3.7.3: after the SIGTERM + monitor-join phase, escalate to
+        SIGKILL on any process still alive — pre-fix, a subprocess that
+        ignored SIGTERM (custom signal handlers, native blocking I/O)
+        outlived parent shutdown as an orphan. Mirrors ``cancel()``'s
+        SIGTERM → wait → SIGKILL pattern for the bulk-shutdown path.
+
         Args:
             timeout: Total time budget for joining all monitor threads.
         """
@@ -401,6 +416,15 @@ class ProcessRunnerBackend(AgentRunnerBackend):
         for task_id, thread in monitors_snapshot:
             remaining = max(0, deadline - time.time())
             thread.join(timeout=remaining)
+
+        # Escalate to SIGKILL on any process that's still alive after the
+        # join window expired.
+        for task_id, proc in running_procs:
+            try:
+                if proc.poll() is None:
+                    proc.kill()
+            except OSError:
+                pass
 
         # Cleanup any remaining spec files
         with self._lock:
