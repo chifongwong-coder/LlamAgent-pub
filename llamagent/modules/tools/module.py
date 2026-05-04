@@ -228,6 +228,7 @@ class ToolsModule(Module):
                 name=info.name, func=info.func, description=info.description,
                 parameters=info.parameters, tier=info.tier,
                 safety_level=info.safety_level,
+                takes_agent=getattr(info, "takes_agent", False),
                 path_extractor=None,  # web_search/web_fetch have no path extractors
                 pack=info.pack,
                 action=getattr(info, "action", None),
@@ -239,6 +240,7 @@ class ToolsModule(Module):
                 name=info.name, func=info.func, description=info.description,
                 parameters=info.parameters, tier=info.tier,
                 safety_level=info.safety_level,
+                takes_agent=getattr(info, "takes_agent", False),
                 creator_id=info.creator_id,
                 pack=info.pack,
                 action=getattr(info, "action", None),
