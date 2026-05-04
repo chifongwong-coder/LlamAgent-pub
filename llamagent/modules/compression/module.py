@@ -11,14 +11,24 @@ when tokens hit 100% of max_context_tokens).
 """
 
 import logging
+import re
 
 from llamagent.core.agent import Module
+
+# v3.7.5: structured marker emitted by ``_truncate_observation`` after the
+# human-prose persistence hint. Anchored to message-end on extraction (\Z +
+# DOTALL) so a model that prints the same byte sequence in the middle of a
+# future tool result can never spoof it.
+_PERSISTED_MARKER_RE = re.compile(
+    r"<<<llamagent:persisted:([^>]+)>>>\s*\Z",
+    re.DOTALL,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class CompressionModule(Module):
-    """Context compression: summarizes old conversation history to save tokens.
+    r"""Context compression: summarizes old conversation history to save tokens.
 
     Note: The Tools module's _truncate_observation may add a persistence
     hint of the form
@@ -29,10 +39,13 @@ class CompressionModule(Module):
     Two known interactions with this module:
 
     1. _compress_tool_result strategies 'head' / 'placeholder' / 'llm_summary'
-       may strip the trailing hint line when compressing tool messages.
-       Mitigation: the path also lives in the subsequent assistant message's
-       tool_calls[].arguments, so multi-turn access is usually preserved
-       without coupling Compression to the Tools hint format.
+       rewrite the message content and would otherwise drop the human-prose
+       hint. v3.7.5: ``_truncate_observation`` now appends a structured
+       ``<<<llamagent:persisted:<rel_path>>>>`` marker at the end of the
+       message; this method extracts the marker before rewriting and
+       re-appends it after, so the path is preserved even when the prose
+       is gone. The marker is anchored at \Z on extraction so a model
+       printing the same bytes mid-content can't spoof it.
 
     2. compress_conversation (full-history summarization) replaces history
        prefix with a summary, dropping the assistant tool_call message that
@@ -140,7 +153,16 @@ class CompressionModule(Module):
 
         if strategy == "none":
             return msg
-        elif strategy == "placeholder":
+
+        # v3.7.5: extract the persisted-file marker BEFORE the strategy
+        # rewrite so we can re-append it after. Marker is at message-end
+        # (\Z anchor); only the head strategy could conceivably keep it
+        # in-place (if the head window extends past the marker), but
+        # detecting that is more fragile than just re-appending — the
+        # regex below is idempotent because it only matches at \Z.
+        marker_match = _PERSISTED_MARKER_RE.search(content)
+
+        if strategy == "placeholder":
             msg["content"] = f"[Tool result ({len(content)} chars, trimmed)]"
         elif strategy == "head":
             lines = content.split("\n")
@@ -165,5 +187,10 @@ class CompressionModule(Module):
                 lines = content.split("\n")
                 msg["content"] = "\n".join(lines[:self._tool_result_head_lines]) + \
                     f"\n...[trimmed, original {len(content)} chars]"
+
+        # Re-append the marker so framework code can still recover the path.
+        # Skip if the rewrite happened to keep it (head strategy, narrow case).
+        if marker_match and not _PERSISTED_MARKER_RE.search(msg["content"]):
+            msg["content"] += f"\n<<<llamagent:persisted:{marker_match.group(1)}>>>"
 
         return msg
