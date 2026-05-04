@@ -17,6 +17,26 @@ Core design:
 A bare LlamAgent is a fully functional conversational Agent. Each
 module loaded grants a new capability.
 
+v3.7.5 highlights (persistence forward-compat + compression marker):
+- **Persistence schema v=2**: ``PersistenceModule._save`` now writes
+  ``version=2`` and persists ``_delegation_depth`` + ``_active_packs``.
+  Pre-fix, restart silently dropped both: max_delegation_depth checks
+  reset, and any follow-up tool pack (e.g. job-followup) was no longer
+  armed. ``_load`` accepts version in {1, 2} and falls back to sane
+  defaults for missing keys, so v=1 files still restore cleanly. Note:
+  v=2 files cannot be downgraded — v3.7.4 and earlier reject them
+  (silent skip with WARNING log; no exception, no partial state).
+- **Structured persisted-file marker**: ``_truncate_observation``
+  appends ``<<<llamagent:persisted:<rel_path>>>>`` at message-end
+  after the human-prose persistence hint. ``CompressionModule._compress_tool_result``
+  extracts the marker (regex anchored with ``\\Z``) before its rewrite
+  strategies (head / placeholder / llm_summary) and re-appends it
+  after, so framework code can recover the persisted-file path even
+  when the prose is replaced. Pre-fix the path was lost for
+  ``start_job`` / ``web_fetch`` / ``write_files`` outputs once any
+  compression strategy ran; only read-tool inputs were partially
+  rescued by ``tool_calls.arguments`` introspection.
+
 v3.7.4 highlights (config + lifecycle + DiD pass, second of v3.7.x):
 - **Child-agent factory namespaced Config**: the nine hardcoded
   child-tightening defaults that lived in
@@ -273,7 +293,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "3.7.4"
+__version__ = "3.7.5"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager
