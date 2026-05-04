@@ -18,8 +18,11 @@ Configuration:
 import os
 import json
 import asyncio
+import logging
 
 from llamagent.core.agent import Module
+
+logger = logging.getLogger(__name__)
 
 # MCP package is an optional dependency, only imported when actually used
 _MCP_INSTALL_HINT = "[MCP] mcp package not installed, please run: pip install mcp"
@@ -55,7 +58,7 @@ class MCPModule(Module):
         try:
             server_configs = json.loads(mcp_config)
         except json.JSONDecodeError:
-            print("[MCP] MCP_SERVERS environment variable has invalid JSON format, please check configuration")
+            logger.warning("[MCP] MCP_SERVERS environment variable has invalid JSON format, please check configuration")
             return
 
         self._init_client(server_configs)
@@ -66,7 +69,7 @@ class MCPModule(Module):
             from llamagent.modules.mcp.client import MCPClient, MCP_AVAILABLE
 
             if not MCP_AVAILABLE:
-                print(_MCP_INSTALL_HINT)
+                logger.info(_MCP_INSTALL_HINT)
                 return
 
             self.client = MCPClient(server_configs)
@@ -89,9 +92,9 @@ class MCPModule(Module):
                     if self._connected:
                         self._bridge_tools()
                     else:
-                        print("[MCP] All server connections failed, please check configuration")
+                        logger.warning("[MCP] All server connections failed, please check configuration")
                 except Exception as e:
-                    print(f"[MCP] Async environment connection failed: {e}")
+                    logger.warning("[MCP] Async environment connection failed: %s", e)
             else:
                 # Synchronous environment, connect immediately
                 results = asyncio.run(self.client.connect_all())
@@ -99,12 +102,12 @@ class MCPModule(Module):
                 if self._connected:
                     self._bridge_tools()
                 else:
-                    print("[MCP] All server connections failed, please check configuration")
+                    logger.warning("[MCP] All server connections failed, please check configuration")
 
         except ImportError:
-            print(_MCP_INSTALL_HINT)
+            logger.info(_MCP_INSTALL_HINT)
         except Exception as e:
-            print(f"[MCP] Initialization failed: {e}")
+            logger.warning("[MCP] Initialization failed: %s", e)
 
     def _bridge_tools(self) -> None:
         """
@@ -119,7 +122,7 @@ class MCPModule(Module):
         try:
             from llamagent.modules.mcp.client import MCPToolBridge
         except ImportError:
-            print(_MCP_INSTALL_HINT)
+            logger.info(_MCP_INSTALL_HINT)
             return
 
         # Get bridge functions and parameter schemas
@@ -145,7 +148,7 @@ class MCPModule(Module):
 
         tool_count = len(bridged)
         if tool_count > 0:
-            print(f"[MCP] Bridged {tool_count} tools to registry")
+            logger.info("[MCP] Bridged %d tools to registry", tool_count)
 
     # ============================================================
     # Lifecycle
@@ -176,7 +179,7 @@ class MCPModule(Module):
                 asyncio.run(self.client.disconnect_all())
 
             self._connected = False
-            print("[MCP] All connections disconnected")
+            logger.info("[MCP] All connections disconnected")
 
         except Exception as e:
-            print(f"[MCP] Error during disconnection: {e}")
+            logger.warning("[MCP] Error during disconnection: %s", e)

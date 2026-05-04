@@ -16,6 +16,12 @@ Usage:
     python -m llamagent.interfaces.cli ask "How's the weather today"  # Single question
     python -m llamagent.interfaces.cli --modules tools,retrieval  # Skip setup, specify modules
     python -m llamagent.interfaces.cli --no-modules         # Skip setup, pure chat mode
+
+print() usage: this file is a user-facing CLI. All print() calls are
+intentional stdout output (banner, prompts, chat replies). Do NOT
+replace with logger — they belong on stdout for the user, not in the
+log stream. v3.7.7 cleanup pass categorized library code separately
+from CLI entry points.
 """
 
 import argparse

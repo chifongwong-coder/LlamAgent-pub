@@ -14,6 +14,11 @@ Fix mode (--fix):
   - Malformed frontmatter: close unclosed ---
   - No ## sections but has # or ###: normalize to ##
   - Writes fixed files back (originals backed up as .bak)
+
+print() usage: standalone CLI tool, runs as a script. All print()
+calls are intentional stdout for human-readable validation output and
+fix progress — do NOT replace with logger. v3.7.7 cleanup pass
+categorized library code separately from CLI entry points.
 """
 
 import os

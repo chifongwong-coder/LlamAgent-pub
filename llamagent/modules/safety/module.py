@@ -15,10 +15,13 @@ Design principles:
 - When on_input returns an empty string, agent.chat() short-circuits with a rejection response
 """
 
+import logging
 from pathlib import Path
 
 from llamagent.core.agent import Module
 from llamagent.modules.safety.guard import SafetyGuard
+
+logger = logging.getLogger(__name__)
 
 
 class SafetyModule(Module):
@@ -67,10 +70,10 @@ class SafetyModule(Module):
 
         result = self.guard.check_input(user_input)
         if not result["safe"]:
-            print(f"  [Safety] {result['reason']}")
+            logger.warning("[Safety] %s", result["reason"])
             if not result["sanitized_input"]:
                 # Injection attack or dangerous content: return empty string, agent.chat() will short-circuit
-                print(f"[Safety] Unsafe input intercepted: {result['reason']}")
+                logger.warning("[Safety] Unsafe input intercepted: %s", result["reason"])
                 return ""
             # Overly long input: return truncated text, continue processing
             return result["sanitized_input"]
@@ -87,7 +90,7 @@ class SafetyModule(Module):
 
         result = self.guard.check_output(response)
         if not result["safe"]:
-            print(f"  [Safety] {result['reason']}")
+            logger.warning("[Safety] %s", result["reason"])
             return result["sanitized_output"]
         return response
 

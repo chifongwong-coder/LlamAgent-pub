@@ -14,6 +14,12 @@ Usage:
     python -m llamagent --no-modules                       # Load no modules (pure chat mode)
     python -m llamagent --persona CodeLlama                # Specify persona
     python -m llamagent --port 9000                        # Specify port (Web/API)
+
+print() usage: this file is the program entry point. All print() calls
+are intentional stdout for banner / error diagnostics / fatal-exit
+messages — do NOT replace with logger (most fire before logging is
+configured). v3.7.7 cleanup pass categorized library code separately
+from CLI entry points.
 """
 
 import argparse
