@@ -743,10 +743,10 @@ class LlamAgent:
         # 3-7 wrapped for exception safety: if _switch_policy fails, fall back to interactive
         try:
             # 3. Clear old scopes, collect SCOPE_REVOKED events (before switching policy)
-            clear_result = self._authorization_engine._clear_all_scopes(reason="mode_switch")
+            clear_result = self._authorization_engine.clear_all_scopes(reason="mode_switch")
 
             # 4. Switch policy (loads seed scopes, may ask user for project access in task mode)
-            switch_result = self._authorization_engine._switch_policy(mode, state=new_state)
+            switch_result = self._authorization_engine.switch_policy(mode, state=new_state)
 
             # 5. Configure controller based on policy result (before commit)
             if new_controller is not None:
@@ -769,7 +769,7 @@ class LlamAgent:
             # Roll back to consistent interactive state
             logger.error("set_mode('%s') failed, falling back to interactive: %s", mode, e)
             try:
-                self._authorization_engine._switch_policy("interactive")
+                self._authorization_engine.switch_policy("interactive")
             except Exception as fallback_e:
                 logger.error("Fallback to interactive also failed: %s", fallback_e)
             self._controller = None
@@ -1524,9 +1524,15 @@ class LlamAgent:
     # Conversation (core capability)
     # ============================================================
 
-    def _ask_confirmation(self, request) -> "ConfirmResponse":
+    def ask_confirmation(self, request) -> "ConfirmResponse":
         """
         Call confirm_handler with structured request. Track wait time.
+
+        Boundary API called by ``AuthorizationEngine.confirm()``.
+
+        v3.7.3: renamed from ``_ask_confirmation``. The underscore form is
+        kept as a backward-compat alias (deprecation warning in
+        v3.7.4-v3.7.7, removal in v3.8.1).
 
         Args:
             request: ConfirmRequest from the authorization engine
@@ -1547,6 +1553,9 @@ class LlamAgent:
             response = ConfirmResponse(allow=False)
         self._confirm_wait_time += time.time() - t0
         return response
+
+    # v3.7.3: backward-compat alias (removed in v3.8.1).
+    _ask_confirmation = ask_confirmation
 
     def chat(self, user_input: str) -> str:
         """

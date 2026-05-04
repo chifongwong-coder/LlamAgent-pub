@@ -228,7 +228,9 @@ class ProcessRunnerBackend(AgentRunnerBackend):
         """Derive monitor timeout from budget (budget + 30s grace period)."""
         if spec.policy and spec.policy.budget and spec.policy.budget.max_time_seconds:
             return spec.policy.budget.max_time_seconds + 30
-        return 330  # Default: 300 + 30
+        # Default fallback: ~5 min subprocess wall-clock when budget is unset.
+        # Budget-driven path uses ``budget.max_time_seconds + 30 grace`` above.
+        return 330
 
     def _monitor(self, task_id: str, proc: subprocess.Popen,
                  event: threading.Event, spec_path: str, timeout: float,

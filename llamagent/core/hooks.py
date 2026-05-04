@@ -53,7 +53,11 @@ class HookEvent(str, Enum):
     SESSION_START = "session_start"
     SESSION_END = "session_end"
 
-    # Planning-level — reserved, not emitted yet
+    # Planning-level — reserved, not emitted yet (v3.7.3 verified: 0 emitters
+    # across the codebase, 0 user references). Kept as a public enum surface
+    # so future emit-or-remove decisions don't break already-registered
+    # handlers; will be wired by PlanReAct (or removed) in a later release.
+    # See docs/llamagent-v3.8-plan.md for the emit-or-remove decision.
     PLAN_CREATED = "plan_created"
     STEP_START = "step_start"
     STEP_END = "step_end"

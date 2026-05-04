@@ -17,6 +17,34 @@ Core design:
 A bare LlamAgent is a fully functional conversational Agent. Each
 module loaded grants a new capability.
 
+v3.7.3 highlights (round-5 + round-6 audit cleanup, first of v3.7.x series):
+- **Dead-code purge**: drop unreachable ``hasattr`` guards
+  (``api_retry_count`` in child_agent factory; ``get_all_tool_schemas`` /
+  ``set_execution_strategy`` fallbacks in PlanningModule; ``_on_complete``
+  hasattr probe in ChildAgentController). All targets are unconditionally
+  defined now; the guards were transitional from earlier versions.
+- **runner ``_record_failure`` helper**: byte-identical TaskRecord
+  construction in ``InlineRunnerBackend`` and ``ThreadRunnerBackend``
+  except blocks (BudgetExceededError + Exception) lifted into
+  ``runners/runner.py`` next to ``build_metrics`` / ``format_fallback_report``.
+  Single source of truth for the failure-record shape.
+- **Engine-agent boundary public-rename + alias**: ``_switch_policy`` /
+  ``_clear_all_scopes`` (on AuthorizationEngine) and ``_ask_confirmation``
+  (on LlamAgent) are documented cross-component contracts; rename to
+  public names while keeping underscore aliases for backward-compat.
+  Aliases get a deprecation warning in v3.7.4-v3.7.7 and are removed in
+  v3.8.1.
+- **agent_runner subprocess KeyboardInterrupt path**: pre-fix, Ctrl-C
+  reaching a child subprocess was caught as ``BaseException`` and
+  reported to the parent as ``status='failed' result='execution error:
+  KeyboardInterrupt'``. Now mapped to ``status='cancelled'`` with a
+  proper user-interrupt fallback report.
+- **Reserved HookEvent enum members documented**: ``PLAN_CREATED`` /
+  ``STEP_START`` / ``STEP_END`` / ``REPLAN`` are codebase-verified
+  zero-emit zero-reference, but kept on the public enum surface so
+  future emit-or-remove decisions don't break existing handler
+  registrations. v3.8 plan tracks the decision.
+
 v3.7.2 highlights (factory + spawn-tool merge, structural debt cleanup):
 - **Factory merge**: the twin private factories ``_create_short_child_agent``
   and ``_create_continuous_child_agent`` (~80% structurally identical;
@@ -215,7 +243,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "3.7.2"
+__version__ = "3.7.3"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager

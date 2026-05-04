@@ -228,6 +228,25 @@ def main():
             "metrics": {"elapsed_seconds": round(elapsed, 2)},
         }
 
+    except KeyboardInterrupt:
+        # v3.7.3: Ctrl-C from parent reaches the subprocess as SIGINT →
+        # KeyboardInterrupt. Pre-fix this fell through to ``except
+        # BaseException`` and got wrapped as ``"failed: execution error:
+        # KeyboardInterrupt"`` — confusing for the parent. Map to
+        # ``status="cancelled"`` so the parent's record matches the user-
+        # cancellation contract.
+        elapsed = time.time() - start_time
+        from llamagent.modules.child_agent.runner import format_fallback_report
+        runlog_path = (spec or {}).get("runlog_path") if isinstance(spec, dict) else None
+        output = {
+            "status": "cancelled",
+            "result": format_fallback_report(
+                "cancelled", "user interrupt", runlog_path or None
+            ),
+            "history": list(agent.history) if agent else [],
+            "metrics": {"elapsed_seconds": round(elapsed, 2)},
+        }
+
     except BaseException as e:
         elapsed = time.time() - start_time
         # v3.5.1: align subprocess in-process exception result with the

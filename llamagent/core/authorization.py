@@ -436,12 +436,16 @@ class AuthorizationEngine:
         self.state = AuthorizationState()
         self.policy: AuthorizationPolicy = InteractivePolicy()
 
-    def _switch_policy(self, mode: str, state: TaskModeState | None = None) -> AuthorizationUpdateResult:
+    def switch_policy(self, mode: str, state: TaskModeState | None = None) -> AuthorizationUpdateResult:
         """
-        Switch authorization policy. Internal method, called only by agent.set_mode().
+        Switch authorization policy. Boundary API called by agent.set_mode().
 
         Does NOT clear scopes or write agent attributes — those are agent's responsibility.
         Returns events for newly loaded scopes (e.g., seed scopes in continuous mode).
+
+        v3.7.3: renamed from ``_switch_policy``. The underscore form is kept as
+        a backward-compat alias (deprecation warning in v3.7.4-v3.7.7, removal
+        in v3.8.1).
         """
         events: list[tuple[str, dict]] = []
         has_session_scopes = False
@@ -554,11 +558,15 @@ class AuthorizationEngine:
 
         return AuthorizationUpdateResult(events=events, changed=changed)
 
-    def _clear_all_scopes(self, reason: str = "mode_switch") -> AuthorizationUpdateResult:
+    def clear_all_scopes(self, reason: str = "mode_switch") -> AuthorizationUpdateResult:
         """
-        Clear all scopes (task + session). Internal method for set_mode() / shutdown.
+        Clear all scopes (task + session). Boundary API for set_mode() / shutdown.
 
         Returns revocation events for agent to emit via hook system.
+
+        v3.7.3: renamed from ``_clear_all_scopes``. The underscore form is kept
+        as a backward-compat alias (deprecation warning in v3.7.4-v3.7.7,
+        removal in v3.8.1).
         """
         events: list[tuple[str, dict]] = []
         for tid, scopes in self.state.task_scopes.items():
@@ -570,6 +578,11 @@ class AuthorizationEngine:
         self.state.task_scopes.clear()
         self.state.session_scopes.clear()
         return AuthorizationUpdateResult(events=events, changed=changed)
+
+    # v3.7.3: backward-compat aliases for the underscore-prefixed names
+    # (used by tests and possibly third-party plugins). Removed in v3.8.1.
+    _switch_policy = switch_policy
+    _clear_all_scopes = clear_all_scopes
 
     def authorization_status(self) -> dict:
         """
@@ -653,8 +666,8 @@ class AuthorizationEngine:
         return self.policy.decide(evaluation, tool.get("name", "unknown"), self)
 
     def confirm(self, request: ConfirmRequest) -> ConfirmResponse:
-        """Delegate confirmation to agent._ask_confirmation."""
-        return self.agent._ask_confirmation(request)
+        """Delegate confirmation to agent.ask_confirmation."""
+        return self.agent.ask_confirmation(request)
 
     # ------------------------------------------------------------------
     # Path extraction (moved from LlamAgent._extract_paths)

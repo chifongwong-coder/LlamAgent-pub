@@ -18,6 +18,7 @@ from llamagent.modules.child_agent.runner import (
     build_metrics,
     format_fallback_report,
     maybe_request_completion_report,
+    record_failure,
 )
 from llamagent.modules.child_agent.task_board import TaskRecord
 
@@ -85,19 +86,10 @@ class InlineRunnerBackend(AgentRunnerBackend):
 
         except BudgetExceededError as e:
             elapsed = time.time() - start_time
-            record = TaskRecord(
-                task_id=task_id,
-                parent_id=spec.parent_task_id,
-                role=spec.role,
-                task=spec.task,
-                status="failed",
-                result=format_fallback_report(
-                    "budget exceeded", str(e), spec.runlog_path or None
-                ),
-                history=list(child.history) if child else [],
-                metrics=build_metrics(elapsed, child),
-                created_at=start_time,
-                completed_at=time.time(),
+            record = record_failure(
+                spec=spec, task_id=task_id,
+                reason_kind="budget exceeded", reason_detail=str(e),
+                child=child, start_time=start_time,
             )
             logger.warning(
                 "Child agent (%s) budget exceeded after %.1fs: %s",
@@ -106,20 +98,11 @@ class InlineRunnerBackend(AgentRunnerBackend):
 
         except Exception as e:
             elapsed = time.time() - start_time
-            record = TaskRecord(
-                task_id=task_id,
-                parent_id=spec.parent_task_id,
-                role=spec.role,
-                task=spec.task,
-                status="failed",
-                result=format_fallback_report(
-                    "execution error", f"{type(e).__name__}: {e}",
-                    spec.runlog_path or None,
-                ),
-                history=list(child.history) if child else [],
-                metrics=build_metrics(elapsed, child),
-                created_at=start_time,
-                completed_at=time.time(),
+            record = record_failure(
+                spec=spec, task_id=task_id,
+                reason_kind="execution error",
+                reason_detail=f"{type(e).__name__}: {e}",
+                child=child, start_time=start_time,
             )
             logger.error(
                 "Child agent (%s) failed after %.1fs: %s",

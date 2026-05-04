@@ -8,6 +8,8 @@ backends such as threaded, async, or remote execution.
 
 from __future__ import annotations
 
+from typing import Callable
+
 from llamagent.modules.child_agent.policy import ChildAgentSpec
 from llamagent.modules.child_agent.task_board import TaskRecord
 
@@ -63,6 +65,57 @@ def build_metrics(elapsed: float, child=None) -> dict:
     return metrics
 
 
+def record_failure(
+    *,
+    spec: ChildAgentSpec,
+    task_id: str,
+    reason_kind: str,
+    reason_detail: str,
+    child,
+    start_time: float,
+) -> TaskRecord:
+    """v3.7.3: Build a TaskRecord for a failed child run.
+
+    Both InlineRunnerBackend and ThreadRunnerBackend's BudgetExceededError +
+    Exception except blocks built byte-identical TaskRecords; this helper
+    consolidates that construction. ``logs`` is intentionally not set here —
+    ThreadRunnerBackend fills it from its log-capture handler in the finally
+    block (after this helper returns); InlineRunnerBackend has no log capture
+    and the dataclass default suffices.
+
+    Args:
+        spec: The child agent spec (provides parent_task_id / role / task /
+            runlog_path).
+        task_id: The task id assigned to this child by the controller.
+        reason_kind: Short label, e.g. ``"budget exceeded"`` /
+            ``"execution error"``.
+        reason_detail: Exception class + message, or other diagnostic text.
+        child: The child LlamAgent (may be None if factory crashed).
+        start_time: ``time.time()`` captured at the start of the run; used to
+            compute elapsed_seconds for metrics.
+
+    Returns:
+        A TaskRecord with status="failed", v3.5-shaped fallback report,
+        history snapshot, and budget-tracker metrics.
+    """
+    import time as _time
+    elapsed = _time.time() - start_time
+    return TaskRecord(
+        task_id=task_id,
+        parent_id=spec.parent_task_id,
+        role=spec.role,
+        task=spec.task,
+        status="failed",
+        result=format_fallback_report(
+            reason_kind, reason_detail, spec.runlog_path or None
+        ),
+        history=list(child.history) if child else [],
+        metrics=build_metrics(elapsed, child),
+        created_at=start_time,
+        completed_at=_time.time(),
+    )
+
+
 def format_fallback_report(
     reason_kind: str,
     reason_detail: str,
@@ -105,6 +158,11 @@ class AgentRunnerBackend:
     """
 
     name: str = "base"
+    # v3.7.3: per-backend completion callback. Async runners (thread / process)
+    # set this in ``__init__`` and invoke it when a child finishes; sync runners
+    # (inline) inherit None and never invoke it. Declared on the base class so
+    # the controller can assign without a hasattr probe.
+    _on_complete: Callable | None = None
 
     def spawn(self, spec: ChildAgentSpec, agent_factory, task_id: str | None = None) -> str:
         """
