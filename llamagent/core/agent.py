@@ -2246,11 +2246,19 @@ class LlamAgent:
                     rel_path = os.path.relpath(result_path, self.project_dir)
                     size_bytes = len(text.encode("utf-8"))
                     line_count = text.count("\n") + 1
+                    # v3.7.5: append a structured marker after the human-prose
+                    # hint so downstream framework code (e.g. the compression
+                    # module's per-tool-result rewrite) can recover the
+                    # persisted-file path even after the prose is replaced.
+                    # The marker is anchored at message-end (\Z) on extraction,
+                    # so a model that happens to print the same byte sequence
+                    # in the middle of a future tool result can never spoof it.
                     return (
                         f"{preview}\n\n"
                         f"Output truncated. Full result saved to {rel_path} "
                         f"({size_bytes} bytes, {line_count} lines). "
                         f"Use read_files(['{rel_path}']) to read it."
+                        f"\n<<<llamagent:persisted:{rel_path}>>>"
                     )
 
         # Fallback: simple ratio truncation with a generic suffix.
