@@ -23,8 +23,11 @@ class JobService:
     that delegate to ToolExecutor. No subprocess management here.
     """
 
-    def __init__(self, max_active: int = 10):
+    def __init__(self, max_active: int = 10, *, cancel_join_timeout: float = 5.0):
         self.max_active = max_active
+        # v3.7.4: forwarded to each JobHandle so cancel() can bound-join
+        # the worker thread (see JobHandle.cancel for rationale).
+        self._cancel_join_timeout = cancel_join_timeout
         self._jobs: dict[str, JobHandle] = {}
 
     def create_job(
@@ -56,6 +59,7 @@ class JobService:
         job_id = uuid.uuid4().hex[:12]
         handle = JobHandle(
             job_id=job_id, command=command, cwd=cwd, timeout=timeout,
+            cancel_join_timeout=self._cancel_join_timeout,
         )
         handle.start(executor_fn)
         self._jobs[job_id] = handle

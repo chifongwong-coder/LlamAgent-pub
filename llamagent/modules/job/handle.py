@@ -27,12 +27,23 @@ class JobHandle:
     manages the thread lifecycle and stores the result.
     """
 
-    def __init__(self, job_id: str, command: str, cwd: str, timeout: float):
+    def __init__(
+        self,
+        job_id: str,
+        command: str,
+        cwd: str,
+        timeout: float,
+        *,
+        cancel_join_timeout: float = 5.0,
+    ):
         self.job_id = job_id
         self.command = command
         self.cwd = cwd
         self.timeout = timeout
         self.start_time = time.time()
+        # v3.7.4: bound cancel() join so JobService.shutdown can't block
+        # forever on a wedged worker. Plumbed in from JobService.
+        self._cancel_join_timeout = cancel_join_timeout
 
         # Result from tool_executor.run_command() — available after thread completes
         self._result: str | None = None
@@ -139,13 +150,24 @@ class JobHandle:
 
         return self._exit_code if self._exit_code is not None else -1
 
-    def cancel(self) -> bool:
+    def cancel(self, *, join_timeout: float | None = None) -> bool:
         """
         Cancel the job.
 
         Note: The background thread is running tool_executor.run_command() which is
         blocking. We mark the job as cancelled but cannot forcefully interrupt the
         thread. The backend's timeout will eventually stop it.
+
+        v3.7.4: After signalling, briefly join the worker so callers (e.g.
+        JobService.shutdown) don't race with a worker that's still touching
+        the scratch dir. Bound by ``cancel_join_timeout`` so a wedged worker
+        can't block shutdown — the worker is a daemon, so the OS reaps it
+        on process exit if the join times out.
+
+        Args:
+            join_timeout: Override the configured join timeout (seconds).
+                ``None`` uses the value plumbed in from JobService /
+                ``Config.job_cancel_join_timeout``.
 
         Returns:
             True if marked as cancelled, False if already completed.
@@ -157,4 +179,17 @@ class JobHandle:
             self._error = "Job cancelled by user"
             self._exit_code = -1
         self._completed.set()  # Set AFTER state fields, outside lock to avoid deadlock
+
+        timeout = (
+            join_timeout if join_timeout is not None else self._cancel_join_timeout
+        )
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+            if self._thread.is_alive():
+                logger.warning(
+                    "JobHandle %s worker did not exit within %.1fs after cancel; "
+                    "worker is daemon and will be reaped by the OS.",
+                    self.job_id,
+                    timeout,
+                )
         return True

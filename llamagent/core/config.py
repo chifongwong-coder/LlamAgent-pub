@@ -110,6 +110,7 @@ _YAML_MAP = [
     (("skill", "max_active"), "skill_max_active", int),
     (("job", "default_timeout"), "job_default_timeout", float),
     (("job", "max_active"), "job_max_active", int),
+    (("job", "cancel_join_timeout"), "job_cancel_join_timeout", float),
     (("job", "profiles"), "job_profiles", dict),
     (("output", "dir"), "output_dir", str),
     (("edit_root",), "edit_root", str),
@@ -314,6 +315,10 @@ class Config:
         # Job
         self.job_default_timeout: float = 300.0
         self.job_max_active: int = 10
+        # v3.7.4: bound JobHandle.cancel join wait so module shutdown can't
+        # block on a wedged worker. Worker thread is daemon, so OS exit
+        # cleans up after this timeout regardless.
+        self.job_cancel_join_timeout: float = 5.0
         self.job_profiles: dict = {}
 
         # Per-session scratch identifier (runtime field, programmatic-only — not in YAML map)
