@@ -8,6 +8,8 @@ backends such as threaded, async, or remote execution.
 
 from __future__ import annotations
 
+from typing import Callable
+
 from llamagent.modules.child_agent.policy import ChildAgentSpec
 from llamagent.modules.child_agent.task_board import TaskRecord
 
@@ -105,6 +107,11 @@ class AgentRunnerBackend:
     """
 
     name: str = "base"
+    # v3.7.3: per-backend completion callback. Async runners (thread / process)
+    # set this in ``__init__`` and invoke it when a child finishes; sync runners
+    # (inline) inherit None and never invoke it. Declared on the base class so
+    # the controller can assign without a hasattr probe.
+    _on_complete: Callable | None = None
 
     def spawn(self, spec: ChildAgentSpec, agent_factory, task_id: str | None = None) -> str:
         """

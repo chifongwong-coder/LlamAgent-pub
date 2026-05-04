@@ -263,9 +263,11 @@ class ChildAgentController:
         self.max_children = max_children
         self._module_on_complete = module_on_complete
 
-        # Wire completion callback for async runners
-        if hasattr(runner, '_on_complete'):
-            runner._on_complete = self._on_child_complete
+        # Wire completion callback for async runners. v3.7.3: base class
+        # `AgentRunnerBackend._on_complete = None` makes this assignment safe
+        # for all backends (Inline inherits None and never invokes; Thread /
+        # Process actually use it).
+        runner._on_complete = self._on_child_complete
 
     def spawn_child(self, spec: ChildAgentSpec, agent_factory) -> str:
         """
@@ -1101,8 +1103,6 @@ class ChildAgentModule(Module):
 
         # ---- 1. Build config ----
         config = copy.copy(parent.config)
-        if not hasattr(config, "api_retry_count"):
-            config.api_retry_count = 1
         if is_continuous:
             # Force clean construction; set_mode below establishes the continuous scope.
             config.authorization_mode = "interactive"

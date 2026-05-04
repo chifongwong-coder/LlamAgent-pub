@@ -526,36 +526,8 @@ Please integrate the above results and provide a complete, coherent final answer
 
     @staticmethod
     def _get_tools_schema(agent: "LlamAgent") -> list[dict]:
-        """
-        Get all available tool schemas from the agent.
-
-        Prefers agent.get_all_tool_schemas() (target architecture),
-        falls back to getting from the tools module (current implementation).
-        """
-        # Target architecture interface
-        if hasattr(agent, "get_all_tool_schemas"):
-            return agent.get_all_tool_schemas()
-
-        # Current transition: get from tools module
-        if not agent.has_module("tools"):
-            return []
-
-        tools_mod = agent.get_module("tools")
-
-        schemas = []
-        # Get common tool schemas
-        common_reg = getattr(tools_mod, "common_registry", None)
-        if common_reg:
-            schemas.extend(common_reg.get_openai_schema(tiers=("common",)))
-
-        # Get instance tool schemas
-        agent_reg = getattr(tools_mod, "agent_registry", None)
-        if agent_reg:
-            is_admin = getattr(tools_mod, "_is_admin", False)
-            tiers = ("default", "admin", "agent") if is_admin else ("default", "agent")
-            schemas.extend(agent_reg.get_openai_schema(tiers=tiers))
-
-        return schemas
+        """Get all available tool schemas from the agent."""
+        return agent.get_all_tool_schemas()
 
 
 # ============================================================
@@ -599,10 +571,7 @@ class PlanningModule(Module):
             llm=self.llm,
         )
 
-        # Target architecture: agent.set_execution_strategy(self.strategy)
-        # Current transition: intercept via on_execute callback
-        if hasattr(agent, "set_execution_strategy"):
-            agent.set_execution_strategy(self.strategy)
+        agent.set_execution_strategy(self.strategy)
 
     def on_execute(self, query: str, context: str) -> str | None:
         """
