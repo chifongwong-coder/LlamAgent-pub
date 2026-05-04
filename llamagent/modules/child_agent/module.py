@@ -1098,8 +1098,16 @@ class ChildAgentModule(Module):
         is_continuous = spec.continuous
 
         # Default budgets differ by mode (continuous gets a longer ceiling).
-        default_steps = 10 if is_continuous else 5
-        default_timeout = 600 if is_continuous else 60
+        default_steps = (
+            parent.config.child_agent_max_react_steps_continuous
+            if is_continuous
+            else parent.config.child_agent_max_react_steps_short
+        )
+        default_timeout = (
+            parent.config.child_agent_react_timeout_continuous
+            if is_continuous
+            else parent.config.child_agent_react_timeout_short
+        )
 
         # ---- 1. Build config ----
         config = copy.copy(parent.config)
@@ -1107,21 +1115,21 @@ class ChildAgentModule(Module):
             # Force clean construction; set_mode below establishes the continuous scope.
             config.authorization_mode = "interactive"
 
-        config.context_compress_threshold = 0.7
-        config.compress_keep_turns = 2
+        config.context_compress_threshold = parent.config.child_agent_compress_threshold
+        config.compress_keep_turns = parent.config.child_agent_compress_keep_turns
         config.max_duplicate_actions = 2
-        config.max_observation_tokens = 1500
+        config.max_observation_tokens = parent.config.child_agent_max_observation_tokens
         # v3.7: memory_mode / memory_recall_mode are set by _apply_shared_modules
         # below — default branch forces "off" for the no-share case, share branch
         # forces write-off + read-inherits-parent.
         config.reflection_write_mode = "off"
         config.reflection_read_mode = "off"
-        config.max_plan_adjustments = 3
+        config.max_plan_adjustments = parent.config.child_agent_max_plan_adjustments
         config.permission_level = 1
 
         if not is_continuous:
             # Short-child window; continuous-child window is set after set_mode below.
-            config.context_window_size = 10
+            config.context_window_size = parent.config.child_agent_context_window_short
             # v3.5: report_template gates the completion-report convention.
             #   "system_prompt" (default): inject CHILD_SYSTEM_PROMPT (template B)
             #   "auto"                  : same default + framework auto-prompt at end of run (template A)
@@ -1207,8 +1215,8 @@ class ChildAgentModule(Module):
             config.max_react_steps = budget_steps
             config.react_timeout = budget_timeout
             config.max_duplicate_actions = 2
-            config.max_observation_tokens = 1500
-            config.context_window_size = 20
+            config.max_observation_tokens = parent.config.child_agent_max_observation_tokens
+            config.context_window_size = parent.config.child_agent_context_window_continuous
             # Inject the ongoing-task system_prompt AFTER set_mode so the template is final.
             config.system_prompt = (
                 f"You are a {spec.role}. Your ongoing task: {spec.task}\n"

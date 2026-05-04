@@ -137,6 +137,17 @@ _YAML_MAP = [
     (("child_agent", "max_children"), "child_agent_max_children", int),
     (("child_agent", "role_models"), "child_agent_role_models", dict),
     (("child_agent", "auto_memorize"), "child_agent_auto_memorize", bool),
+    # v3.7.4: child-agent factory overrides
+    (("child_agent", "compress_threshold"), "child_agent_compress_threshold", float),
+    (("child_agent", "compress_keep_turns"), "child_agent_compress_keep_turns", int),
+    (("child_agent", "max_observation_tokens"), "child_agent_max_observation_tokens", int),
+    (("child_agent", "max_plan_adjustments"), "child_agent_max_plan_adjustments", int),
+    (("child_agent", "max_react_steps_short"), "child_agent_max_react_steps_short", int),
+    (("child_agent", "max_react_steps_continuous"), "child_agent_max_react_steps_continuous", int),
+    (("child_agent", "react_timeout_short"), "child_agent_react_timeout_short", int),
+    (("child_agent", "react_timeout_continuous"), "child_agent_react_timeout_continuous", int),
+    (("child_agent", "context_window_short"), "child_agent_context_window_short", int),
+    (("child_agent", "context_window_continuous"), "child_agent_context_window_continuous", int),
     # v3.5
     (("child_agent", "report_template"), "child_agent_report_template", str),
     (("child_agent", "max_delegation_depth"), "child_agent_max_delegation_depth", int),
@@ -354,6 +365,22 @@ class Config:
         self.child_agent_max_delegation_depth: int = 2  # Hermes-style cap
         self.child_agent_runlog_max_bytes: int = 10 * 1024 * 1024  # 10 MiB rotation cap
         self.child_agent_auto_memorize: bool = True
+
+        # v3.7.4: child-agent factory overrides (each defaults to a tighter
+        # value than the parent's; rationale — child runs constrained
+        # subtasks under budget caps so smaller windows / fewer plan
+        # adjustments are appropriate). Previously hardcoded in
+        # `child_agent/module.py:_create_child_agent`.
+        self.child_agent_compress_threshold: float = 0.7
+        self.child_agent_compress_keep_turns: int = 2
+        self.child_agent_max_observation_tokens: int = 1500
+        self.child_agent_max_plan_adjustments: int = 3
+        self.child_agent_max_react_steps_short: int = 5
+        self.child_agent_max_react_steps_continuous: int = 10
+        self.child_agent_react_timeout_short: int = 60
+        self.child_agent_react_timeout_continuous: int = 600
+        self.child_agent_context_window_short: int = 10
+        self.child_agent_context_window_continuous: int = 20
 
         # Web
         self.web_search_provider: str = ""  # "" = auto-detect
