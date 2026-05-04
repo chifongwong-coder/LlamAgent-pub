@@ -17,6 +17,43 @@ Core design:
 A bare LlamAgent is a fully functional conversational Agent. Each
 module loaded grants a new capability.
 
+v3.7.7 highlights (test fixture + log hygiene + child-contract docs):
+- **`init_agent` test fixture** (additive, internal-only): a new
+  ``init_agent`` fixture in ``tests_internal/conftest.py`` constructs a
+  real ``LlamAgent(config)`` so tests covering paths bypassed by
+  ``bare_agent`` (snapshot setup, auto_approve scope seeding, write_root
+  resolution, hook registration) finally have coverage. Existing
+  ``bare_agent`` references (~2848 of them) are NOT migrated; the new
+  fixture is purely additive.
+- **`print()` -> `logger` in library code**: 31 ``print()`` call sites
+  in ``modules/safety/module.py``, ``modules/tools/module.py``,
+  ``modules/mcp/module.py``, ``modules/mcp/client.py``, and
+  ``modules/tools/agent_tools.py`` are replaced with module-level
+  ``logger`` calls so hosts can route them through the standard logging
+  configuration. Six entry-point files (``interfaces/cli.py``,
+  ``interfaces/web_ui.py``, ``interfaces/api_server.py``, ``main.py``,
+  ``modules/mcp/server_example.py``, ``tools/md_validator/validator.py``)
+  keep their ``print()`` calls (65 sites) because they fire before
+  logging is configured and target user stdout, not the log stream;
+  each file's docstring carries an explicit "print() usage" note.
+- **Parent -> child contract docs (ChildContract-2..7)**: a new
+  architecture-doc section documents six edge cases discovered in the
+  v3.7.6 deep audit — parent-bound tool closures in non-share modules,
+  shallow Config dict aliasing, task scope longevity in shared
+  children, factory fallback asymmetry, ``_persisted_files`` non-copy,
+  and runtime hook non-propagation. Five are by-design / known-state
+  with clear handling; v3.8 will decide opt-in mechanisms for the
+  remaining two (`_persisted_files`, `inherit_runtime_hooks`).
+
+> **Known issue, fixed in v3.7.8**: with ``auto_approve=True`` AND
+> ``share_parent_project_dir=False`` (the researcher / writer / analyst /
+> delegate roles' default), an isolated child agent's ``session_scopes``
+> include both the parent's project directory AND the child's isolated
+> directory — leaking parent-write permission through what should be a
+> sandbox. Do NOT deploy v3.7.7 in that combination without the v3.7.8
+> hotfix patch. v3.7.7 deployments that don't combine those two flags
+> are unaffected.
+
 v3.7.6 highlights (multi-tenant builtins via takes_agent):
 - **`takes_agent` flag plumbed through the registry**: ``ToolInfo``,
   ``ToolRegistry.register``, the ``@tool`` decorator, and
@@ -334,7 +371,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "3.7.6"
+__version__ = "3.7.7"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager
