@@ -74,12 +74,21 @@ class PersistenceModule(Module):
         )
 
     def _save(self):
-        """Save current history + summary to a JSON file."""
+        """Save current history + summary to a JSON file.
+
+        v3.7.5: schema bumped to v=2 with two extra fields persisted:
+        ``delegation_depth`` (so max_delegation_depth checks survive
+        restart) and ``active_packs`` (so a follow-up tool-pack stays
+        wired up after restore). v=2 files cannot be read by v3.7.4 or
+        earlier — see VERSION_CHANGELOG for the downgrade caveat.
+        """
         data = {
-            "version": 1,
+            "version": 2,
             "updated_at": datetime.now().isoformat(),
             "summary": self.agent.summary,
             "history": self.agent.history,
+            "delegation_depth": getattr(self.agent, "_delegation_depth", 0),
+            "active_packs": sorted(getattr(self.agent, "_active_packs", set())),
         }
         try:
             self._store.write_file(
@@ -90,7 +99,13 @@ class PersistenceModule(Module):
             logger.warning("Failed to save session '%s': %s", self._filename, e)
 
     def _load(self, agent):
-        """Restore history + summary from a JSON file."""
+        """Restore history + summary from a JSON file.
+
+        v3.7.5: accepts both v=1 (history+summary only) and v=2 (adds
+        delegation_depth + active_packs). Missing fields fall back to
+        sane defaults so a v=1 file restores cleanly and a future v=2
+        file with extra unknown keys is also tolerated.
+        """
         content = self._store.read_file(self._filename)
         if not content:
             return
@@ -105,17 +120,27 @@ class PersistenceModule(Module):
             )
             return
 
-        if data.get("version") != 1:
+        version = data.get("version")
+        if version not in (1, 2):
             logger.warning(
                 "Unknown persistence format version %s, skipping restore",
-                data.get("version"),
+                version,
             )
             return
 
         agent.history[:] = data.get("history", [])
         agent.summary = data.get("summary")
+        # v3.7.5: forward-compat field restore. v=1 files don't have
+        # these keys; .get default fills the gap. Parent agents
+        # previously had no _delegation_depth attribute (the spawn check
+        # used getattr(..., 0)); explicitly setting 0 here just
+        # materializes that default and stays consistent with how
+        # children (set during spawn) carry the value.
+        agent._delegation_depth = data.get("delegation_depth", 0)
+        agent._active_packs = set(data.get("active_packs", []))
         logger.info(
-            "Restored session '%s': %d messages",
+            "Restored session '%s': %d messages (schema v=%d)",
             self._filename,
             len(agent.history),
+            version,
         )
