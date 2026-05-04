@@ -39,6 +39,16 @@ v3.7.6 highlights (multi-tenant builtins via takes_agent):
   agents in the same process (e.g. API server's ``agent_sessions``)
   no longer alias each other's backend / handler. ``web_fetch`` is
   unchanged — it has no per-agent state, only the URL.
+- **Child agents inherit ``_tool_state``**: the
+  ``ChildAgentModule._create_child_agent`` factory shallow-copies
+  ``parent._tool_state`` so a child whose ``_tools`` dict deepcopies
+  builtin ``web_search`` / ``ask_user`` from the parent keeps the
+  same search backend and interaction handler (service references
+  shared, dict containers independent — same shape as the existing
+  ``child.tool_executor = parent.tool_executor`` line). Pre-v3.7.6
+  this fell out of having state on a process-global function
+  attribute; the migration to per-agent storage required the factory
+  to carry it forward explicitly.
 
 v3.7.5 highlights (persistence forward-compat + compression marker):
 - **Persistence schema v=2**: ``PersistenceModule._save`` now writes
