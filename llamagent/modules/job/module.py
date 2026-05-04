@@ -60,7 +60,12 @@ class JobModule(Module):
             )
             return  # Don't register tools — no execution capability
 
-        self.service = JobService(max_active=getattr(agent.config, "job_max_active", 10))
+        self.service = JobService(
+            max_active=getattr(agent.config, "job_max_active", 10),
+            cancel_join_timeout=getattr(
+                agent.config, "job_cancel_join_timeout", 5.0
+            ),
+        )
 
         # --- start_job (sl=2, common) ---
         # v3.6: takes_agent=True so a child agent's start_job resolves cwd

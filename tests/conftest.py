@@ -236,6 +236,16 @@ def bare_agent(mock_llm_client):
     config.child_agent_max_children = 20
     config.child_agent_role_models = {}
     config.child_agent_auto_memorize = True
+    config.child_agent_compress_threshold = 0.7
+    config.child_agent_compress_keep_turns = 2
+    config.child_agent_max_observation_tokens = 1500
+    config.child_agent_max_plan_adjustments = 3
+    config.child_agent_max_react_steps_short = 5
+    config.child_agent_max_react_steps_continuous = 10
+    config.child_agent_react_timeout_short = 60.0
+    config.child_agent_react_timeout_continuous = 600.0
+    config.child_agent_context_window_short = 10
+    config.child_agent_context_window_continuous = 20
     config.approval_mode = "persistent"
     config.auto_approve = False
     config.authorization_scopes = []

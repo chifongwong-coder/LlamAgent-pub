@@ -640,10 +640,74 @@ class AuthorizationEngine:
             all_scopes.extend(scopes)
         return [asdict(s) for s in all_scopes]
 
-    def import_scopes(self, scopes: list[dict]) -> None:
-        """Import scopes (child agent inheritance)."""
+    def import_scopes(
+        self, scopes: list[dict], *, source: str = "trusted"
+    ) -> None:
+        """Import scopes (child-agent inheritance, persistence restore, etc.).
+
+        ``source="trusted"`` (default): scopes come from a parent agent or
+        a persisted session — caller is responsible for the data shape, no
+        validation runs (preserves the historical zero-cost path).
+
+        ``source="external"``: scopes come from an untrusted JSON entry
+        point (uploaded config, MCP/HTTP request body). Each dict is
+        validated against the ApprovalScope field whitelist and the
+        scope/zone/actions/path_prefixes value whitelists before it
+        joins ``state.session_scopes``. Validation failures raise
+        ``ValueError`` and abort the import (no partial state).
+        """
+        if source not in ("trusted", "external"):
+            raise ValueError(
+                f"import_scopes source must be 'trusted' or 'external', got {source!r}"
+            )
+        if source == "external":
+            for s in scopes:
+                self._validate_external_scope(s)
         for s in scopes:
             self.state.session_scopes.append(ApprovalScope(**s))
+
+    def _validate_external_scope(self, s: dict) -> None:
+        """v3.7.4 B-NEW-2: validator for ``import_scopes(source='external')``.
+
+        Mirrors the field set declared on ``ApprovalScope`` and the
+        zone-string set emitted by ``_evaluate_zone`` /
+        ``_evaluate_command``. Path prefixes must resolve inside the
+        agent's ``write_root`` and use the same matcher semantics
+        (``os.path.normpath`` + subtree boundary) as ``_path_in_prefixes``
+        — using realpath/startswith here would diverge from the matcher
+        on symlinks and on prefix-overlap edge cases (e.g. ``/proj-foo``
+        vs ``/proj``).
+        """
+        allowed_fields = {
+            "scope", "zone", "actions", "path_prefixes", "tool_names",
+            "command_patterns", "expires_at", "max_uses", "uses",
+            "source", "created_at",
+        }
+        extra = set(s.keys()) - allowed_fields
+        if extra:
+            raise ValueError(f"unknown scope fields: {sorted(extra)}")
+
+        if s.get("scope") not in {"session", "task"}:
+            raise ValueError(f"invalid scope value: {s.get('scope')!r}")
+
+        if s.get("zone") not in {"project", "external", "playground"}:
+            raise ValueError(f"invalid zone value: {s.get('zone')!r}")
+
+        if not set(s.get("actions") or []) <= {"read", "write", "execute"}:
+            raise ValueError(f"unknown action in {s.get('actions')!r}")
+
+        write_root = self.agent.write_root
+        norm_root = os.path.normpath(write_root)
+        for p in s.get("path_prefixes") or []:
+            anchored = (
+                p if os.path.isabs(p)
+                else os.path.join(self.agent.project_dir, p)
+            )
+            norm_p = os.path.normpath(anchored)
+            if norm_p != norm_root and not norm_p.startswith(norm_root + os.sep):
+                raise ValueError(
+                    f"path_prefix {p!r} outside write_root {write_root!r}"
+                )
 
     def evaluate(self, tool: dict, args: dict) -> AuthorizationResult:
         """

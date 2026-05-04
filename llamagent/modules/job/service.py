@@ -23,8 +23,11 @@ class JobService:
     that delegate to ToolExecutor. No subprocess management here.
     """
 
-    def __init__(self, max_active: int = 10):
+    def __init__(self, max_active: int = 10, *, cancel_join_timeout: float = 5.0):
         self.max_active = max_active
+        # v3.7.4: forwarded to each JobHandle so cancel() can bound-join
+        # the worker thread (see JobHandle.cancel for rationale).
+        self._cancel_join_timeout = cancel_join_timeout
         self._jobs: dict[str, JobHandle] = {}
 
     def create_job(
@@ -56,6 +59,7 @@ class JobService:
         job_id = uuid.uuid4().hex[:12]
         handle = JobHandle(
             job_id=job_id, command=command, cwd=cwd, timeout=timeout,
+            cancel_join_timeout=self._cancel_join_timeout,
         )
         handle.start(executor_fn)
         self._jobs[job_id] = handle
@@ -75,9 +79,30 @@ class JobService:
         return any(h.poll() == "running" for h in self._jobs.values())
 
     def shutdown(self) -> None:
-        """Cancel all running jobs and clear the registry."""
-        for handle in self._jobs.values():
-            if handle.poll() == "running":
-                logger.info("Shutting down job: %s", handle.job_id)
-                handle.cancel()
+        """Cancel all running jobs and clear the registry.
+
+        v3.7.4: two-pass cancel so total wait stays bounded by
+        ``cancel_join_timeout`` rather than ``N * cancel_join_timeout``.
+        Pass 1 signals every running handle (no join), pass 2 joins each
+        worker thread with the configured timeout. Workers are daemon, so
+        any thread that misses both passes is still reaped on process exit.
+        """
+        running = [h for h in self._jobs.values() if h.poll() == "running"]
+        for handle in running:
+            logger.info("Shutting down job: %s", handle.job_id)
+            handle.cancel(join_timeout=0)  # signal only
+        # Second pass: bounded join. Threads that finished during pass 1 are
+        # cheap (is_alive() returns False, the join inside cancel becomes
+        # a no-op via the timeout > 0 + is_alive() guard).
+        for handle in running:
+            thread = handle._thread
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=self._cancel_join_timeout)
+                if thread.is_alive():
+                    logger.warning(
+                        "JobHandle %s worker did not exit within %.1fs during "
+                        "shutdown; worker is daemon and will be reaped by the OS.",
+                        handle.job_id,
+                        self._cancel_join_timeout,
+                    )
         self._jobs.clear()

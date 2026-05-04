@@ -17,6 +17,36 @@ Core design:
 A bare LlamAgent is a fully functional conversational Agent. Each
 module loaded grants a new capability.
 
+v3.7.4 highlights (config + lifecycle + DiD pass, second of v3.7.x):
+- **Child-agent factory namespaced Config**: the nine hardcoded
+  child-tightening defaults that lived in
+  ``modules/child_agent/module.py:_create_child_agent`` (compress
+  threshold/keep-turns, max observation tokens, max plan adjustments,
+  short/continuous react steps + timeout, short/continuous context
+  window) now read from named ``Config.child_agent_*`` fields. Defaults
+  preserve the prior behavior; YAML (``child_agent.compress_threshold``
+  etc.) and direct attribute assignment override per-deployment.
+- **JobModule cancel bounded join**: ``JobHandle.cancel`` now
+  bound-joins the worker thread after signalling. Previously
+  ``JobService.shutdown`` flipped ``_cancelled`` and returned, racing
+  with ``ToolsModule`` reverse-shutdown clearing the scratch
+  directory while a worker still ran a ``run_command`` mid-IO. The
+  join is bounded by ``Config.job_cancel_join_timeout`` (default 5s)
+  and the worker is daemon, so a wedged worker can't block shutdown.
+  Cancel-vs-result race semantics are unchanged; the deeper question
+  is deferred to v3.8.
+- **import_scopes trusted/external split**: ``AuthorizationEngine.import_scopes``
+  takes a keyword-only ``source="trusted" | "external"``. Trusted
+  (default) preserves the historical zero-validation path; external
+  validates each dict against the ApprovalScope field whitelist, the
+  scope/zone/actions value whitelists matching what the engine
+  actually emits (incl. ``"playground"``), and pins ``path_prefixes``
+  to the agent's ``write_root`` subtree using the same
+  ``os.path.normpath`` + subtree-boundary semantics as the runtime
+  matcher (``_path_in_prefixes``). Defense-in-depth for any future
+  untrusted JSON entry point — production parent->child inheritance
+  and persistence restore are unchanged.
+
 v3.7.3 highlights (round-5 + round-6 audit cleanup, first of v3.7.x series):
 - **Dead-code purge**: drop unreachable ``hasattr`` guards
   (``api_retry_count`` in child_agent factory; ``get_all_tool_schemas`` /
@@ -243,7 +273,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "3.7.3"
+__version__ = "3.7.4"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager
