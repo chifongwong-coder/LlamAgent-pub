@@ -16,7 +16,6 @@ from llamagent.modules.child_agent.policy import ChildAgentSpec
 from llamagent.modules.child_agent.runner import (
     AgentRunnerBackend,
     build_metrics,
-    format_fallback_report,
     maybe_request_completion_report,
     record_failure,
 )

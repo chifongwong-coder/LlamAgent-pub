@@ -4,8 +4,10 @@ Authorization engine: unified authorization decision layer for call_tool().
 Encapsulates path extraction, zone evaluation, and policy-based decisions.
 In v1.9.0, only InteractivePolicy is implemented (same behavior as v1.8.x).
 v1.9.2 adds TaskPolicy, v1.9.3 adds ContinuousPolicy.
-v1.9.6: ApprovalScope moved here from zone.py; engine.set_mode() replaced by _switch_policy();
-         new apply_update() / _clear_all_scopes() / drain_prepare_data() / clear_pending_buffer().
+v1.9.6: ApprovalScope moved here from zone.py; engine.set_mode() replaced by switch_policy();
+         new apply_update() / clear_all_scopes() / drain_prepare_data() / clear_pending_buffer().
+         (v3.7.3 renamed switch_policy / clear_all_scopes from underscore-prefixed
+         names to public; underscore aliases retained until v3.8.1.)
 """
 
 from __future__ import annotations
@@ -106,7 +108,7 @@ class AuthorizationResult:
 
 @dataclass
 class AuthorizationUpdateResult:
-    """Result from AuthorizationEngine.apply_update() / _clear_all_scopes()."""
+    """Result from AuthorizationEngine.apply_update() / clear_all_scopes()."""
     events: list[tuple[str, dict]] = field(default_factory=list)
     changed: bool = False
     has_session_scopes: bool = False
@@ -427,8 +429,9 @@ class AuthorizationEngine:
     The engine accesses agent attributes (project_dir, playground_dir,
     confirm_handler) lazily via self.agent reference.
 
-    v1.9.6: set_mode() replaced by _switch_policy() (internal method).
-    New methods: apply_update(), _clear_all_scopes(), drain_prepare_data(), clear_pending_buffer().
+    v1.9.6: set_mode() replaced by switch_policy() (boundary API).
+    New methods: apply_update(), clear_all_scopes(), drain_prepare_data(), clear_pending_buffer().
+    (v3.7.3 renamed switch_policy / clear_all_scopes from underscore names; aliases retained.)
     """
 
     def __init__(self, agent: LlamAgent):

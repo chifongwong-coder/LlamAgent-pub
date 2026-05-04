@@ -23,7 +23,7 @@ v3.7.3 highlights (round-5 + round-6 audit cleanup, first of v3.7.x series):
   ``set_execution_strategy`` fallbacks in PlanningModule; ``_on_complete``
   hasattr probe in ChildAgentController). All targets are unconditionally
   defined now; the guards were transitional from earlier versions.
-- **runner ``_record_failure`` helper**: byte-identical TaskRecord
+- **runner ``record_failure`` helper**: byte-identical TaskRecord
   construction in ``InlineRunnerBackend`` and ``ThreadRunnerBackend``
   except blocks (BudgetExceededError + Exception) lifted into
   ``runners/runner.py`` next to ``build_metrics`` / ``format_fallback_report``.

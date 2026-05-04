@@ -740,7 +740,7 @@ class LlamAgent:
             new_controller = TaskModeController()
             new_state = new_controller.state
 
-        # 3-7 wrapped for exception safety: if _switch_policy fails, fall back to interactive
+        # 3-7 wrapped for exception safety: if switch_policy fails, fall back to interactive
         try:
             # 3. Clear old scopes, collect SCOPE_REVOKED events (before switching policy)
             clear_result = self._authorization_engine.clear_all_scopes(reason="mode_switch")
