@@ -145,8 +145,8 @@ _YAML_MAP = [
     (("child_agent", "max_plan_adjustments"), "child_agent_max_plan_adjustments", int),
     (("child_agent", "max_react_steps_short"), "child_agent_max_react_steps_short", int),
     (("child_agent", "max_react_steps_continuous"), "child_agent_max_react_steps_continuous", int),
-    (("child_agent", "react_timeout_short"), "child_agent_react_timeout_short", int),
-    (("child_agent", "react_timeout_continuous"), "child_agent_react_timeout_continuous", int),
+    (("child_agent", "react_timeout_short"), "child_agent_react_timeout_short", float),
+    (("child_agent", "react_timeout_continuous"), "child_agent_react_timeout_continuous", float),
     (("child_agent", "context_window_short"), "child_agent_context_window_short", int),
     (("child_agent", "context_window_continuous"), "child_agent_context_window_continuous", int),
     # v3.5
@@ -382,8 +382,8 @@ class Config:
         self.child_agent_max_plan_adjustments: int = 3
         self.child_agent_max_react_steps_short: int = 5
         self.child_agent_max_react_steps_continuous: int = 10
-        self.child_agent_react_timeout_short: int = 60
-        self.child_agent_react_timeout_continuous: int = 600
+        self.child_agent_react_timeout_short: float = 60.0
+        self.child_agent_react_timeout_continuous: float = 600.0
         self.child_agent_context_window_short: int = 10
         self.child_agent_context_window_continuous: int = 20
 

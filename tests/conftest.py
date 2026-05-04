@@ -242,8 +242,8 @@ def bare_agent(mock_llm_client):
     config.child_agent_max_plan_adjustments = 3
     config.child_agent_max_react_steps_short = 5
     config.child_agent_max_react_steps_continuous = 10
-    config.child_agent_react_timeout_short = 60
-    config.child_agent_react_timeout_continuous = 600
+    config.child_agent_react_timeout_short = 60.0
+    config.child_agent_react_timeout_continuous = 600.0
     config.child_agent_context_window_short = 10
     config.child_agent_context_window_continuous = 20
     config.approval_mode = "persistent"

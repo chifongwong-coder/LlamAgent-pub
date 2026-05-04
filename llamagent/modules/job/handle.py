@@ -105,7 +105,11 @@ class JobHandle:
             elapsed = time.time() - self.start_time
             if self.timeout > 0 and elapsed > self.timeout:
                 self._timed_out = True
-                self.cancel()  # Stop the thread from overwriting state
+                # v3.7.4: poll() must remain non-blocking; signal-only cancel
+                # (skip the worker join). The worker is daemon so the OS reaps
+                # it on process exit; an explicit shutdown / cancel_job path
+                # still gets a bounded join via the configured timeout.
+                self.cancel(join_timeout=0)
                 return "timeout"
             return "running"
 
@@ -183,7 +187,10 @@ class JobHandle:
         timeout = (
             join_timeout if join_timeout is not None else self._cancel_join_timeout
         )
-        if self._thread is not None and self._thread.is_alive():
+        # join_timeout=0 → signal-only cancel (no join, no warning). Used by
+        # poll() so polling stays non-blocking, and by JobService.shutdown's
+        # signaling pass so it can fan-out cancels and join in a second pass.
+        if timeout > 0 and self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=timeout)
             if self._thread.is_alive():
                 logger.warning(
