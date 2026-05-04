@@ -274,6 +274,7 @@ def bare_agent(mock_llm_client):
     agent.tool_executor = None
     agent._tools = {}
     agent._active_packs = set()
+    agent._tool_state = {}
     agent._tools_version = 0
     # v3.3 contract A: tracking set for persisted tool result paths,
     # consumed by _truncate_observation defense-line-2.

@@ -156,10 +156,17 @@ class ToolsModule(Module):
         from llamagent.modules.tools.web import create_search_backend
         backend = create_search_backend(agent.config)
         if backend is not None:
+            # v3.7.6: write to per-agent state (multi-tenant safe).
+            agent._tool_state["web_search_backend"] = backend
+            # Backward-compat: legacy global function attribute write,
+            # removed in commit 11 once builtin.web_search reads from
+            # agent._tool_state directly.
             builtin.web_search._backend = backend
 
         # Initialize user interaction handler (injected by caller)
         if getattr(agent, "interaction_handler", None) is not None:
+            # v3.7.6: see web_search_backend comment above.
+            agent._tool_state["ask_user_handler"] = agent.interaction_handler
             builtin.ask_user._handler = agent.interaction_handler
 
         # --- 1b. Create v1.5 internal services ---
