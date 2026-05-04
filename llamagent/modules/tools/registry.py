@@ -38,6 +38,7 @@ class ToolInfo:
     creator_id: str | None = None       # Creator persona_id (only set for agent-tier tools)
     pack: str | None = None             # v1.6: pack name (None = default public surface, always visible)
     action: str | None = None           # v1.9: explicit action "read" | "write" | "execute" | None (None = infer from safety_level)
+    takes_agent: bool = False           # v3.7.6: dispatcher injects the calling agent as the first positional arg before user kwargs
 
 
 class ToolRegistry:
@@ -60,6 +61,7 @@ class ToolRegistry:
         safety_level: int = 1,
         creator_id: str | None = None,
         pack: str | None = None,
+        takes_agent: bool = False,
     ) -> None:
         """
         Register a tool.
@@ -72,6 +74,11 @@ class ToolRegistry:
             tier: Visibility tier 'default' | 'common' | 'admin' | 'agent'
             safety_level: Safety level 1=read-only 2=has side effects 3=high risk
             creator_id: Creator persona_id (used for agent-tier tools)
+            takes_agent: v3.7.6 — when True, the dispatcher injects the
+                calling agent as the first positional arg before any
+                user-supplied kwargs. Used by tools that need per-agent
+                state (e.g. ``web_search`` reads the calling agent's
+                ``_tool_state["web_search_backend"]``).
         """
         self._tools[name] = ToolInfo(
             name=name,
@@ -82,6 +89,7 @@ class ToolRegistry:
             safety_level=safety_level,
             creator_id=creator_id,
             pack=pack,
+            takes_agent=takes_agent,
         )
 
     def remove(self, name: str) -> bool:
@@ -205,6 +213,7 @@ def tool(
     tier: str = "common",
     safety_level: int = 1,
     pack: str | None = None,
+    takes_agent: bool = False,
 ):
     """
     @tool decorator: registers a function into the global tool registry.
@@ -215,6 +224,10 @@ def tool(
 
         @tool(tier="default", safety_level=2)
         def save_memory(...): ...
+
+    v3.7.6: pass ``takes_agent=True`` to have the dispatcher inject the
+    calling agent as the first positional arg (used by tools that read
+    per-agent state from ``agent._tool_state``).
     """
     def decorator(func: Callable) -> Callable:
         tool_name = name or func.__name__
@@ -222,6 +235,7 @@ def tool(
         global_registry.register(
             tool_name, func, tool_desc, parameters,
             tier=tier, safety_level=safety_level, pack=pack,
+            takes_agent=takes_agent,
         )
         func._tool_name = tool_name
         return func

@@ -1243,6 +1243,18 @@ class ChildAgentModule(Module):
         child._tools = {}
         child._tools_version = 0
         child.tool_executor = getattr(parent, "tool_executor", None)  # Inherit sandbox
+        # v3.7.6: shallow-copy the per-agent tool-state namespace so
+        # ``takes_agent=True`` builtins (web_search, ask_user) keep
+        # working in children. Same shape as ``tool_executor`` above —
+        # service instances (search backend, interaction handler) are
+        # not deepcopy-safe (HTTP clients with open sockets, callback
+        # closures), so we share references but give the child its
+        # own dict container so later writes don't leak into parent.
+        # Pre-v3.7.6 this was implicit: state lived on module-level
+        # function attributes shared process-wide; v3.7.6 moved it to
+        # ``agent._tool_state`` and the factory has to carry it
+        # forward explicitly.
+        child._tool_state = dict(parent._tool_state)
 
         if spec.policy and spec.policy.tool_allowlist is not None:
             for tool_name in spec.policy.tool_allowlist:

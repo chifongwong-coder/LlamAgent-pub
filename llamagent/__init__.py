@@ -17,6 +17,39 @@ Core design:
 A bare LlamAgent is a fully functional conversational Agent. Each
 module loaded grants a new capability.
 
+v3.7.6 highlights (multi-tenant builtins via takes_agent):
+- **`takes_agent` flag plumbed through the registry**: ``ToolInfo``,
+  ``ToolRegistry.register``, the ``@tool`` decorator, and
+  ``ToolsModule._bridge_to_core`` all carry the new
+  ``takes_agent: bool = False`` field. ``LlamAgent.register_tool`` and
+  the four dispatcher read sites (``call_tool`` paths in
+  ``core/agent.py``, ``AuthorizationEngine``, sandbox executor) already
+  honored the flag — this commit closes the write-side gap so a tool
+  declared with ``takes_agent=True`` actually reaches the dispatcher
+  through every registration path.
+- **Per-agent ``_tool_state`` namespace**: ``LlamAgent._tool_state:
+  dict[str, Any]`` is a per-agent dict for tools that need agent-scoped
+  state. ``ToolsModule.on_attach`` writes the search backend (key
+  ``"web_search_backend"``) and the interaction handler (key
+  ``"ask_user_handler"``) here.
+- **`web_search` / `ask_user` migrated**: both are now
+  ``takes_agent=True`` and read state from ``agent._tool_state`` via
+  the dispatcher-injected agent, instead of mutating module-level
+  function attributes (``builtin.web_search._backend`` etc.). Two
+  agents in the same process (e.g. API server's ``agent_sessions``)
+  no longer alias each other's backend / handler. ``web_fetch`` is
+  unchanged — it has no per-agent state, only the URL.
+- **Child agents inherit ``_tool_state``**: the
+  ``ChildAgentModule._create_child_agent`` factory shallow-copies
+  ``parent._tool_state`` so a child whose ``_tools`` dict deepcopies
+  builtin ``web_search`` / ``ask_user`` from the parent keeps the
+  same search backend and interaction handler (service references
+  shared, dict containers independent — same shape as the existing
+  ``child.tool_executor = parent.tool_executor`` line). Pre-v3.7.6
+  this fell out of having state on a process-global function
+  attribute; the migration to per-agent storage required the factory
+  to carry it forward explicitly.
+
 v3.7.5 highlights (persistence forward-compat + compression marker):
 - **Persistence schema v=2**: ``PersistenceModule._save`` now writes
   ``version=2`` and persists ``_delegation_depth`` + ``_active_packs``.
@@ -301,7 +334,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "3.7.5"
+__version__ = "3.7.6"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager

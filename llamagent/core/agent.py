@@ -493,6 +493,16 @@ class LlamAgent:
         # v1.6: pack-based conditional tool exposure
         self._active_packs: set[str] = set()
 
+        # v3.7.6: per-agent tool state namespace (multi-tenant safe).
+        # Tools that need agent-scoped state (e.g. ``web_search`` reading
+        # the calling agent's search backend, ``ask_user`` reading its
+        # interaction handler) write into this dict via string keys when
+        # they're declared with ``takes_agent=True``. Replaces module-
+        # level function-attribute injection (``builtin.web_search._backend``
+        # etc.) which silently aliased state across agents in the same
+        # process.
+        self._tool_state: dict[str, Any] = {}
+
         # Tool registry version number, incremented on each register_tool/remove_tool, used for cache invalidation
         self._tools_version: int = 0
 
