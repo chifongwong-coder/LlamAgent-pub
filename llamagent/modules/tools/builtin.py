@@ -86,19 +86,6 @@ def web_search(query: str, num_results: int = 5) -> str:
 # Web page fetching
 # ============================================================
 
-@tool(
-    name="web_fetch",
-    description="Fetch page content from a specified URL and return a text summary",
-    parameters={
-        "type": "object",
-        "properties": {
-            "url": {"type": "string", "description": "The URL of the web page to fetch"}
-        },
-        "required": ["url"],
-    },
-    safety_level=1,
-    pack="web",
-)
 def _is_private_or_local_host(host: str) -> bool:
     """v3.7.3: reject SSRF targets — loopback, link-local (169.254.0.0/16,
     where AWS / GCP / Azure metadata services live), RFC1918 private
@@ -121,6 +108,19 @@ def _is_private_or_local_host(host: str) -> bool:
     )
 
 
+@tool(
+    name="web_fetch",
+    description="Fetch page content from a specified URL and return a text summary",
+    parameters={
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "The URL of the web page to fetch"}
+        },
+        "required": ["url"],
+    },
+    safety_level=1,
+    pack="web",
+)
 def web_fetch(url: str) -> str:
     """Fetch page content from a specified URL. Requires the requests library."""
     try:

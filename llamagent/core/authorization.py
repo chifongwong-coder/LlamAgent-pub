@@ -45,7 +45,7 @@ class ApprovalScope:
     scope: str                    # "task" | "session"
     zone: str                     # "project" | "external"
     actions: list[str]            # ["write"] / ["execute"]
-    path_prefixes: list[str]      # ["project:src/", "project:docs/"]
+    path_prefixes: list[str]
     tool_names: list[str] | None = None
     # v1.9.4 governance fields
     created_at: float | None = None     # time.time() when created
