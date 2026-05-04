@@ -41,7 +41,8 @@ class CompressionModule(Module):
     1. _compress_tool_result strategies 'head' / 'placeholder' / 'llm_summary'
        rewrite the message content and would otherwise drop the human-prose
        hint. v3.7.5: ``_truncate_observation`` now appends a structured
-       ``<<<llamagent:persisted:<rel_path>>>>`` marker at the end of the
+       ``<<<llamagent:persisted:PATH>>>`` marker (literal three angle
+       brackets; PATH is the file's relative path) at the end of the
        message; this method extracts the marker before rewriting and
        re-appends it after, so the path is preserved even when the prose
        is gone. The marker is anchored at \Z on extraction so a model

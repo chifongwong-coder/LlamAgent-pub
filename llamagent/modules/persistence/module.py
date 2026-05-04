@@ -77,10 +77,27 @@ class PersistenceModule(Module):
         """Save current history + summary to a JSON file.
 
         v3.7.5: schema bumped to v=2 with two extra fields persisted:
-        ``delegation_depth`` (so max_delegation_depth checks survive
-        restart) and ``active_packs`` (so a follow-up tool-pack stays
-        wired up after restore). v=2 files cannot be read by v3.7.4 or
-        earlier — see VERSION_CHANGELOG for the downgrade caveat.
+
+        - ``delegation_depth``: makes the cap survive restart for the
+          niche but real case where a *child* agent runs Persistence
+          and gets resumed (parent agents don't normally have a
+          non-zero depth, but the field still serializes them as 0).
+          This is the immediately-effective half of v=2.
+
+        - ``active_packs``: serialized for forward-compat, but **does
+          not become observable on restart in v3.7.5 alone**. The
+          first ``ToolsModule.on_input`` of a restored session calls
+          ``_active_packs.clear()`` and re-derives state-driven packs
+          (``job-followup`` / ``path-fallback``) from in-memory
+          services — and ``JobService`` itself is in-memory only as
+          of v3.7.5. Persisting the set is groundwork for v3.8 Q3
+          (JobService persistence): once jobs survive restart, the
+          restored ``active_packs`` will line up with restored jobs
+          and the follow-up pack will arm for real. Until then this
+          field is a deliberate forward-compat slot, not a fix.
+
+        v=2 files cannot be read by v3.7.4 or earlier — see
+        VERSION_CHANGELOG for the downgrade caveat.
         """
         data = {
             "version": 2,
@@ -88,6 +105,8 @@ class PersistenceModule(Module):
             "summary": self.agent.summary,
             "history": self.agent.history,
             "delegation_depth": getattr(self.agent, "_delegation_depth", 0),
+            # v3.7.5: forward-compat groundwork; full effect requires v3.8
+            # Q3 (JobService persistence). See _save docstring.
             "active_packs": sorted(getattr(self.agent, "_active_packs", set())),
         }
         try:
@@ -137,6 +156,9 @@ class PersistenceModule(Module):
         # materializes that default and stays consistent with how
         # children (set during spawn) carry the value.
         agent._delegation_depth = data.get("delegation_depth", 0)
+        # v3.7.5: restored but currently overwritten by the first
+        # ToolsModule.on_input (state-rederive) — full effect lands in
+        # v3.8 Q3 once JobService is persisted. See _save docstring.
         agent._active_packs = set(data.get("active_packs", []))
         logger.info(
             "Restored session '%s': %d messages (schema v=%d)",

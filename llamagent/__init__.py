@@ -20,15 +20,23 @@ module loaded grants a new capability.
 v3.7.5 highlights (persistence forward-compat + compression marker):
 - **Persistence schema v=2**: ``PersistenceModule._save`` now writes
   ``version=2`` and persists ``_delegation_depth`` + ``_active_packs``.
-  Pre-fix, restart silently dropped both: max_delegation_depth checks
-  reset, and any follow-up tool pack (e.g. job-followup) was no longer
-  armed. ``_load`` accepts version in {1, 2} and falls back to sane
-  defaults for missing keys, so v=1 files still restore cleanly. Note:
-  v=2 files cannot be downgraded — v3.7.4 and earlier reject them
-  (silent skip with WARNING log; no exception, no partial state).
+  ``_delegation_depth`` is the immediately-effective fix: in the niche
+  but real case where a *child* agent runs Persistence and resumes
+  after a crash, the depth cap survives the restart. ``_active_packs``
+  is forward-compat groundwork for v3.8 Q3: as of v3.7.5 the first
+  ``ToolsModule.on_input`` after restore wipes the set and re-derives
+  state-driven packs from in-memory services (``JobService`` itself is
+  not yet persisted), so the persisted set isn't observable until
+  v3.8 lands JobService persistence. See PersistenceModule._save
+  docstring for the contract. ``_load`` accepts version in {1, 2}
+  and falls back to sane defaults for missing keys, so v=1 files
+  still restore cleanly. Note: v=2 files cannot be downgraded —
+  v3.7.4 and earlier reject them (silent skip with WARNING log;
+  no exception, no partial state).
 - **Structured persisted-file marker**: ``_truncate_observation``
-  appends ``<<<llamagent:persisted:<rel_path>>>>`` at message-end
-  after the human-prose persistence hint. ``CompressionModule._compress_tool_result``
+  appends ``<<<llamagent:persisted:PATH>>>`` (literal token; PATH is
+  the relative path to the persisted file) at message-end after the
+  human-prose persistence hint. ``CompressionModule._compress_tool_result``
   extracts the marker (regex anchored with ``\\Z``) before its rewrite
   strategies (head / placeholder / llm_summary) and re-appends it
   after, so framework code can recover the persisted-file path even
