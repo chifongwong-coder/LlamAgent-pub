@@ -36,10 +36,17 @@ from llamagent.modules.tools.registry import tool
     },
     tier="default",
     safety_level=1,
+    takes_agent=True,
 )
-def ask_user(question: str, choices: list[str] | None = None) -> str:
-    """Ask the user and return their response as a string."""
-    handler = getattr(ask_user, "_handler", None)
+def ask_user(agent, question: str, choices: list[str] | None = None) -> str:
+    """Ask the user and return their response as a string.
+
+    v3.7.6: ``agent`` is dispatcher-injected (``takes_agent=True``); the
+    interaction handler lives on ``agent._tool_state["ask_user_handler"]``,
+    written by ``ToolsModule.on_attach``. Per-agent state means two
+    sessions in the same process can't clobber each other's handler.
+    """
+    handler = agent._tool_state.get("ask_user_handler")
     if handler is None:
         return "Cannot ask user: no interaction handler configured."
     try:
@@ -65,10 +72,17 @@ def ask_user(question: str, choices: list[str] | None = None) -> str:
     },
     safety_level=1,
     pack="web",
+    takes_agent=True,
 )
-def web_search(query: str, num_results: int = 5) -> str:
-    """Search the web using the configured search backend."""
-    backend = getattr(web_search, "_backend", None)
+def web_search(agent, query: str, num_results: int = 5) -> str:
+    """Search the web using the configured search backend.
+
+    v3.7.6: ``agent`` is dispatcher-injected (``takes_agent=True``); the
+    backend lives on ``agent._tool_state["web_search_backend"]``, written
+    by ``ToolsModule.on_attach``. Per-agent state means two sessions in
+    the same process don't share or clobber each other's backend.
+    """
+    backend = agent._tool_state.get("web_search_backend")
     if backend is None:
         return json.dumps(
             {"error": "No search backend available. Install: pip install ddgs"},
