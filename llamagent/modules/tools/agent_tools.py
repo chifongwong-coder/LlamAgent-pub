@@ -17,9 +17,12 @@ Security note:
 
 import ast
 import json
+import logging
 import os
 from datetime import datetime
 from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 
 # Builtins blacklisted from tool code execution.
@@ -228,9 +231,9 @@ class AgentToolManager:
                 try:
                     self._compiled[t["name"]] = self._compile(t["code"], t["name"])
                 except Exception as e:
-                    print(f"[Tools] Failed to load custom tool '{t['name']}': {e}")
+                    logger.warning("[Tools] Failed to load custom tool '%s': %s", t["name"], e)
         except (json.JSONDecodeError, IOError) as e:
-            print(f"[Tools] Failed to read tool storage file: {e}")
+            logger.warning("[Tools] Failed to read tool storage file: %s", e)
             self._tools = []
 
     def _save(self) -> None:
@@ -239,7 +242,7 @@ class AgentToolManager:
             with open(self.storage_path, "w", encoding="utf-8") as f:
                 json.dump(self._tools, f, ensure_ascii=False, indent=2)
         except IOError as e:
-            print(f"[Tools] Failed to save tool file: {e}")
+            logger.warning("[Tools] Failed to save tool file: %s", e)
 
     # ----------------------------------------------------------
     # Admin: scan all roles' tools

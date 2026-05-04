@@ -9,6 +9,11 @@ Usage:
     python -m llamagent --mode web
     python -m llamagent.interfaces.web_ui
     Then open your browser to http://localhost:7860
+
+print() usage: CLI entry point for Gradio launcher. The handful of
+print() calls are intentional stdout for startup messages — do NOT
+replace with logger. v3.7.7 cleanup pass categorized library code
+separately from CLI entry points.
 """
 
 import html

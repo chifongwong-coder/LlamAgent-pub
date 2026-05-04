@@ -187,7 +187,7 @@ class ToolsModule(Module):
                         tier="common", safety_level=1,
                     )
         except Exception as e:
-            print(f"[Tools] Failed to load common tools: {e}")
+            logger.warning("[Tools] Failed to load common tools: %s", e)
 
         # --- 3. Load role custom tools (per-instance) ---
         persona_id = agent.persona.persona_id if agent.persona else "default"
@@ -206,7 +206,7 @@ class ToolsModule(Module):
                         creator_id=persona_id,
                     )
         except Exception as e:
-            print(f"[Tools] Failed to load role custom tools: {e}")
+            logger.warning("[Tools] Failed to load role custom tools: %s", e)
 
         # --- 4. Register meta-tools (per-instance, by role) ---
         self._register_meta_tools()

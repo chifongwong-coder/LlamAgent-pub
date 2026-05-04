@@ -8,6 +8,10 @@ How to run:
 
 Dependency installation:
     pip install mcp
+
+print() usage: example/demo entry point. The single print() is an
+intentional stderr-style hint for missing dependency — do NOT replace
+with logger (this script may run without logging configured).
 """
 
 import json

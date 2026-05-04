@@ -12,8 +12,11 @@ Dependency: The mcp package is an optional dependency; the module degrades grace
 """
 
 import json
+import logging
 import asyncio
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 # MCP package is an optional dependency; graceful degradation when not installed
 try:
@@ -97,15 +100,15 @@ class MCPClient:
             Whether the connection was successful
         """
         if not MCP_AVAILABLE:
-            print("[MCP] mcp package not installed, please run: pip install mcp")
+            logger.info("[MCP] mcp package not installed, please run: pip install mcp")
             return False
 
         if server_name not in self.server_configs:
-            print(f"[MCP] Error: server configuration '{server_name}' not found")
+            logger.warning("[MCP] Error: server configuration '%s' not found", server_name)
             return False
 
         if server_name in self._sessions:
-            print(f"[MCP] Server '{server_name}' is already connected")
+            logger.debug("[MCP] Server '%s' is already connected", server_name)
             return True
 
         config = self.server_configs[server_name]
@@ -117,20 +120,20 @@ class MCPClient:
             elif transport == "sse":
                 session = await self._connect_sse(server_name, config)
             else:
-                print(f"[MCP] Unsupported transport mode: {transport}")
+                logger.warning("[MCP] Unsupported transport mode: %s", transport)
                 return False
 
             self._sessions[server_name] = session
-            print(f"[MCP] Connected to server: {server_name}")
+            logger.info("[MCP] Connected to server: %s", server_name)
 
             # Discover tools immediately after successful connection
             tools = await self._discover_tools(server_name)
-            print(f"[MCP] Discovered {len(tools)} tools: {[t.name for t in tools]}")
+            logger.info("[MCP] Discovered %d tools: %s", len(tools), [t.name for t in tools])
 
             return True
 
         except Exception as e:
-            print(f"[MCP] Failed to connect to server '{server_name}': {e}")
+            logger.warning("[MCP] Failed to connect to server '%s': %s", server_name, e)
             return False
 
     async def _connect_stdio(self, name: str, config: dict) -> "ClientSession":
@@ -197,7 +200,7 @@ class MCPClient:
                 if hasattr(session, "__aexit__"):
                     await session.__aexit__(None, None, None)
             except Exception as e:
-                print(f"[MCP] Error disconnecting session '{server_name}': {e}")
+                logger.warning("[MCP] Error disconnecting session '%s': %s", server_name, e)
 
         # Then close underlying connection
         if server_name in self._connections:
@@ -205,10 +208,10 @@ class MCPClient:
                 ctx = self._connections.pop(server_name)
                 await ctx.__aexit__(None, None, None)
             except Exception as e:
-                print(f"[MCP] Error cleaning up connection '{server_name}': {e}")
+                logger.warning("[MCP] Error cleaning up connection '%s': %s", server_name, e)
 
         self._tools_cache.pop(server_name, None)
-        print(f"[MCP] Disconnected: {server_name}")
+        logger.info("[MCP] Disconnected: %s", server_name)
 
     async def disconnect_all(self) -> None:
         """Disconnect all MCP Server connections."""
@@ -308,15 +311,17 @@ class MCPClient:
                 return "Tool executed successfully but returned no content"
 
             except asyncio.TimeoutError:
-                print(
-                    f"[MCP] Call timed out (attempt {attempt + 1}/{self.max_retries})"
+                logger.warning(
+                    "[MCP] Call timed out (attempt %d/%d)",
+                    attempt + 1, self.max_retries,
                 )
                 if attempt == self.max_retries - 1:
                     return f"Error: call to tool '{tool_name}' timed out"
 
             except Exception as e:
-                print(
-                    f"[MCP] Call error (attempt {attempt + 1}/{self.max_retries}): {e}"
+                logger.warning(
+                    "[MCP] Call error (attempt %d/%d): %s",
+                    attempt + 1, self.max_retries, e,
                 )
                 if attempt == self.max_retries - 1:
                     return f"Error: call to tool '{tool_name}' failed - {e}"

@@ -20,6 +20,12 @@ Usage:
     python -m llamagent --mode api
     python -m llamagent.interfaces.api_server
     API docs: http://localhost:8000/docs (Swagger UI)
+
+print() usage: this file is a CLI entry point for FastAPI launching.
+The print() calls are intentional stdout for startup banner and error
+diagnostics — do NOT replace with logger (they fire before any
+logging is configured). v3.7.7 cleanup pass categorized library code
+separately from CLI entry points.
 """
 
 import json
