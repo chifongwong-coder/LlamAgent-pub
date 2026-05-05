@@ -1296,14 +1296,18 @@ class LlamAgent:
     _MAX_MODE_STEPS = 10
 
     # v2.0: mode-aware config defaults. -1 = unlimited/disabled.
-    _MODE_KEYS = {"max_react_steps", "max_duplicate_actions", "react_timeout",
-                  "max_observation_tokens"}
     _MODE_DEFAULTS = {
         "task":       {"max_react_steps": 50, "react_timeout": 600,
                        "max_duplicate_actions": 5, "max_observation_tokens": 5000},
         "continuous": {"max_react_steps": -1, "react_timeout": 600,
                        "max_duplicate_actions": -1, "max_observation_tokens": 10000},
     }
+    # v3.7.8: derive _MODE_KEYS from _MODE_DEFAULTS so adding a key to one mode
+    # automatically extends snapshot/restore. Pre-fix this was a hand-synchronized
+    # set — the kind of parallel-maintenance hazard that the v3.5 twin-factory
+    # mistake was made of. _check_mode_defaults_consistent() runs at module
+    # import to catch any future drift between mode dicts.
+    _MODE_KEYS = frozenset(_MODE_DEFAULTS["task"].keys())
 
     _PREPARE_TOOL_NAME = "_report_question"
 
@@ -2549,3 +2553,17 @@ class LlamAgent:
             },
             "conversation_turns": sum(1 for m in self.history if m.get("role") == "user"),
         }
+
+
+# v3.7.8: module-import-time check that all modes declare the same keys
+# (paranoia against future drift in _MODE_DEFAULTS that would silently
+# break snapshot/restore in set_mode()).
+_first_mode = next(iter(LlamAgent._MODE_DEFAULTS.values()))
+for _mode_name, _mode_dict in LlamAgent._MODE_DEFAULTS.items():
+    if set(_mode_dict.keys()) != set(_first_mode.keys()):
+        raise AssertionError(
+            f"_MODE_DEFAULTS[{_mode_name!r}] keys {sorted(_mode_dict.keys())} "
+            f"differ from {sorted(_first_mode.keys())} (all modes must declare "
+            f"the same keys for set_mode snapshot/restore to be balanced)"
+        )
+del _first_mode
