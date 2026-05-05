@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import time
+from typing import ClassVar
 
 from llamagent.core.agent import Module
 from llamagent.modules.job.service import JobService
@@ -43,6 +44,18 @@ class JobModule(Module):
 
     name = "job"
     description = "Job system: managed command execution with lifecycle control"
+
+    # v3.7.8: tool names whose registered ``func`` closure binds to this
+    # module's ``service`` (JobService instance). Child agent factory uses
+    # this set to strip parent-bound closures from ``child._tools`` before
+    # re-binding to child's own service. Same pattern as
+    # ``MemoryModule._TOOL_NAMES`` and ``ToolsModule._SERVICE_BOUND_TOOL_NAMES``.
+    _SERVICE_BOUND_TOOL_NAMES: ClassVar[set[str]] = {
+        "start_job",
+        "inspect_job",
+        "wait_job",
+        "cancel_job",
+    }
 
     def __init__(self):
         self.service: JobService | None = None

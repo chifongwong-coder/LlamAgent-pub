@@ -36,6 +36,7 @@ import mimetypes
 import os
 import shutil
 import tempfile
+from typing import ClassVar
 
 from llamagent.core.agent import Module
 from llamagent.modules.tools.registry import ToolRegistry, global_registry
@@ -136,6 +137,27 @@ class ToolsModule(Module):
 
     name = "tools"
     description = "Tool system: core tools + common toolbox + custom tool creation"
+
+    # v3.7.8: tool names whose registered ``func`` closure binds to this
+    # module's ``project_sync_service``. Child agent factory uses this set
+    # to strip parent-bound closures from ``child._tools`` (parent-deepcopied
+    # in step 7) before re-binding to child's own service in step 8. Same
+    # pattern as ``MemoryModule._TOOL_NAMES`` — single source of truth, no
+    # hardcoded list in ``_apply_shared_modules``.
+    #
+    # Note: ``preview_patch`` is NOT in this set — it's a ProjectSyncService
+    # method called internally by ``apply_patch(dry_run=True)``, not a
+    # registered tool.
+    _SERVICE_BOUND_TOOL_NAMES: ClassVar[set[str]] = {
+        "write_files",
+        "create_temp_file",
+        "rename_path",
+        "move_path",
+        "copy_path",
+        "delete_path",
+        "apply_patch",
+        "revert_changes",
+    }
 
     def __init__(self):
         self.common_registry: ToolRegistry | None = None   # Globally shared built-in common tools
