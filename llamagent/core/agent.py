@@ -232,6 +232,75 @@ class SimpleReAct(ExecutionStrategy):
 
 
 # ======================================================================
+# Tool parameter schema inference (v3.7.8: extracted to module level)
+# ======================================================================
+
+
+def _infer_parameters_helper(func: Callable, skip_first_arg: bool = False) -> dict:
+    """Infer JSON Schema parameter definitions from a function signature.
+
+    Simple mapping: str -> string, int -> integer, float -> number, bool -> boolean.
+
+    Args:
+        func: function to inspect
+        skip_first_arg: when True, the first positional parameter is
+            skipped (used for ``takes_agent=True`` tools where the
+            first arg is framework-injected and must not appear in
+            the JSON schema the model sees).
+
+    v3.7.8: extracted to module level so both ``LlamAgent.register_tool``
+    and ``ToolRegistry.register`` share a single inference path. Pre-fix
+    they had two independent implementations — only the LlamAgent version
+    supported ``skip_first_arg``, so a ``@tool(takes_agent=True)`` function
+    registered through the decorator without explicit ``parameters=``
+    would produce a schema containing the framework-injected first arg.
+    """
+    import inspect
+
+    sig = inspect.signature(func)
+    properties = {}
+    required = []
+    first_seen = False
+
+    type_mapping = {
+        str: "string",
+        int: "integer",
+        float: "number",
+        bool: "boolean",
+    }
+
+    for param_name, param in sig.parameters.items():
+        if param_name in ("self", "cls"):
+            continue
+        # Skip *args and **kwargs — they are not named parameters in JSON Schema
+        if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            continue
+        # v3.6: framework-injected first arg (agent) is not part of
+        # the model-facing schema.
+        if skip_first_arg and not first_seen:
+            first_seen = True
+            continue
+        first_seen = True
+
+        # Type inference
+        if param.annotation != inspect.Parameter.empty:
+            json_type = type_mapping.get(param.annotation, "string")
+        else:
+            json_type = "string"
+
+        properties[param_name] = {"type": json_type}
+
+        # Whether required
+        if param.default is inspect.Parameter.empty:
+            required.append(param_name)
+
+    result = {"type": "object", "properties": properties}
+    if required:
+        result["required"] = required
+    return result
+
+
+# ======================================================================
 # Module base class
 # ======================================================================
 
@@ -1055,63 +1124,8 @@ class LlamAgent:
 
         return schemas
 
-    @staticmethod
-    def _infer_parameters(func: Callable, skip_first_arg: bool = False) -> dict:
-        """
-        Infer JSON Schema parameter definitions from a function signature.
-
-        Simple mapping: str -> string, int -> integer, float -> number, bool -> boolean.
-
-        Args:
-            func: function to inspect
-            skip_first_arg: when True, the first positional parameter is
-                skipped (used for ``takes_agent=True`` tools where the
-                first arg is framework-injected and must not appear in
-                the JSON schema the model sees).
-        """
-        import inspect
-
-        sig = inspect.signature(func)
-        properties = {}
-        required = []
-        first_seen = False
-
-        type_mapping = {
-            str: "string",
-            int: "integer",
-            float: "number",
-            bool: "boolean",
-        }
-
-        for param_name, param in sig.parameters.items():
-            if param_name in ("self", "cls"):
-                continue
-            # Skip *args and **kwargs — they are not named parameters in JSON Schema
-            if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
-                continue
-            # v3.6: framework-injected first arg (agent) is not part of
-            # the model-facing schema.
-            if skip_first_arg and not first_seen:
-                first_seen = True
-                continue
-            first_seen = True
-
-            # Type inference
-            if param.annotation != inspect.Parameter.empty:
-                json_type = type_mapping.get(param.annotation, "string")
-            else:
-                json_type = "string"
-
-            properties[param_name] = {"type": json_type}
-
-            # Whether required
-            if param.default is inspect.Parameter.empty:
-                required.append(param_name)
-
-        result = {"type": "object", "properties": properties}
-        if required:
-            result["required"] = required
-        return result
+    # v3.7.8: delegate to module-level helper (shared with ToolRegistry).
+    _infer_parameters = staticmethod(_infer_parameters_helper)
 
     # ============================================================
     # Event Hook system (v1.8)

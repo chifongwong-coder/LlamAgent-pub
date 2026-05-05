@@ -18,6 +18,8 @@ import inspect
 from dataclasses import dataclass, field
 from typing import Callable, Any
 
+from llamagent.core.agent import _infer_parameters_helper
+
 
 @dataclass
 class ToolInfo:
@@ -80,11 +82,18 @@ class ToolRegistry:
                 state (e.g. ``web_search`` reads the calling agent's
                 ``_tool_state["web_search_backend"]``).
         """
+        # v3.7.8: pass through `takes_agent` so the inferred schema skips
+        # the framework-injected first arg. Pre-fix the registry's own
+        # _infer_parameters didn't support skip_first_arg, so a
+        # @tool(takes_agent=True) function without explicit parameters=
+        # would produce a schema containing the agent param.
         self._tools[name] = ToolInfo(
             name=name,
             func=func,
             description=description or func.__doc__ or "No description",
-            parameters=parameters or self._infer_parameters(func),
+            parameters=parameters or _infer_parameters_helper(
+                func, skip_first_arg=takes_agent,
+            ),
             tier=tier,
             safety_level=safety_level,
             creator_id=creator_id,
@@ -170,33 +179,16 @@ class ToolRegistry:
             return self._tools
         return {k: v for k, v in self._tools.items() if v.tier in tiers}
 
-    @staticmethod
-    def _infer_parameters(func: Callable) -> dict:
-        """Automatically infer JSON Schema parameter descriptions from function signature."""
-        type_map = {
-            str: "string",
-            int: "integer",
-            float: "number",
-            bool: "boolean",
-        }
-
-        sig = inspect.signature(func)
-        properties = {}
-        required = []
-
-        for pname, param in sig.parameters.items():
-            if pname == "self":
-                continue
-            json_type = (
-                type_map.get(param.annotation, "string")
-                if param.annotation != inspect.Parameter.empty
-                else "string"
-            )
-            properties[pname] = {"type": json_type, "description": f"Parameter {pname}"}
-            if param.default is inspect.Parameter.empty:
-                required.append(pname)
-
-        return {"type": "object", "properties": properties, "required": required}
+    # v3.7.8: _infer_parameters extracted to module-level
+    # `core.agent._infer_parameters_helper` (shared with LlamAgent.register_tool).
+    # Pre-fix this was a separate impl that did NOT support skip_first_arg
+    # for takes_agent=True tools, so a @tool(takes_agent=True) function
+    # without explicit parameters= would produce a schema containing
+    # the framework-injected agent param. Behavior change: the previous
+    # registry version added `"description": f"Parameter {pname}"` to
+    # every property and always emitted `"required": []` even when empty;
+    # the shared helper drops both (cleaner schema; LLM doesn't depend on
+    # the placeholder description).
 
 
 # ============================================================
