@@ -17,6 +17,55 @@ Core design:
 A bare LlamAgent is a fully functional conversational Agent. Each
 module loaded grants a new capability.
 
+v3.7.8 highlights (v3.7-closing audit cleanup pack):
+- **B1 sessions.py reads schema v=2**: ``interfaces/sessions.py`` listed
+  v=1 only, so every session written since v3.7.5 (which bumped to v=2)
+  was silently invisible to the CLI / Web UI session list. One-line fix
+  to accept ``{1, 2}``.
+- **B2 child factory rebinds service handles**: the v3.7 audit closed
+  the parent-bound tool closure leak only for MemoryModule. ToolsModule's
+  project-sync tools, JobModule's start/inspect/wait/cancel_job, and
+  MCPModule's bridged tools all used to reach back into parent's
+  service instances after a child was spawned. ``_apply_shared_modules``
+  now strips parent-bound entries from ``child._tools`` and either
+  inherits via ``inherit_storage_from`` (share-mode) or builds child-
+  owned services and re-registers tools (isolated default). Each
+  module declares ``_SERVICE_BOUND_TOOL_NAMES`` so the factory has a
+  single source of truth.
+- **B5 deprecation warnings**: ``AuthorizationEngine._switch_policy /
+  _clear_all_scopes`` and ``LlamAgent._ask_confirmation`` (v3.7.3
+  aliases scheduled for v3.8.1 removal) now emit ``DeprecationWarning``.
+- **A-F25 ``_infer_parameters`` consolidation**: was implemented twice
+  (LlamAgent, ToolRegistry), only LlamAgent supported ``skip_first_arg``.
+  Extracted to a single module-level helper; ``@tool(takes_agent=True)``
+  via decorator without explicit ``parameters=`` now produces a
+  schema that omits the framework-injected first arg.
+- **A-F26 ``_MODE_KEYS`` derived**: was hand-synchronized with
+  ``_MODE_DEFAULTS``; now derived + import-time consistency check.
+- **C-F4 YAML type-checking**: ``_load_yaml`` rejects wrong-type
+  values for ``list`` / ``dict`` fields with a warning; pre-fix
+  ``skill: { dirs: "string" }`` silently broke downstream iteration.
+- **C-F6 SSRF guard now DNS-resolves hostnames**: ``web_fetch``
+  rejects internal corporate hostnames whose DNS resolves to RFC1918,
+  plus DNS-rebinding-style attacks. Unresolvable names default to
+  reject (conservative).
+- **C-F7 sandbox ``_DANGEROUS_BUILTINS`` extended**: agent-created
+  tool code was checked against ``{exec, eval}`` only. Now also
+  rejects ``compile``, ``__import__``, ``getattr/setattr/delattr``,
+  ``globals/locals/vars``, ``breakpoint``, ``open``. Docstring
+  downgraded from "restricted execution" to "best-effort sandbox".
+- **C-F14 exception cause chain**: ``agent_tools._validate_syntax``
+  / ``_compile`` re-raise with ``from e`` so debugging tool-creation
+  failures preserves the original SyntaxError / Exception.
+- **A-F1 dead test fixture attribute**: ``bare_agent`` continued to
+  set ``agent._in_hook = False`` — production moved hook-reentry
+  tracking to a class-level ``threading.local`` in v3.7.3. Removed
+  the dead line.
+
+The above are all v3.5-twin-mistake-class debt cleared by the
+v3.7-closing full-codebase audit (memory rule: post-version review
+covers the whole architecture, not just the diff).
+
 v3.7.7 highlights (test fixture + log hygiene + child-contract docs):
 - **`init_agent` test fixture** (additive, internal-only): a new
   ``init_agent`` fixture in ``tests_internal/conftest.py`` constructs a
@@ -371,7 +420,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "3.7.7"
+__version__ = "3.7.8"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager
