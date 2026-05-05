@@ -3,16 +3,26 @@ Agent custom tool manager: lets LlamAgent write code to create tools by itself.
 
 Features:
 - Isolated storage per persona (JSON persistence)
-- AST safety checks: rejects __ access and dangerous builtin calls (exec, eval)
+- AST safety checks: rejects __ access and dangerous builtin calls
+  (v3.7.8: exec / eval / compile / __import__ / getattr / setattr /
+  delattr / globals / locals / vars / breakpoint / open)
 - String literal path scanning: rejects code with hardcoded paths outside the project directory
-- Restricted execution: compiled in a namespace with dangerous builtins removed
+- Best-effort restricted execution: compiled in a namespace with dangerous builtins removed
 - Admin common tools are stored in __common__.json
 - Role custom tools are stored in {persona_id}.json
 
 Security note:
-    AST checks + restricted builtins target LLM-generated code. The zone system
-    in call_tool() provides runtime path safety for created tools. For maximum
-    isolation, use a container/microVM sandbox backend.
+    AST checks + restricted builtins target LLM-generated code in the
+    common case (model accidentally writes ``open(...)`` or ``getattr``).
+    This is a **best-effort** sandbox, **not** a security boundary
+    against motivated adversarial code: a determined attacker can still
+    escape via constant-folded string concatenation
+    (e.g. ``getattr(x, '__cl' + 'ass__')``) since the AST scan only
+    rejects literal-string attribute access of magic names. v3.7.8
+    deliberately leaves that hardening for a follow-up. The zone
+    system in call_tool() provides the actual runtime path safety. For
+    real isolation against adversarial code, use a container / microVM
+    sandbox backend.
 """
 
 import ast
@@ -26,9 +36,25 @@ logger = logging.getLogger(__name__)
 
 
 # Builtins blacklisted from tool code execution.
-# Only block code-nesting primitives (exec/eval). Normal imports are allowed;
-# the zone system handles path safety at runtime.
-_DANGEROUS_BUILTINS = {"exec", "eval"}
+# v3.7.3 + v3.7.8: code-nesting + introspection primitives that let
+# motivated adversarial code escape the per-tool namespace. The zone
+# system handles path safety at runtime; this is a best-effort sandbox
+# against accidental usage, NOT a security boundary against a
+# determined attacker (see class docstring on the security note).
+_DANGEROUS_BUILTINS = frozenset({
+    # Code-nesting (v3.7.3 minimum)
+    "exec", "eval",
+    # v3.7.8: introspection that lets sandboxed code reach arbitrary
+    # attributes / globals via name lookup. None of these are needed
+    # by a well-formed tool; rejecting them at the AST layer prevents
+    # the obvious chains (still leaves bypass opportunities via
+    # constant-folding string literals — that hardening is out-of-scope
+    # for v3.7.8, deferred to a follow-up).
+    "compile", "__import__",
+    "getattr", "setattr", "delattr",
+    "globals", "locals", "vars",
+    "breakpoint", "open",
+})
 
 
 class AgentToolManager:
