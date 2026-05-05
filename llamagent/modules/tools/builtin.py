@@ -100,26 +100,52 @@ def web_search(agent, query: str, num_results: int = 5) -> str:
 # Web page fetching
 # ============================================================
 
-def _is_private_or_local_host(host: str) -> bool:
-    """v3.7.3: reject SSRF targets — loopback, link-local (169.254.0.0/16,
-    where AWS / GCP / Azure metadata services live), RFC1918 private
-    networks, and IPv6 equivalents. Hostnames that don't resolve to an IP
-    are passed through (the model may be fetching by name); resolution
-    happens lazily inside requests / urllib.
-    """
-    import ipaddress
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        # Hostname (not bare IP) — only reject the common metadata
-        # shorthand explicitly; leave generic DNS resolution to requests.
-        lowered = host.lower()
-        return lowered in {"localhost", "metadata.google.internal", "metadata"}
+def _ip_is_private(ip) -> bool:
+    """Return True for any loopback / link-local / private / multicast /
+    reserved / unspecified IPv4 or IPv6 address."""
     return (
         ip.is_loopback or ip.is_link_local
         or ip.is_private or ip.is_multicast
         or ip.is_reserved or ip.is_unspecified
     )
+
+
+def _is_private_or_local_host(host: str) -> bool:
+    """v3.7.3 + v3.7.8: reject SSRF targets.
+
+    v3.7.3 caught loopback / link-local / RFC1918 IPs and a handful of
+    metadata-name shortcuts.
+
+    v3.7.8 C-F6: extends the hostname path to actually DNS-resolve the
+    name and reject if any returned address is private. Pre-fix
+    ``gitlab.corp.local`` (or any internal hostname that DNS resolves
+    to RFC1918) sailed through and was fetched. Failure to resolve is
+    treated as deny (conservative; mirrors the existing behavior for
+    explicit "metadata" string).
+    """
+    import ipaddress
+    import socket
+    try:
+        ip = ipaddress.ip_address(host)
+        return _ip_is_private(ip)
+    except ValueError:
+        # Hostname — DNS resolve and reject if any address is private.
+        lowered = host.lower()
+        if lowered in {"localhost", "metadata.google.internal", "metadata"}:
+            return True
+        try:
+            addrs = socket.getaddrinfo(host, None)
+        except (socket.gaierror, socket.herror):
+            # Unresolvable — conservative: reject.
+            return True
+        for addr_info in addrs:
+            try:
+                ip = ipaddress.ip_address(addr_info[4][0])
+            except (ValueError, IndexError):
+                continue
+            if _ip_is_private(ip):
+                return True
+        return False
 
 
 @tool(
