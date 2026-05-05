@@ -282,7 +282,8 @@ def bare_agent(mock_llm_client):
     agent._persisted_files = _OD()
     agent._hooks = {}
     agent._session_started = False
-    agent._in_hook = False
+    # v3.7.8: removed ``agent._in_hook = False`` — see tests_internal/conftest.py
+    # for the rationale (v3.7.3 moved tracking to class-level threading.local).
     agent.mode = "interactive"
     agent._controller = None
     agent._current_task_id = None
