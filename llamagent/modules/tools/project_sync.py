@@ -149,6 +149,25 @@ class ProjectSyncService:
         self._file_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
 
+    def __deepcopy__(self, memo):
+        """v3.7.8: latent v3.5+ bug fix — ``threading.Lock`` is not
+        deepcopy-safe, so step 7 of the child agent factory
+        (``copy.deepcopy(parent._tools)``) crashed whenever a parent
+        had ``ToolsModule`` loaded (which closes over this service in
+        registered tools). Pre-fix this required the test to never
+        register ToolsModule before spawning a child, which is
+        unrealistic for production.
+
+        ``__deepcopy__`` returns ``self`` because ProjectSyncService
+        is a per-agent service handle that the child agent factory
+        explicitly rebinds in ``_apply_shared_modules`` (B2 fix).
+        Returning self short-circuits the lock-walk; the parent's
+        service remains attached to the closure briefly, then step 8
+        strips and rebinds against child's own ProjectSyncService.
+        """
+        memo[id(self)] = self
+        return self
+
     # ================================================================
     # Lock management
     # ================================================================
