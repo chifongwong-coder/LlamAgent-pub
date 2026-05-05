@@ -167,7 +167,9 @@ class AgentToolManager:
         try:
             ast.parse(code)
         except SyntaxError as e:
-            raise ValueError(f"Code syntax error: {e}")
+            # v3.7.8 C-F14: preserve cause chain so debugging tool-creation
+            # failures from LLM-generated code can see the original parse error.
+            raise ValueError(f"Code syntax error: {e}") from e
 
     @staticmethod
     def _validate_safety(code: str) -> None:
@@ -224,7 +226,8 @@ class AgentToolManager:
         try:
             exec(code, namespace)  # noqa: S102 — restricted builtins, AST-validated
         except Exception as e:
-            raise ValueError(f"Code compilation failed: {e}")
+            # v3.7.8 C-F14: preserve cause chain.
+            raise ValueError(f"Code compilation failed: {e}") from e
 
         if name not in namespace:
             defined = [k for k, v in namespace.items()
