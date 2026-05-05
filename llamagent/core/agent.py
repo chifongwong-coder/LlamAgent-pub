@@ -1564,8 +1564,18 @@ class LlamAgent:
         self._confirm_wait_time += time.time() - t0
         return response
 
-    # v3.7.3: backward-compat alias (removed in v3.8.1).
-    _ask_confirmation = ask_confirmation
+    # v3.7.3: backward-compat alias.
+    # v3.7.8: now wrapped to emit DeprecationWarning so third-party plugins
+    # get a clear signal before v3.8.1 removes it entirely.
+    def _ask_confirmation(self, *args, **kwargs):
+        """Deprecated: use ask_confirmation. Removed in v3.8.1."""
+        import warnings
+        warnings.warn(
+            "LlamAgent._ask_confirmation is deprecated, "
+            "use ask_confirmation instead (removed in v3.8.1)",
+            DeprecationWarning, stacklevel=2,
+        )
+        return self.ask_confirmation(*args, **kwargs)
 
     def chat(self, user_input: str) -> str:
         """

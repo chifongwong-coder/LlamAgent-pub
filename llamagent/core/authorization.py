@@ -582,10 +582,28 @@ class AuthorizationEngine:
         self.state.session_scopes.clear()
         return AuthorizationUpdateResult(events=events, changed=changed)
 
-    # v3.7.3: backward-compat aliases for the underscore-prefixed names
-    # (used by tests and possibly third-party plugins). Removed in v3.8.1.
-    _switch_policy = switch_policy
-    _clear_all_scopes = clear_all_scopes
+    # v3.7.3: backward-compat aliases for the underscore-prefixed names.
+    # v3.7.8: now wrapped to emit DeprecationWarning so third-party plugins
+    # get a clear signal before v3.8.1 removes them entirely.
+    def _switch_policy(self, *args, **kwargs):
+        """Deprecated: use switch_policy. Removed in v3.8.1."""
+        import warnings
+        warnings.warn(
+            "AuthorizationEngine._switch_policy is deprecated, "
+            "use switch_policy instead (removed in v3.8.1)",
+            DeprecationWarning, stacklevel=2,
+        )
+        return self.switch_policy(*args, **kwargs)
+
+    def _clear_all_scopes(self, *args, **kwargs):
+        """Deprecated: use clear_all_scopes. Removed in v3.8.1."""
+        import warnings
+        warnings.warn(
+            "AuthorizationEngine._clear_all_scopes is deprecated, "
+            "use clear_all_scopes instead (removed in v3.8.1)",
+            DeprecationWarning, stacklevel=2,
+        )
+        return self.clear_all_scopes(*args, **kwargs)
 
     def authorization_status(self) -> dict:
         """
