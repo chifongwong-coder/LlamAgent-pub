@@ -55,6 +55,18 @@ class JobHandle:
         self._timed_out = False  # Distinct from cancelled — stable terminal state
         self._state_lock = threading.Lock()  # Protects state transitions
 
+    def __deepcopy__(self, memo):
+        """v3.7.8: ``threading.Lock`` / ``threading.Event`` / ``threading.Thread``
+        are not deepcopy-safe. JobService holds JobHandle instances; if
+        deepcopy walks through JobService (e.g. via parent's ``start_job``
+        tool closure during child agent factory step 7) it crashes. Returning
+        ``self`` is correct because the child agent factory rebinds the
+        service handle in step 8 (B2 fix); a brief shared reference during
+        the deepcopy walk is harmless.
+        """
+        memo[id(self)] = self
+        return self
+
     def start(self, executor_fn) -> None:
         """
         Start execution in a background thread.

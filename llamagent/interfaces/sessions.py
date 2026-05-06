@@ -31,7 +31,12 @@ def list_sessions(agent) -> list[dict]:
             if raw is None:
                 continue
             data = json.loads(raw)
-            if data.get("version") != 1:
+            # v3.7.8: accept both v=1 (history+summary only) and v=2 (adds
+            # delegation_depth + active_packs). Pre-fix this dropped to
+            # `version != 1` which silently hid every v=2 session from the
+            # CLI / Web UI session list — PersistenceModule started writing
+            # v=2 in v3.7.5.
+            if data.get("version") not in (1, 2):
                 continue
 
             history = data.get("history", [])

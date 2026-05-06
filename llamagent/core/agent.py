@@ -232,6 +232,75 @@ class SimpleReAct(ExecutionStrategy):
 
 
 # ======================================================================
+# Tool parameter schema inference (v3.7.8: extracted to module level)
+# ======================================================================
+
+
+def _infer_parameters_helper(func: Callable, skip_first_arg: bool = False) -> dict:
+    """Infer JSON Schema parameter definitions from a function signature.
+
+    Simple mapping: str -> string, int -> integer, float -> number, bool -> boolean.
+
+    Args:
+        func: function to inspect
+        skip_first_arg: when True, the first positional parameter is
+            skipped (used for ``takes_agent=True`` tools where the
+            first arg is framework-injected and must not appear in
+            the JSON schema the model sees).
+
+    v3.7.8: extracted to module level so both ``LlamAgent.register_tool``
+    and ``ToolRegistry.register`` share a single inference path. Pre-fix
+    they had two independent implementations — only the LlamAgent version
+    supported ``skip_first_arg``, so a ``@tool(takes_agent=True)`` function
+    registered through the decorator without explicit ``parameters=``
+    would produce a schema containing the framework-injected first arg.
+    """
+    import inspect
+
+    sig = inspect.signature(func)
+    properties = {}
+    required = []
+    first_seen = False
+
+    type_mapping = {
+        str: "string",
+        int: "integer",
+        float: "number",
+        bool: "boolean",
+    }
+
+    for param_name, param in sig.parameters.items():
+        if param_name in ("self", "cls"):
+            continue
+        # Skip *args and **kwargs — they are not named parameters in JSON Schema
+        if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            continue
+        # v3.6: framework-injected first arg (agent) is not part of
+        # the model-facing schema.
+        if skip_first_arg and not first_seen:
+            first_seen = True
+            continue
+        first_seen = True
+
+        # Type inference
+        if param.annotation != inspect.Parameter.empty:
+            json_type = type_mapping.get(param.annotation, "string")
+        else:
+            json_type = "string"
+
+        properties[param_name] = {"type": json_type}
+
+        # Whether required
+        if param.default is inspect.Parameter.empty:
+            required.append(param_name)
+
+    result = {"type": "object", "properties": properties}
+    if required:
+        result["required"] = required
+    return result
+
+
+# ======================================================================
 # Module base class
 # ======================================================================
 
@@ -1055,63 +1124,8 @@ class LlamAgent:
 
         return schemas
 
-    @staticmethod
-    def _infer_parameters(func: Callable, skip_first_arg: bool = False) -> dict:
-        """
-        Infer JSON Schema parameter definitions from a function signature.
-
-        Simple mapping: str -> string, int -> integer, float -> number, bool -> boolean.
-
-        Args:
-            func: function to inspect
-            skip_first_arg: when True, the first positional parameter is
-                skipped (used for ``takes_agent=True`` tools where the
-                first arg is framework-injected and must not appear in
-                the JSON schema the model sees).
-        """
-        import inspect
-
-        sig = inspect.signature(func)
-        properties = {}
-        required = []
-        first_seen = False
-
-        type_mapping = {
-            str: "string",
-            int: "integer",
-            float: "number",
-            bool: "boolean",
-        }
-
-        for param_name, param in sig.parameters.items():
-            if param_name in ("self", "cls"):
-                continue
-            # Skip *args and **kwargs — they are not named parameters in JSON Schema
-            if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
-                continue
-            # v3.6: framework-injected first arg (agent) is not part of
-            # the model-facing schema.
-            if skip_first_arg and not first_seen:
-                first_seen = True
-                continue
-            first_seen = True
-
-            # Type inference
-            if param.annotation != inspect.Parameter.empty:
-                json_type = type_mapping.get(param.annotation, "string")
-            else:
-                json_type = "string"
-
-            properties[param_name] = {"type": json_type}
-
-            # Whether required
-            if param.default is inspect.Parameter.empty:
-                required.append(param_name)
-
-        result = {"type": "object", "properties": properties}
-        if required:
-            result["required"] = required
-        return result
+    # v3.7.8: delegate to module-level helper (shared with ToolRegistry).
+    _infer_parameters = staticmethod(_infer_parameters_helper)
 
     # ============================================================
     # Event Hook system (v1.8)
@@ -1296,14 +1310,18 @@ class LlamAgent:
     _MAX_MODE_STEPS = 10
 
     # v2.0: mode-aware config defaults. -1 = unlimited/disabled.
-    _MODE_KEYS = {"max_react_steps", "max_duplicate_actions", "react_timeout",
-                  "max_observation_tokens"}
     _MODE_DEFAULTS = {
         "task":       {"max_react_steps": 50, "react_timeout": 600,
                        "max_duplicate_actions": 5, "max_observation_tokens": 5000},
         "continuous": {"max_react_steps": -1, "react_timeout": 600,
                        "max_duplicate_actions": -1, "max_observation_tokens": 10000},
     }
+    # v3.7.8: derive _MODE_KEYS from _MODE_DEFAULTS so adding a key to one mode
+    # automatically extends snapshot/restore. Pre-fix this was a hand-synchronized
+    # set — the kind of parallel-maintenance hazard that the v3.5 twin-factory
+    # mistake was made of. _check_mode_defaults_consistent() runs at module
+    # import to catch any future drift between mode dicts.
+    _MODE_KEYS = frozenset(_MODE_DEFAULTS["task"].keys())
 
     _PREPARE_TOOL_NAME = "_report_question"
 
@@ -1564,8 +1582,18 @@ class LlamAgent:
         self._confirm_wait_time += time.time() - t0
         return response
 
-    # v3.7.3: backward-compat alias (removed in v3.8.1).
-    _ask_confirmation = ask_confirmation
+    # v3.7.3: backward-compat alias.
+    # v3.7.8: now wrapped to emit DeprecationWarning so third-party plugins
+    # get a clear signal before v3.8.1 removes it entirely.
+    def _ask_confirmation(self, *args, **kwargs):
+        """Deprecated: use ask_confirmation. Removed in v3.8.1."""
+        import warnings
+        warnings.warn(
+            "LlamAgent._ask_confirmation is deprecated, "
+            "use ask_confirmation instead (removed in v3.8.1)",
+            DeprecationWarning, stacklevel=2,
+        )
+        return self.ask_confirmation(*args, **kwargs)
 
     def chat(self, user_input: str) -> str:
         """
@@ -2539,3 +2567,17 @@ class LlamAgent:
             },
             "conversation_turns": sum(1 for m in self.history if m.get("role") == "user"),
         }
+
+
+# v3.7.8: module-import-time check that all modes declare the same keys
+# (paranoia against future drift in _MODE_DEFAULTS that would silently
+# break snapshot/restore in set_mode()).
+_first_mode = next(iter(LlamAgent._MODE_DEFAULTS.values()))
+for _mode_name, _mode_dict in LlamAgent._MODE_DEFAULTS.items():
+    if set(_mode_dict.keys()) != set(_first_mode.keys()):
+        raise AssertionError(
+            f"_MODE_DEFAULTS[{_mode_name!r}] keys {sorted(_mode_dict.keys())} "
+            f"differ from {sorted(_first_mode.keys())} (all modes must declare "
+            f"the same keys for set_mode snapshot/restore to be balanced)"
+        )
+del _first_mode

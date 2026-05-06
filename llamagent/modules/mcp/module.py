@@ -34,9 +34,20 @@ class MCPModule(Module):
     name = "mcp"
     description = "MCP external integration: connect to external system tools and services"
 
+    # v3.7.8: declare shareable so child agents that explicitly request it
+    # (`AgentExecutionPolicy.share_parent_modules=["mcp"]`) reuse the
+    # parent's MCPClient. Default is still NOT to share — the connection
+    # lifecycle is parent-bound (parent shutdown disconnects child too),
+    # so opt-in carries a documented caveat.
+    shareable = True
+
     def __init__(self):
         self.client = None
         self._connected: bool = False
+        # v3.7.8: track bridged tool names so child agent factory can
+        # strip parent-bound closures. Static ClassVar isn't usable here
+        # because tool names depend on connected servers.
+        self._bridged_tool_names: set[str] = set()
 
     def on_attach(self, agent):
         """
@@ -145,10 +156,33 @@ class MCPModule(Module):
                 parameters=param_map.get(name, {}),
                 tier="default",
             )
+            # v3.7.8: track for child factory closure-strip
+            self._bridged_tool_names.add(name)
 
         tool_count = len(bridged)
         if tool_count > 0:
             logger.info("[MCP] Bridged %d tools to registry", tool_count)
+
+    @property
+    def _service_bound_tool_names(self) -> set[str]:
+        """v3.7.8: MCP tool names depend on connected servers — return the
+        live set tracked by ``_bridge_tools``. Used by child agent factory
+        to strip parent-bound closures from ``child._tools``."""
+        return set(self._bridged_tool_names)
+
+    def inherit_storage_from(self, parent_mod: "MCPModule") -> None:
+        """v3.7.8: child agent factory calls this when
+        ``share_parent_modules=["mcp"]`` is explicitly opted into.
+
+        Reuses the parent's MCPClient + connection state. **Caveat**: the
+        client holds stdio subprocess handles owned by the parent agent;
+        when the parent shuts down, the connection drops for the child too.
+        Callers must ensure the parent outlives the child or accept the
+        coupling.
+        """
+        self.client = parent_mod.client
+        self._connected = parent_mod._connected
+        self._bridged_tool_names = set(parent_mod._bridged_tool_names)
 
     # ============================================================
     # Lifecycle

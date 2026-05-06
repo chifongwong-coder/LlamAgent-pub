@@ -477,6 +477,18 @@ class Config:
                         value = value.lower() in ("true", "1", "yes")
                     elif expected_type in (int, float, str) and not isinstance(value, expected_type):
                         value = expected_type(value)
+                    elif expected_type in (list, dict) and not isinstance(value, expected_type):
+                        # v3.7.8 C-F4: previously list/dict types were silently
+                        # accepted regardless of YAML value type — e.g.
+                        # ``skill: { dirs: "single_string" }`` set
+                        # ``config.skill_dirs = "single_string"`` and downstream
+                        # code iterated chars. Reject and keep default.
+                        logger.warning(
+                            "YAML config '%s' expected %s, got %s; using default",
+                            ".".join(yaml_path), expected_type.__name__,
+                            type(value).__name__,
+                        )
+                        continue
                 except (ValueError, TypeError):
                     logger.warning(
                         "YAML config: cannot convert '%s' to %s for '%s', skipping",

@@ -291,17 +291,17 @@ def test_apply_update_and_clear_scopes(bare_agent):
     assert result.changed is True
     assert engine.state.session_scopes == []
 
-    # -- _clear_all_scopes: empty state is no-op --
-    assert engine._clear_all_scopes().changed is False
+    # -- clear_all_scopes: empty state is no-op --
+    assert engine.clear_all_scopes().changed is False
 
-    # -- _clear_all_scopes: populated state clears everything --
+    # -- clear_all_scopes: populated state clears everything --
     engine.state.task_scopes["T1"] = [
         ApprovalScope(scope="task", zone="project", actions=["write"], path_prefixes=["a"])
     ]
     engine.state.session_scopes = [
         ApprovalScope(scope="session", zone="project", actions=["read"], path_prefixes=["c"])
     ]
-    result = engine._clear_all_scopes(reason="test")
+    result = engine.clear_all_scopes(reason="test")
     assert result.changed is True
     assert engine.state.task_scopes == {}
     assert engine.state.session_scopes == []
