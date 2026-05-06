@@ -232,6 +232,17 @@ class Config:
         self.changeset_max_count: int = 200
         self.changeset_max_total_bytes: int = 50 * 1024 * 1024  # 50 MB
 
+        # v3.8: project_dir / playground_dir promoted from post-init mutable
+        # agent attributes to Config fields. None default → LlamAgent.__init__
+        # falls back to os.getcwd() (legacy behavior). Setting these BEFORE
+        # constructing the agent eliminates the v3.7 init-ordering bug class
+        # where __init__-time work (scope seeding, write_root computation,
+        # snapshot capture) ran on a stale project_dir that the child-agent
+        # factory was about to overwrite. Intentionally NOT in _YAML_MAP —
+        # these are runtime-determined paths, not user YAML configuration.
+        self.project_dir: str | None = None
+        self.playground_dir: str | None = None
+
         # v3.3: Snapshot (D7) — coarse-grained safety net for CI / auto_approve.
         # Lazy: a single tar-free directory copy of agent.write_root captured
         # before the first project-zone write or command invocation.

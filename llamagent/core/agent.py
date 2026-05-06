@@ -510,8 +510,20 @@ class LlamAgent:
         self.confirm_handler: Callable[[ConfirmRequest], ConfirmResponse | bool] | None = None
         self.interaction_handler = None  # v1.8.2: injected by caller for ask_user tool
         self._confirm_wait_time: float = 0.0  # Accumulated confirmation wait, excluded from react_timeout
-        self.project_dir: str = os.path.realpath(os.getcwd())
-        self.playground_dir: str = os.path.realpath(os.path.join(self.project_dir, "llama_playground"))
+        # v3.8: project_dir / playground_dir read from Config when set,
+        # otherwise fall back to legacy os.getcwd() behavior. Lifting these
+        # to Config eliminates the init-ordering bug class where
+        # post-construct mutation (`agent.project_dir = ...`) by callers
+        # leaves __init__-time work (scope seeding, write_root, snapshot)
+        # anchored to the wrong directory.
+        if config.project_dir:
+            self.project_dir: str = os.path.realpath(config.project_dir)
+        else:
+            self.project_dir: str = os.path.realpath(os.getcwd())
+        if config.playground_dir:
+            self.playground_dir: str = os.path.realpath(config.playground_dir)
+        else:
+            self.playground_dir: str = os.path.realpath(os.path.join(self.project_dir, "llama_playground"))
         try:
             os.makedirs(self.playground_dir, exist_ok=True)
         except OSError:
