@@ -17,6 +17,68 @@ Core design:
 A bare LlamAgent is a fully functional conversational Agent. Each
 module loaded grants a new capability.
 
+v3.8 highlights (architectural root-cause fix: ``project_dir`` lifted
+to Config — eliminates the entire init-ordering bug class):
+- **`Config.project_dir` / `Config.playground_dir` fields**: two new
+  None-default fields on ``Config``. ``LlamAgent.__init__`` now reads
+  them first, falling back to ``os.getcwd()`` when unset. Setting
+  them BEFORE constructing the agent makes ``__init__``-time work
+  (auto_approve scope seeding, ``write_root`` derivation, snapshot
+  capture) anchor to the right paths from instruction one. Not in
+  ``_YAML_MAP`` — these are runtime-determined paths, not user YAML
+  configuration.
+- **Child-agent factory step 1 wires config**: the dir computation
+  that used to live in step 4 (post-construct ``child.project_dir =
+  child_root``) is moved up to step 1 (pre-construct
+  ``config.project_dir = child_root``). ``LlamAgent(config)`` then
+  runs through ``__init__`` on the right paths, so the seeded
+  auto_approve scope, computed write_root, and captured snapshot are
+  all rooted correctly. Step 4 reduced to a comment marker; step 6's
+  isolated-branch ``_seed_auto_approve_scope`` re-call removed
+  (redundant — ``__init__`` already seeded with the right path).
+- **`agent_runner.py` (process-runner subprocess) wires config first**:
+  same pattern. The subprocess now constructs ``Config`` with
+  ``project_dir`` set, then ``LlamAgent(config)`` — instead of
+  post-construct attribute mutation that pre-v3.8 left the
+  subprocess child running its first instructions on the wrong paths.
+- **`ApprovalScope.source` typed Literal**: the ``source`` metadata
+  field is now ``ScopeSource``, a typed Literal listing all 8 emitter
+  sites (``contract``, ``seed``, ``interactive``, ``session_authorize``,
+  ``default``, ``trusted``, ``external``, plus the new ``auto_approve``
+  emitted by ``_seed_auto_approve_scope``). Audit logs now distinguish
+  the CI safety-net seed from contract / seed / import_scopes
+  sources. Pre-v3.8 the field was a free-form string with a stale
+  comment listing only 3 of the 6 then-emitted values.
+- **`init_agent` test fixture migrated**: sets ``config.project_dir
+  = tmp_path`` BEFORE ``LlamAgent(config)`` (was post-construct attr
+  mutation). ``test_init_agent_runs_full_init`` upgraded from weak
+  ``len(scopes) >= 1`` to path-precise: seeded scope's
+  ``source == "auto_approve"`` and ``path_prefixes[0]`` equals
+  ``tmp_path``. Absorbs v3.8.1's Q7 (demo test tightening).
+- **What v3.8 closes (init-ordering bug class)**: every previous
+  ``__init__``-time work that depended on ``self.project_dir`` (scope
+  seed, ``write_root``, ``_compute_snapshot_session_id``) was, pre-v3.8,
+  vulnerable to factory ``post_construct`` overwrite — the same
+  pattern that produced the v3.7.7 "stale auto_approve scope" issue
+  documented in v3.7.8's ABANDONED plan history. v3.8 closes the
+  whole class architecturally instead of patching individual
+  symptoms (the rejected "set then clean" approach).
+- **`write_root` lazy re-derive branch retained for tests**: the
+  ``write_root`` property's lazy re-derive (kicks in when
+  ``agent.project_dir`` differs from cached) used to be the only
+  defense against stale state. Post-v3.8 production never triggers
+  it — the only callers are bypass-init test fixtures that set
+  ``project_dir`` after ``LlamAgent.__new__()``. Branch documented
+  as test-only contract; do NOT remove.
+
+v3.7.7 highlights — known-issue block updated by v3.8: the previously
+listed "stale auto_approve scope in isolated children" issue was an
+audit-hygiene concern, not a security breach (correct production
+deployments never combine auto_approve+isolated-child + write outside
+child_root). v3.8 eliminates the underlying init-ordering bug class
+architecturally; v3.7.7 deployments are functionally correct, the
+cleanup lands in v3.8.
+
 v3.7.8 highlights (v3.7-closing audit cleanup pack):
 - **B1 sessions.py reads schema v=2**: ``interfaces/sessions.py`` listed
   v=1 only, so every session written since v3.7.5 (which bumped to v=2)
@@ -94,14 +156,16 @@ v3.7.7 highlights (test fixture + log hygiene + child-contract docs):
   with clear handling; v3.8 will decide opt-in mechanisms for the
   remaining two (`_persisted_files`, `inherit_runtime_hooks`).
 
-> **Known issue, fixed in v3.7.8**: with ``auto_approve=True`` AND
-> ``share_parent_project_dir=False`` (the researcher / writer / analyst /
-> delegate roles' default), an isolated child agent's ``session_scopes``
-> include both the parent's project directory AND the child's isolated
-> directory — leaking parent-write permission through what should be a
-> sandbox. Do NOT deploy v3.7.7 in that combination without the v3.7.8
-> hotfix patch. v3.7.7 deployments that don't combine those two flags
-> are unaffected.
+> **Known issue (downgraded by v3.8)**: v3.7.7 with ``auto_approve=True``
+> AND ``share_parent_project_dir=False`` had an audit-hygiene issue —
+> the isolated child's ``session_scopes`` lists carried both the parent's
+> path and the child's, redundant but not a security breach (the
+> contract still rejected writes outside ``write_root`` so no parent
+> escape was possible). v3.8 eliminates the underlying init-ordering
+> bug class architecturally by lifting ``project_dir`` to a ``Config``
+> field; v3.7.7 deployments are functionally correct, the cleanup
+> lands in v3.8. (The interim v3.7.8 plan that proposed a "set then
+> clean" patch was abandoned in favor of the v3.8 root-cause fix.)
 
 v3.7.6 highlights (multi-tenant builtins via takes_agent):
 - **`takes_agent` flag plumbed through the registry**: ``ToolInfo``,
@@ -420,7 +484,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "3.7.8"
+__version__ = "3.8"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager
