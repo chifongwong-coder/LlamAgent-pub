@@ -515,13 +515,17 @@ class LlamAgent:
         # to Config eliminates the init-ordering bug class where
         # post-construct mutation (`agent.project_dir = ...`) by callers
         # leaves __init__-time work (scope seeding, write_root, snapshot)
-        # anchored to the wrong directory.
-        if config.project_dir:
-            self.project_dir: str = os.path.realpath(config.project_dir)
+        # anchored to the wrong directory. ``getattr`` so older test stubs
+        # (MagicMock / hand-rolled namespaces) without the v3.8 fields
+        # continue to construct cleanly.
+        config_project_dir = getattr(config, "project_dir", None)
+        if config_project_dir:
+            self.project_dir: str = os.path.realpath(config_project_dir)
         else:
             self.project_dir: str = os.path.realpath(os.getcwd())
-        if config.playground_dir:
-            self.playground_dir: str = os.path.realpath(config.playground_dir)
+        config_playground_dir = getattr(config, "playground_dir", None)
+        if config_playground_dir:
+            self.playground_dir: str = os.path.realpath(config_playground_dir)
         else:
             self.playground_dir: str = os.path.realpath(os.path.join(self.project_dir, "llama_playground"))
         try:
