@@ -646,6 +646,7 @@ class LlamAgent:
         self._authorization_engine.add_scope(ApprovalScope(
             scope="session", zone="project", actions=["read", "write"],
             path_prefixes=[self.project_dir],
+            source="auto_approve",  # v3.8: typed audit-log marker
         ))
 
     # ============================================================

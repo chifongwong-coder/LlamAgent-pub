@@ -19,7 +19,7 @@ import shlex
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from llamagent.core.contract import AuthorizationUpdate, TaskModeState
 from llamagent.core.zone import (
@@ -41,6 +41,21 @@ logger = logging.getLogger(__name__)
 # ApprovalScope (moved from zone.py in v1.9.6)
 # ======================================================================
 
+# v3.8: typed Literal for ApprovalScope.source — every emitter audited
+# and listed here. Add to this Literal AND a comment line below when a
+# new emitter is introduced.
+ScopeSource = Literal[
+    "contract",          # default — confirmed via interactive ConfirmRequest
+    "seed",              # config.authorization_scopes (preset)
+    "interactive",       # InteractivePolicy popup approval
+    "session_authorize", # ConfirmRequest(kind="session_authorize")
+    "default",           # ContinuousPolicy default project-zone scope
+    "trusted",           # import_scopes(source="trusted") — parent agent / persisted session
+    "external",          # import_scopes(source="external") — untrusted JSON entry (v3.7.4)
+    "auto_approve",      # v3.8: _seed_auto_approve_scope when config.auto_approve=True
+]
+
+
 @dataclass
 class ApprovalScope:
     """One approved authorization scope, stored after contract confirmation."""
@@ -54,7 +69,10 @@ class ApprovalScope:
     expires_at: float | None = None     # expiry time (None = no expiry)
     max_uses: int | None = None         # max usage count (None = unlimited)
     uses: int = 0                       # current usage count
-    source: str = "contract"            # "contract" | "seed" | "api"
+    # v3.8: typed Literal — see ScopeSource above. Default "contract"
+    # because the most common path (user confirms a ConfirmRequest) does
+    # not pass an explicit source.
+    source: ScopeSource = "contract"
     # v3.3: command-pattern allowlist for the `command` tool. When the
     # current command (normalized via shlex) matches any fnmatch pattern
     # here, the scope grants permission for it. None means "no command-
