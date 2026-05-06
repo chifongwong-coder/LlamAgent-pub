@@ -69,19 +69,19 @@ def main():
         if spec_config.get("child_agent_runlog_max_bytes"):
             config.child_agent_runlog_max_bytes = spec_config["child_agent_runlog_max_bytes"]
 
-        # Create agent
-        agent = LlamAgent(config)
-
-        # Set project_dir and playground_dir from spec config (FS isolation).
-        # v3.4 R3: dict key + default flipped from workspace_mode="sandbox"
-        # to share_parent_project_dir=False (False = isolated, True = shared).
+        # v3.8: project_dir / playground_dir wired into Config BEFORE
+        # constructing the agent. Pre-v3.8 this happened post-construct
+        # (`agent.project_dir = ...`), leaving __init__-time work anchored
+        # to the wrong directory. v3.4 R3: dict key + default flipped from
+        # workspace_mode="sandbox" to share_parent_project_dir=False
+        # (False = isolated, True = shared).
         import os
         share_parent_project_dir = spec_config.get("share_parent_project_dir", False)
         if share_parent_project_dir:
             if spec_config.get("project_dir"):
-                agent.project_dir = spec_config["project_dir"]
+                config.project_dir = spec_config["project_dir"]
             if spec_config.get("playground_dir"):
-                agent.playground_dir = spec_config["playground_dir"]
+                config.playground_dir = spec_config["playground_dir"]
         else:
             # Isolated: child gets its own project_dir under parent's playground
             parent_playground = spec_config.get("parent_playground_dir") or spec_config.get("playground_dir")
@@ -89,9 +89,13 @@ def main():
                 task_id = os.path.splitext(os.path.basename(args.spec))[0]
                 child_root = os.path.join(parent_playground, "children", task_id)
                 os.makedirs(child_root, exist_ok=True)
-                agent.project_dir = child_root
-                agent.playground_dir = os.path.join(child_root, "llama_playground")
-                os.makedirs(agent.playground_dir, exist_ok=True)
+                config.project_dir = child_root
+                config.playground_dir = os.path.join(child_root, "llama_playground")
+                # NOTE: don't mkdir(config.playground_dir) — LlamAgent.__init__
+                # owns that mkdir. Single-owner principle.
+
+        # Create agent (v3.8: __init__ now uses config.project_dir / playground_dir)
+        agent = LlamAgent(config)
 
         # v2.7: import parent scopes when sharing parent project_dir
         parent_scopes = spec.get("parent_scopes")
