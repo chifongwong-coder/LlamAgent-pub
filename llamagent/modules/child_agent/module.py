@@ -1368,6 +1368,33 @@ class ChildAgentModule(Module):
             config.max_react_steps = default_steps
             config.react_timeout = default_timeout
 
+        # v3.8: project_dir / playground_dir resolved on the CONFIG before
+        # constructing the agent. Pre-v3.8 this happened post-construct in
+        # step 4, leaving __init__-time work (scope seeding, write_root,
+        # snapshot capture) anchored to the parent's project_dir then
+        # silently overwritten — the bug class v3.8 closes architecturally.
+        # share_parent_project_dir: production paths always set policy via
+        # ROLE_POLICIES; this fallback handles direct test/external callers.
+        # Note: divergence with runners/process.py (which uses ``else False``
+        # for cross-process safety) is intentional — both fallbacks are dead
+        # in production, surfacing only in test/external paths.
+        share_parent_project_dir = (
+            spec.policy.share_parent_project_dir if spec.policy else True
+        )
+        if share_parent_project_dir:
+            config.project_dir = parent.project_dir
+            config.playground_dir = parent.playground_dir
+        else:
+            child_task_id = self._ensure_task_id(spec)
+            child_root = os.path.join(parent.playground_dir, "children", child_task_id)
+            os.makedirs(child_root, exist_ok=True)
+            config.project_dir = child_root
+            config.playground_dir = os.path.join(child_root, "llama_playground")
+            # NOTE: don't os.makedirs(config.playground_dir) here — LlamAgent
+            # __init__ runs `os.makedirs(self.playground_dir, exist_ok=True)`
+            # itself. Single-owner principle: factory only mkdirs the namespace
+            # parent (child_root) it just created.
+
         # ---- 2. Determine base LLM (with optional budget tracking) ----
         if spec.policy and spec.policy.model:
             base_llm = parent._get_llm(spec.policy.model)
@@ -1390,25 +1417,10 @@ class ChildAgentModule(Module):
         child.conversation = child.history
         child._execution_strategy = SimpleReAct()
 
-        # ---- 4. project_dir / playground_dir ----
-        # share_parent_project_dir: production paths always set policy via
-        # ROLE_POLICIES; this fallback handles direct test/external callers.
-        # Note: divergence with runners/process.py (which uses ``else False``
-        # for cross-process safety) is intentional — both fallbacks are dead
-        # in production, surfacing only in test/external paths.
-        share_parent_project_dir = (
-            spec.policy.share_parent_project_dir if spec.policy else True
-        )
-        if share_parent_project_dir:
-            child.project_dir = parent.project_dir
-            child.playground_dir = parent.playground_dir
-        else:
-            child_task_id = self._ensure_task_id(spec)
-            child_root = os.path.join(parent.playground_dir, "children", child_task_id)
-            os.makedirs(child_root, exist_ok=True)
-            child.project_dir = child_root
-            child.playground_dir = os.path.join(child_root, "llama_playground")
-            os.makedirs(child.playground_dir, exist_ok=True)
+        # ---- 4. (removed in v3.8) ----
+        # project_dir / playground_dir setup moved to step 1 — set on
+        # CONFIG before LlamAgent(config) so __init__ runs on the right
+        # paths. Eliminates the entire init-ordering bug class.
 
         # ---- 5. Mode setup ----
         if is_continuous:
@@ -1443,16 +1455,16 @@ class ChildAgentModule(Module):
             child.mode = "interactive"
 
         # ---- 6. Authorization scope ----
-        # share_parent inherits parent scopes; isolated mode re-seeds the
-        # auto_approve auto-scope against the child's NEW project_dir
-        # (LlamAgent.__init__ ran on the pre-overwrite path). Gated by
-        # auto_approve so the interactive contract is preserved.
+        # share_parent inherits parent scopes. Isolated mode no longer
+        # needs an explicit re-seed: v3.8 sets config.project_dir BEFORE
+        # __init__, so LlamAgent.__init__ → _seed_auto_approve_scope
+        # already seeded the right path. The post-construct re-seed
+        # branch present pre-v3.8 was the workaround for the very
+        # init-ordering bug v3.8 eliminates.
         if share_parent_project_dir:
             parent_scopes = parent._authorization_engine.export_scopes()
             if parent_scopes:
                 child._authorization_engine.import_scopes(parent_scopes)
-        else:
-            child._seed_auto_approve_scope()
 
         # ---- 7. Tools: deepcopy from parent, filter, prune ----
         child._tools = {}
