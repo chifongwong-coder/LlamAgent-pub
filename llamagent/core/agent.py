@@ -640,10 +640,14 @@ class LlamAgent:
     def _seed_auto_approve_scope(self) -> None:
         """Seed a session-scoped project read/write scope when auto_approve is on.
 
-        Called from ``__init__`` and from the child_agent factory after the
-        factory overwrites the child's ``project_dir`` (so the seeded scope
-        covers the child's own dir, not the parent's the constructor ran
-        against). No-op when auto_approve is False.
+        Called from ``__init__`` only. Pre-v3.8 the child_agent factory
+        also called this after post-construct ``child.project_dir = ...``
+        overwrite, to cover the child's NEW project_dir (the constructor
+        had run on the parent's). v3.8 lifted ``project_dir`` to a Config
+        field set BEFORE construction, so ``__init__`` already seeds at
+        the right path and the factory re-seed call was removed (see
+        ``modules/child_agent/module.py`` step 6). No-op when auto_approve
+        is False.
         """
         if not getattr(self.config, "auto_approve", False):
             return
@@ -705,9 +709,16 @@ class LlamAgent:
     @property
     def write_root(self) -> str:
         """Frozen write boundary. Re-derived lazily if `project_dir` is
-        reassigned (common in tests via __new__ + manual setup); otherwise
-        stable for the agent's lifetime. Mid-session changes to
-        `config.edit_root` after first read do not take effect (D7.1).
+        reassigned (test fixture pattern only); otherwise stable for the
+        agent's lifetime. Mid-session changes to `config.edit_root` after
+        first read do not take effect (D7.1).
+
+        v3.8 note: production callers no longer post-init mutate
+        ``agent.project_dir`` (``Config.project_dir`` is set before
+        ``__init__``), so the re-derive branch below fires only for
+        bypass-init test fixtures that do ``LlamAgent.__new__()`` followed
+        by manual ``agent.project_dir = ...``. **DO NOT remove** — the
+        branch is the contract those test paths rely on.
         """
         # If project_dir has been reassigned since init (test setup pattern),
         # recompute once so write_root tracks the new project_dir.
