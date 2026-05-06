@@ -165,12 +165,14 @@ class ProcessRunnerBackend(AgentRunnerBackend):
                 getattr(self._parent_config, "child_agent_runlog_max_bytes", 10 * 1024 * 1024)
                 if self._parent_config else 10 * 1024 * 1024
             ),
-            # ``project_dir`` and ``playground_dir`` live on the agent (set in
-            # ``LlamAgent.__init__``), not on Config — reading via ``getattr`` from
-            # ``self._parent_config`` always returned None, so the subprocess
-            # silently fell back to its inherited cwd. Source from
-            # ``self._parent_agent`` so the child actually inherits the parent's
-            # paths (or the parent_playground for isolated children).
+            # v3.8: ``project_dir`` and ``playground_dir`` are now BOTH on
+            # Config (config.project_dir / config.playground_dir) AND on the
+            # agent (set in ``LlamAgent.__init__`` from config). Sourcing from
+            # ``self._parent_agent`` is still the right choice because:
+            #   1. parent_config may be the user-supplied template before agent
+            #      construction filled in defaults — agent has the resolved value
+            #   2. for isolated children parent_playground points at the playground
+            #      the parent agent actually wrote to, which is what we want.
             "project_dir": (
                 self._parent_agent.project_dir if self._parent_agent else None
             ),

@@ -510,8 +510,24 @@ class LlamAgent:
         self.confirm_handler: Callable[[ConfirmRequest], ConfirmResponse | bool] | None = None
         self.interaction_handler = None  # v1.8.2: injected by caller for ask_user tool
         self._confirm_wait_time: float = 0.0  # Accumulated confirmation wait, excluded from react_timeout
-        self.project_dir: str = os.path.realpath(os.getcwd())
-        self.playground_dir: str = os.path.realpath(os.path.join(self.project_dir, "llama_playground"))
+        # v3.8: project_dir / playground_dir read from Config when set,
+        # otherwise fall back to legacy os.getcwd() behavior. Lifting these
+        # to Config eliminates the init-ordering bug class where
+        # post-construct mutation (`agent.project_dir = ...`) by callers
+        # leaves __init__-time work (scope seeding, write_root, snapshot)
+        # anchored to the wrong directory. ``getattr`` so older test stubs
+        # (MagicMock / hand-rolled namespaces) without the v3.8 fields
+        # continue to construct cleanly.
+        config_project_dir = getattr(config, "project_dir", None)
+        if config_project_dir:
+            self.project_dir: str = os.path.realpath(config_project_dir)
+        else:
+            self.project_dir: str = os.path.realpath(os.getcwd())
+        config_playground_dir = getattr(config, "playground_dir", None)
+        if config_playground_dir:
+            self.playground_dir: str = os.path.realpath(config_playground_dir)
+        else:
+            self.playground_dir: str = os.path.realpath(os.path.join(self.project_dir, "llama_playground"))
         try:
             os.makedirs(self.playground_dir, exist_ok=True)
         except OSError:
@@ -624,16 +640,21 @@ class LlamAgent:
     def _seed_auto_approve_scope(self) -> None:
         """Seed a session-scoped project read/write scope when auto_approve is on.
 
-        Called from ``__init__`` and from the child_agent factory after the
-        factory overwrites the child's ``project_dir`` (so the seeded scope
-        covers the child's own dir, not the parent's the constructor ran
-        against). No-op when auto_approve is False.
+        Called from ``__init__`` only. Pre-v3.8 the child_agent factory
+        also called this after post-construct ``child.project_dir = ...``
+        overwrite, to cover the child's NEW project_dir (the constructor
+        had run on the parent's). v3.8 lifted ``project_dir`` to a Config
+        field set BEFORE construction, so ``__init__`` already seeds at
+        the right path and the factory re-seed call was removed (see
+        ``modules/child_agent/module.py`` step 6). No-op when auto_approve
+        is False.
         """
         if not getattr(self.config, "auto_approve", False):
             return
         self._authorization_engine.add_scope(ApprovalScope(
             scope="session", zone="project", actions=["read", "write"],
             path_prefixes=[self.project_dir],
+            source="auto_approve",  # v3.8: typed audit-log marker
         ))
 
     # ============================================================
@@ -688,9 +709,16 @@ class LlamAgent:
     @property
     def write_root(self) -> str:
         """Frozen write boundary. Re-derived lazily if `project_dir` is
-        reassigned (common in tests via __new__ + manual setup); otherwise
-        stable for the agent's lifetime. Mid-session changes to
-        `config.edit_root` after first read do not take effect (D7.1).
+        reassigned (test fixture pattern only); otherwise stable for the
+        agent's lifetime. Mid-session changes to `config.edit_root` after
+        first read do not take effect (D7.1).
+
+        v3.8 note: production callers no longer post-init mutate
+        ``agent.project_dir`` (``Config.project_dir`` is set before
+        ``__init__``), so the re-derive branch below fires only for
+        bypass-init test fixtures that do ``LlamAgent.__new__()`` followed
+        by manual ``agent.project_dir = ...``. **DO NOT remove** — the
+        branch is the contract those test paths rely on.
         """
         # If project_dir has been reassigned since init (test setup pattern),
         # recompute once so write_root tracks the new project_dir.
