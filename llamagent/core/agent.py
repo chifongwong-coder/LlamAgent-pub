@@ -7,7 +7,8 @@ After loading modules via register_module(), the Agent gains tool calling, RAG, 
 Core components:
 - LlamAgent:         Main Agent class containing the chat() entry point and run_react() engine
 - Module:             Pluggable module base class that interacts with the Agent via pipeline callbacks
-- ExecutionStrategy:  Pluggable execution strategy interface, replacing the deprecated on_execute callback
+- ExecutionStrategy:  Pluggable execution strategy interface (the on_execute
+                      legacy callback was removed in v3.8.2)
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from llamagent.core.config import Config
 from llamagent.core.contract import PipelineOutcome
 from llamagent.core.zone import ConfirmRequest, ConfirmResponse
 from llamagent.core.controller import ModeAction, TaskModeController
+from llamagent.core.snapshot import SnapshotConfig, SnapshotService
 from llamagent.core.hooks import (
     CallableHandler,
     HookCallback,
@@ -198,19 +200,16 @@ class SimpleReAct(ExecutionStrategy):
     """
     Default execution strategy: directly runs the ReAct loop.
 
-    Returns text response directly when there are no tool_calls; otherwise loops through tool calls.
+    Returns text response directly when there are no tool_calls; otherwise
+    loops through tool calls.
 
-    Backward compatible: if a module overrides on_execute() (deprecated), its result is used first.
+    v3.8.2 E5: the ``Module.on_execute`` fallback loop was removed.
+    Modules that previously intercepted execution must now register an
+    ``ExecutionStrategy`` via ``agent.set_execution_strategy(...)`` (the
+    pattern PlanningModule already uses). See v3.8.2 release notes.
     """
 
     def execute(self, query: str, context: str, agent: LlamAgent) -> str:
-        # Backward compatibility: check if any module intercepts via on_execute callback
-        for mod in agent.modules.values():
-            if type(mod).on_execute is not Module.on_execute:
-                result = mod.on_execute(query, context)
-                if result is not None:
-                    return result
-
         # Get tool schemas
         tools_schema = agent.get_all_tool_schemas()
 
@@ -438,16 +437,16 @@ class Module:
         """
         return response
 
-    # --- Deprecated Callbacks (backward-compatible shims for un-migrated modules) ---
-
-    def on_execute(self, query: str, context: str) -> str | None:
-        """
-        [Deprecated] Execution interception callback; returning non-None skips default execution.
-
-        In the target architecture, this is replaced by ExecutionStrategy. This method is retained
-        only for backward compatibility with modules that have not yet migrated (e.g., reasoning module).
-        """
-        return None
+    # v3.8.2 E5: ``on_execute`` callback removed. Modules that need to
+    # intercept the execution flow must now register an
+    # ``ExecutionStrategy`` via ``agent.set_execution_strategy(...)``.
+    # PlanningModule.on_attach has used this pattern since v3.7; the
+    # parallel on_execute fallback in SimpleReAct.execute (and the base
+    # method here) was a deprecated shim retained for un-migrated
+    # modules. v3.8.2 finishes the migration: anyone overriding
+    # on_execute now gets a no-op (Python doesn't error on a missing
+    # base method when subclasses define their own — but the framework
+    # never CALLS it, so the override is dead code).
 
 
 # ======================================================================
@@ -729,19 +728,48 @@ class LlamAgent:
         return self._write_root
 
     def ensure_snapshot(self) -> str | None:
-        """v3.3 D7: capture a one-shot snapshot of write_root before any
-        state-changing operation (write_files, apply_patch, command).
+        """v3.3 D7 + v3.8.2 A1: capture a one-shot snapshot of write_root.
         Idempotent. No-op when snapshot is disabled (default in interactive
         mode). Auto-enabled when ``config.auto_approve == True``.
 
+        v3.8.2 A1 (P5 inversion): SnapshotService now lives in
+        ``core/snapshot.py`` and takes a value-object ``SnapshotConfig``
+        instead of holding an agent ref. Eliminates the
+        ``core/agent.py → modules/tools/snapshot.py`` reverse import.
+
         Returns the snapshot directory path on success, None otherwise.
         """
-        # Lazy-init the service so we don't pay the import cost when
-        # snapshot is disabled.
         if not hasattr(self, "_snapshot_service"):
-            from llamagent.modules.tools.snapshot import SnapshotService
-            self._snapshot_service = SnapshotService(self)
+            # v3.8.2 NIT-3: import hoisted to top of file (eliminates the
+            # lazy-import "half-init" latent failure surface — any import
+            # error now fails fast at module load instead of mid-__init__).
+            cfg = SnapshotConfig(
+                enabled=bool(getattr(self.config, "snapshot_enabled", False)
+                             or getattr(self.config, "auto_approve", False)),
+                max_size_mb=getattr(self.config, "snapshot_max_size_mb", 500),
+                snapshot_dir=getattr(self.config, "snapshot_dir", "") or "",
+                ignore_gitignore=getattr(self.config, "snapshot_ignore_gitignore", True),
+                retention_count=getattr(self.config, "snapshot_retention_count", 5),
+                session_id=self._compute_snapshot_session_id(),
+            )
+            self._snapshot_service = SnapshotService(
+                write_root=self.write_root,
+                playground_dir=self.playground_dir,
+                config=cfg,
+            )
         return self._snapshot_service.ensure_taken()
+
+    def _compute_snapshot_session_id(self) -> str:
+        """v3.8.2 A1: pluck a short session-id hint for snapshot naming.
+        Mirrors the pre-fix ``_session_id_hint`` logic, called once at
+        SnapshotService construction so the service stays agent-ref-free.
+        Tools module's scratch_service may not be attached yet (in
+        practice ``ensure_snapshot`` runs at end of ``__init__`` before
+        any modules register), so the pid fallback is the common path.
+        """
+        tools_mod = self.modules.get("tools")
+        sid = getattr(getattr(tools_mod, "scratch_service", None), "_scratch_id", None)
+        return (sid or f"pid{os.getpid()}")[:12]
 
     # ============================================================
     # Module management
@@ -811,10 +839,15 @@ class LlamAgent:
         """
         Get the active task ID for scope storage/lookup.
 
-        Priority: controller.state.task_id > _current_task_id (PlanReAct legacy).
+        Priority: controller.get_active_task_id() > _current_task_id
+        (PlanReAct legacy).
+
+        v3.8.2 P1-1: routed through the controller's public getter
+        rather than directly reading ``self._controller.state.task_id``
+        (信使 principle — agent doesn't inspect controller internals).
         """
         if self.mode == "task" and self._controller:
-            tid = self._controller.state.task_id
+            tid = self._controller.get_active_task_id()
             if tid:
                 return tid
         return getattr(self, "_current_task_id", None)

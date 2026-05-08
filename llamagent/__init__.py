@@ -17,6 +17,73 @@ Core design:
 A bare LlamAgent is a fully functional conversational Agent. Each
 module loaded grants a new capability.
 
+v3.8.2 highlights (architecture cleanup — A1 + E5 + P1-1 + P5-2 + P6-4
+audit, 7 git commits + 1 private audit doc, ~80 LOC net delete from
+twin-factory consolidation):
+
+- **A1 — SnapshotService P5 inversion**: ``modules/tools/snapshot.py``
+  relocated to ``core/snapshot.py``. Pre-fix ``core/agent.py`` ran
+  ``from llamagent.modules.tools.snapshot import SnapshotService``
+  inside ``ensure_snapshot`` (a core→modules reverse import) and
+  ``SnapshotService(self)`` held an agent ref. Now SnapshotService
+  takes a ``SnapshotConfig`` value object and write_root / playground_dir
+  primitives; agent.py constructs the config and passes it down. The
+  old import path keeps working as a 2-version DeprecationWarning shim
+  (slated for removal in v3.10).
+
+- **E5 — `Module.on_execute` removed (API break)**: Pre-fix
+  ``SimpleReAct.execute`` had a fallback loop calling
+  ``Module.on_execute`` on every module to support un-migrated modules.
+  PlanningModule was the last user; it now exclusively goes through
+  ``agent.set_execution_strategy(...)`` (the pattern it has used since
+  v3.7). Third-party modules that override ``on_execute`` are now
+  silent no-ops — must migrate to ``ExecutionStrategy``. Test
+  ``tests/test_integration.py:104+`` LegacyModule migrated to the new
+  idiom (subclass ExecutionStrategy + register in on_attach).
+
+- **P1-1 — `Controller.get_active_task_id` getter**: Pre-fix
+  ``LlamAgent.get_active_task_id`` read ``self._controller.state.task_id``
+  directly — 信使 principle violation (agent inspecting controller
+  internals). New ``TaskModeController.get_active_task_id`` public
+  method normalizes ``""`` → ``None`` so callers don't have to know
+  the reset-quirk. agent.py routes through it.
+
+- **P5-2 — `ToolsModule.build_isolated_for` + `JobModule.build_isolated_for`
+  consolidate twin-factory clone**: Pre-fix
+  ``modules/child_agent/module.py`` had two private helpers that
+  imported ToolsModule / ScratchService / ProjectSyncService /
+  ToolRegistry / JobModule / JobService internals (4+ layer-poking
+  imports) AND duplicated ~60 LOC of JobModule.on_attach's
+  register_tool block as ``_register_isolated_job_tools`` — a v3.5
+  twin-factory mistake. Now: the construction logic is on
+  ToolsModule / JobModule public class methods; child_agent calls
+  them through one public surface each. ``JobModule._register_job_tools_on``
+  is the single source of truth for the four job-tool registrations
+  (used by both on_attach and build_isolated_for). 60+ LOC clone gone,
+  net -113 LOC in child_agent/module.py.
+
+- **P6-4 — `child_agent_*` config field audit (RESOLVED-NO-OP)**:
+  v3.7.8 P1-P6 audit estimated "10 child_agent_* fields without
+  external consumers". v3.8.2 grep'd all 18 fields against actual
+  consumers (recorded in private docs/llamagent-v3.8.2-audit-child-agent-config.md).
+  Result: 18/18 fields LIVE — no fields removed. The docs commit is
+  the only deliverable for P6-4.
+
+> Migrating to v3.8.2 (集成开发者注意事项):
+>   - **API break**: ``Module.on_execute`` removed. Modules that
+>     overrode it must register an ``ExecutionStrategy`` via
+>     ``agent.set_execution_strategy(...)`` in ``on_attach`` (see
+>     PlanningModule for the canonical pattern, or the migrated
+>     ``tests/test_integration.py`` LegacyModule example).
+>   - **Import path moved (warning only)**:
+>     ``llamagent.modules.tools.snapshot`` is a 2-version deprecation
+>     shim re-exporting from ``llamagent.core.snapshot``. Update
+>     imports; shim removed in v3.10.
+>   - ``LlamAgent.get_active_task_id`` is the public API for
+>     querying the active task id; if you were reading
+>     ``agent._controller.state.task_id`` directly, switch to the
+>     accessor (also normalizes the empty-string reset).
+
 v3.8.1 highlights (round-7 static audit cleanup pack — 13 commits, 30
 findings closed, 1 builtin skill added):
 
@@ -586,7 +653,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "3.8.1"
+__version__ = "3.8.2"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager

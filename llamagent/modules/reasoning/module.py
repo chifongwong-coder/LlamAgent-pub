@@ -536,10 +536,10 @@ Please integrate the above results and provide a complete, coherent final answer
 
 class PlanningModule(Module):
     """
-    Planning module: creates PlanReAct execution strategy and injects into Agent via on_attach.
-
-    In the target architecture, injection is done via agent.set_execution_strategy();
-    the current transitional implementation uses the on_execute callback to intercept execution.
+    Planning module: creates PlanReAct execution strategy and injects
+    into Agent via on_attach using ``agent.set_execution_strategy(...)``.
+    v3.8.2 E5: the legacy ``on_execute`` callback shim was removed; the
+    strategy is the only injection point.
     """
 
     name: str = "planning"
@@ -573,19 +573,6 @@ class PlanningModule(Module):
 
         agent.set_execution_strategy(self.strategy)
 
-    def on_execute(self, query: str, context: str) -> str | None:
-        """
-        [Deprecated] Execution interception: delegates the request to the PlanReAct strategy.
-
-        Once the ExecutionStrategy interface in core is ready, this callback will no longer be needed.
-        This method is retained only for backward compatibility.
-        """
-        if self.strategy is None:
-            return None
-
-        try:
-            return self.strategy.execute(query, context, self.agent)
-        except Exception as e:
-            logger.error("PlanReAct execution error: %s", e, exc_info=True)
-            # Fall back to default conversation on error, do not block the user
-            return None
+    # v3.8.2 E5: ``on_execute`` removed. PlanningModule injects via
+    # ``agent.set_execution_strategy(self.strategy)`` in ``on_attach``;
+    # PlanReAct.execute is invoked by the dispatch path directly.

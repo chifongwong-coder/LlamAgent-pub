@@ -77,7 +77,7 @@ class TestModuleIntegration:
     """Consolidated module integration flow tests."""
 
     def test_module_integration_flow(self, mock_llm_client, tmp_path):
-        """Safety hooks, planning strategy, load order, and legacy on_execute compat."""
+        """Safety hooks, planning strategy, load order, and ExecutionStrategy injection (v3.8.2 E5)."""
         agent = _create_test_agent(mock_llm_client)
 
         # --- SafetyModule provides hooks without affecting tool execution ---
@@ -101,14 +101,28 @@ class TestModuleIntegration:
         assert agent2.has_module("planning")
         assert len(agent2.list_modules()) == 2
 
-        # --- Legacy on_execute compat ---
+        # --- Module-injected ExecutionStrategy (v3.8.2 E5 migration) ---
+        # Pre-v3.8.2 this exercised the deprecated Module.on_execute
+        # fallback. v3.8.2 removed that path; modules that need to
+        # intercept execution must register an ExecutionStrategy.
+        # The LegacyModule below shows the v3.8.2 pattern: subclass
+        # ExecutionStrategy, attach it in on_attach via
+        # agent.set_execution_strategy(...). PlanningModule has used
+        # this idiom since v3.7.
+        from llamagent.core.agent import ExecutionStrategy
+
         agent3 = _create_test_agent(mock_llm_client)
+
+        class LegacyStrategy(ExecutionStrategy):
+            def execute(self, query, context, agent):
+                return "legacy intercept"
 
         class LegacyModule(Module):
             name = "legacy"
             description = "legacy module"
-            def on_execute(self, query, context):
-                return "legacy intercept"
+            def on_attach(self, agent):
+                super().on_attach(agent)
+                agent.set_execution_strategy(LegacyStrategy())
 
         agent3.register_module(LegacyModule())
         mock_llm_client.set_responses([make_llm_response("should not reach")])

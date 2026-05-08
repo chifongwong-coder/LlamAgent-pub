@@ -303,143 +303,35 @@ def _strip_and_rebind_service_module(parent, child, mod_name, *, in_share):
 
 
 def _build_isolated_tools_module(child):
-    """v3.7.8 B2: set up child's own ToolsModule with child-owned services
-    and re-register the service-bound tools so closures bind to child's
-    project_sync_service / scratch_service.
+    """v3.7.8 B2 + v3.8.2 P5-2: delegated to ``ToolsModule.build_isolated_for``.
 
-    Skips the full ToolsModule.on_attach path (admin/role/disk tool loading)
-    to avoid duplicate I/O and persona-driven tool-set drift — child's
-    builtins / common / role tools are already in child._tools from step 7's
-    deepcopy of parent._tools. We only need to fix the service-bound tools.
+    Pre-v3.8.2 this helper imported ToolsModule + ScratchService +
+    ProjectSyncService + ToolRegistry and wired them up inline (4
+    layer-poking imports). v3.8.2 hoists the construction logic to a
+    public class method on ToolsModule itself; this thin wrapper just
+    plugs the new module instance into ``child.modules``.
     """
     from llamagent.modules.tools.module import ToolsModule
-    from llamagent.modules.tools.scratch import ScratchService
-    from llamagent.modules.tools.project_sync import ProjectSyncService
-    from llamagent.modules.tools.registry import ToolRegistry, global_registry
-
-    new_tools = ToolsModule()
-    new_tools.agent = child
-    new_tools.common_registry = global_registry
-    new_tools.agent_registry = ToolRegistry()
-    new_tools._is_admin = False
-    new_tools.scratch_service = ScratchService(
-        child, scratch_id=child.config.scratch_id
-    )
-    new_tools.project_sync_service = ProjectSyncService(
-        child, new_tools.scratch_service
-    )
-    child.modules["tools"] = new_tools
-    # _register_workspace_tools + _register_project_sync_tools call
-    # self.agent.register_tool which overwrites child._tools entries
-    # — closures now bind to new_tools.project_sync_service / scratch_service.
-    new_tools._register_workspace_tools()
-    new_tools._register_project_sync_tools()
+    child.modules["tools"] = ToolsModule.build_isolated_for(child)
 
 
 def _build_isolated_job_module(child):
-    """v3.7.8 B2: set up child's own JobModule with child-owned JobService
-    and re-register start_job/inspect_job/wait_job/cancel_job so closures
-    bind to child's service.
+    """v3.7.8 B2 + v3.8.2 P5-2: delegated to ``JobModule.build_isolated_for``.
 
-    Skips the SandboxModule hard-dependency check from JobModule.on_attach
-    — child's tool_executor was already inherited from parent in step 7.
+    Returns silently when ``child.tool_executor is None`` (build_isolated_for
+    returns None in that case — semantically equivalent to the pre-v3.8.2
+    'JobModule on_attach would log + return' early-exit).
+
+    Pre-v3.8.2 this helper had a 60+ line ``_register_isolated_job_tools``
+    sibling that duplicated the four register_tool calls from
+    JobModule.on_attach verbatim — a v3.5 twin-factory mistake. v3.8.2
+    consolidates the registrations into JobModule._register_job_tools_on
+    (called by both on_attach and build_isolated_for).
     """
     from llamagent.modules.job.module import JobModule
-    from llamagent.modules.job.service import JobService
-
-    if child.tool_executor is None:
-        # JobModule on_attach would log + return; same here.
-        return
-
-    new_job = JobModule()
-    new_job.agent = child
-    new_job.service = JobService(
-        max_active=getattr(child.config, "job_max_active", 10),
-        cancel_join_timeout=getattr(child.config, "job_cancel_join_timeout", 5.0),
-    )
-    child.modules["job"] = new_job
-    # Re-register the four job tools by calling on_attach's tool-registration
-    # block. JobModule.on_attach intermixes service init + tool registration;
-    # since we've already wired services, simulate the registration block by
-    # directly invoking it. Cleanest: refactor on_attach later; for now,
-    # just call _register_job_tools (which we add as a helper below) — but
-    # since on_attach already inlines the four register_tool calls without a
-    # named helper, we duplicate the block here.
-    _register_isolated_job_tools(child, new_job)
-
-
-def _register_isolated_job_tools(child, new_job):
-    """Re-register the four JobModule tools on ``child`` with closures bound
-    to ``new_job.service``. Mirrors the registration block in
-    ``JobModule.on_attach`` — kept inline to avoid touching JobModule's
-    on_attach flow in this commit.
-    """
-    import os
-    import json
-    import time
-
-    # _start_job — simplified from on_attach (uses takes_agent for child resolution)
-    child.register_tool(
-        name="start_job",
-        func=new_job._start_job,
-        description=(
-            "Execute a shell command as a managed job. "
-            "wait=True (default) blocks until completion and returns stdout/stderr. "
-            "wait=False starts the job asynchronously and returns a job_id for later polling. "
-            "cwd is the working directory: omit (default) to run in a per-session "
-            "scratch directory under llama_playground/ (ephemeral); a relative path "
-            "anchors to the project root (same as read_files / write_files); an "
-            "absolute path is used as-is."
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "command": {"type": "string", "description": "Shell command to execute"},
-                "cwd": {"type": ["string", "null"], "default": None,
-                        "description": "Working directory; None for scratch"},
-                "wait": {"type": "boolean", "description": "True=sync, False=async"},
-                "profile": {"type": "string", "description": "Execution profile name"},
-            },
-            "required": ["command"],
-        },
-        tier="common",
-        safety_level=2,
-        takes_agent=True,
-        path_extractor=lambda args, agent: [new_job._resolve_cwd(agent, args.get("cwd"))],
-    )
-    child.register_tool(
-        name="inspect_job",
-        func=new_job._inspect_job,
-        description="Non-blocking job inspection: returns status, output excerpt, and artifact summary",
-        parameters={
-            "type": "object",
-            "properties": {"job_id": {"type": "string"}},
-            "required": ["job_id"],
-        },
-        tier="common", safety_level=1, pack="job-followup",
-    )
-    child.register_tool(
-        name="wait_job",
-        func=new_job._wait_job,
-        description="Wait for an asynchronous job to complete and return its output",
-        parameters={
-            "type": "object",
-            "properties": {"job_id": {"type": "string"}},
-            "required": ["job_id"],
-        },
-        tier="common", safety_level=1, pack="job-followup",
-    )
-    child.register_tool(
-        name="cancel_job",
-        func=new_job._cancel_job,
-        description="Cancel a running job. The job is marked as cancelled and its result is discarded.",
-        parameters={
-            "type": "object",
-            "properties": {"job_id": {"type": "string"}},
-            "required": ["job_id"],
-        },
-        tier="common", safety_level=2, pack="job-followup",
-    )
+    new_job = JobModule.build_isolated_for(child)
+    if new_job is not None:
+        child.modules["job"] = new_job
 
 
 # LLM guide injected via on_context when runner is async (thread or process)

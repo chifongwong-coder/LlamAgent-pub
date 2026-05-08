@@ -102,6 +102,26 @@ class TaskModeController(ModeController):
     def is_idle(self) -> bool:
         return self.state.phase == "idle"
 
+    def get_active_task_id(self) -> str | None:
+        """v3.8.2 P1-1: public accessor for the active task id.
+
+        Returns the active task id, or ``None`` when idle. Note that
+        the underlying ``state.task_id`` is reset to empty string ``""``
+        between tasks (see ``reset`` below) — this getter normalizes
+        ``""`` to ``None`` so callers can use ``if tid is None: ...``
+        consistently.
+
+        ``TaskModeController.__init__`` (line 99 in this module) sets
+        ``self.state = TaskModeState()`` immediately, so the
+        ``self.state is None`` branch is defensive only — never fires
+        in production. Pre-v3.8.2 ``LlamAgent.get_active_task_id`` read
+        ``self._controller.state.task_id`` directly, violating the P1
+        信使 principle (agent inspecting controller internal state).
+        """
+        if self.state is None:
+            return None  # defensive
+        return self.state.task_id or None  # "" → None
+
     def reset(self) -> list[tuple[str, dict]]:
         """Reset to idle. Returns empty events (no scopes to revoke at controller level)."""
         self.state.phase = "idle"
