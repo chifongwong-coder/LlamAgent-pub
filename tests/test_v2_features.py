@@ -2694,8 +2694,13 @@ def test_consolidate_auto_trigger_hybrid(bare_agent, mock_llm_client, tmp_path):
         })),
     ])
 
-    # on_input triggers consolidation in hybrid mode
+    # on_input triggers consolidation in hybrid mode (background thread
+    # since v3.8.1 R7-#23). Wait for the worker to finish before
+    # asserting state — the background thread is a daemon and will
+    # complete the LLM-mocked review quickly.
     mod.on_input("hello")
+    if mod._consolidation_thread is not None:
+        mod._consolidation_thread.join(timeout=5.0)
 
     # Verify consolidation ran (last_consolidation updated)
     assert mod._last_consolidation > 0.0
