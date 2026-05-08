@@ -73,17 +73,25 @@ class MCPClient:
                     }
                 }
             timeout: Per-call timeout in seconds
-            max_retries: Maximum number of retries
+            max_retries: Maximum total attempts (NOT additional retries —
+                v3.8.1 R7-#30 clarification: ``range(self.max_retries)``
+                runs N total tries, not 1+N. Renamed semantically; the
+                attribute name kept for backward compatibility.
         """
         self.server_configs = server_configs
         self.timeout = timeout
-        self.max_retries = max_retries
+        self.max_retries = max_retries  # alias of "max_attempts" semantically
         # Active sessions: {server_name: ClientSession}
         self._sessions: dict[str, Any] = {}
         # Connection context managers (for cleanup)
         self._connections: dict[str, Any] = {}
         # Tool list cache: {server_name: [tool_object_list]}
         self._tools_cache: dict[str, list] = {}
+        # v3.8.1 R7-#2: persistent background event loop. All coroutines
+        # touching self._sessions (connect, call, disconnect) run on this
+        # loop so sessions never reference a destroyed loop.
+        from llamagent.modules.mcp._loop import PersistentEventLoop
+        self._loop = PersistentEventLoop(name="mcp-loop")
 
     # ============================================================
     # Connection Management
@@ -153,8 +161,13 @@ class MCPClient:
         self._connections[name] = client_ctx
         read, write = client
 
-        # Initialize MCP session (protocol handshake)
+        # v3.8.1 R7-#3: enter the ClientSession context manager so the
+        # disconnect path's ``await session.__aexit__(None, None, None)``
+        # has a matching __aenter__. Pre-fix __aexit__ ran without prior
+        # __aenter__, which is a protocol violation that some
+        # ClientSession implementations log a warning for.
         session = ClientSession(read, write)
+        await session.__aenter__()
         await asyncio.wait_for(session.initialize(), timeout=self.timeout)
 
         return session
@@ -173,8 +186,10 @@ class MCPClient:
         self._connections[name] = client_ctx
         read, write = client
 
-        # Initialize session
+        # v3.8.1 R7-#3: enter the ClientSession context manager (see
+        # _connect_stdio rationale).
         session = ClientSession(read, write)
+        await session.__aenter__()
         await asyncio.wait_for(session.initialize(), timeout=self.timeout)
 
         return session
@@ -405,27 +420,17 @@ class MCPToolBridge:
         mcp_client = self.mcp_client
 
         def bridge_func(**kwargs) -> str:
-            """Synchronous wrapper: calls async MCP tool, automatically handles event loop environment."""
-            try:
-                # Check if there's already a running event loop
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop and loop.is_running():
-                # Already in async environment, use thread pool to avoid blocking
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(
-                        asyncio.run,
-                        mcp_client.call_tool(server_name, tool.name, kwargs),
-                    )
-                    return future.result(timeout=mcp_client.timeout)
-            else:
-                # No event loop, create a new one
-                return asyncio.run(
-                    mcp_client.call_tool(server_name, tool.name, kwargs)
-                )
+            """Synchronous wrapper: calls async MCP tool on the client's
+            persistent loop. v3.8.1 R7-#2: pre-fix this opened a fresh
+            loop per call (or short-lived loop in a thread pool when an
+            outer loop was running) — both leaked sessions across loops.
+            Now all calls go through the persistent loop the session was
+            opened on.
+            """
+            return mcp_client._loop.submit(
+                mcp_client.call_tool(server_name, tool.name, kwargs),
+                timeout=mcp_client.timeout,
+            )
 
         # Set function metadata (used by tool registry)
         bridge_func.__doc__ = f"[{server_name}] {tool.description}"

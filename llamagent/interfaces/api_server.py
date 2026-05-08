@@ -81,6 +81,15 @@ rate_limit_store: dict[str, list[float]] = {}
 # Active ContinuousRunner instances per session
 runner_sessions: dict[str, tuple] = {}  # sid -> (ContinuousRunner, threading.Thread)
 
+# v3.8.1 R7-#5: single RLock guards all session-pool mutations
+# (agent_sessions / rate_limit_store / runner_sessions). Pre-fix
+# concurrent FastAPI requests racing on _get_agent / rate-limit checks
+# triggered "dictionary changed size during iteration" + double-create.
+# RLock (not Lock) because eviction may transitively re-enter session
+# APIs through agent.shutdown -> hooks; reentry from same thread is OK.
+import threading as _threading
+_session_lock = _threading.RLock()
+
 # Auth token (configured via environment variable, empty string = dev mode, no auth)
 API_AUTH_TOKEN = os.getenv("API_AUTH_TOKEN", "")
 
@@ -258,37 +267,49 @@ def _get_agent(session_id: str | None = None):
     If a session_id is specified, returns the Agent for that session (creates one if it doesn't exist).
     If not specified, returns the default instance.
     Automatically evicts the least recently used session when MAX_SESSIONS is exceeded.
+
+    v3.8.1 R7-#5 + cross-spec §9.5/§9.6: single RLock serializes session-
+    pool mutations. Eviction snapshots evictees inside the lock then runs
+    shutdown OUTSIDE the lock so a slow on_shutdown (e.g. memory
+    consolidation 1s join) doesn't block concurrent _get_agent calls.
     """
     sid = session_id or "default"
+    new_agent = None
+    evicted_to_shutdown: list = []  # snapshot of (sid, agent, runner_entry)
 
-    if sid in agent_sessions:
-        # LRU update: move the accessed session to the end
-        agent_sessions.move_to_end(sid)
-        return agent_sessions[sid]
+    with _session_lock:
+        if sid in agent_sessions:
+            # LRU update: move the accessed session to the end
+            agent_sessions.move_to_end(sid)
+            return agent_sessions[sid]
 
-    # Create a new session
-    logger.info("Creating new Agent instance: session=%s", sid)
-    if _agent_factory:
-        new_agent = _agent_factory()
-    else:
-        # Fallback: create a bare Agent directly
-        from llamagent.core import LlamAgent, Config
-        new_agent = LlamAgent(Config())
+        # Create a new session
+        logger.info("Creating new Agent instance: session=%s", sid)
+        if _agent_factory:
+            new_agent = _agent_factory()
+        else:
+            # Fallback: create a bare Agent directly
+            from llamagent.core import LlamAgent, Config
+            new_agent = LlamAgent(Config())
 
-    agent_sessions[sid] = new_agent
+        agent_sessions[sid] = new_agent
 
-    # Evict the oldest session
-    while len(agent_sessions) > MAX_SESSIONS:
-        evicted_sid, evicted_agent = agent_sessions.popitem(last=False)
-        # Stop runner if active for the evicted session
-        evicted_entry = runner_sessions.pop(evicted_sid, None)
+        # Snapshot evictees while holding the lock (atomic popitem),
+        # but defer shutdown() until OUTSIDE the lock so other sessions
+        # don't block on it.
+        while len(agent_sessions) > MAX_SESSIONS:
+            evicted_sid, evicted_agent = agent_sessions.popitem(last=False)
+            evicted_entry = runner_sessions.pop(evicted_sid, None)
+            evicted_to_shutdown.append((evicted_sid, evicted_agent, evicted_entry))
+
+    # Outside lock — slow on_shutdown doesn't block concurrent _get_agent
+    for evicted_sid, evicted_agent, evicted_entry in evicted_to_shutdown:
         if evicted_entry:
             evicted_runner, _ = evicted_entry
             try:
                 evicted_runner.stop()
             except Exception as e:
                 logger.error("Failed to stop runner for evicted session=%s: %s", evicted_sid, e)
-        # Shutdown agent (fires on_shutdown hooks: persistence save, cleanup, etc.)
         try:
             evicted_agent.shutdown()
         except Exception as e:
@@ -384,7 +405,8 @@ def create_api_server(
         logger.info("=" * 60)
 
         # Create the default Agent instance
-        agent_sessions["default"] = _agent_factory()
+        with _session_lock:
+            agent_sessions["default"] = _agent_factory()
         logger.info("Default Agent instance created")
 
         yield  # Server running...
@@ -392,21 +414,26 @@ def create_api_server(
         # Shutdown phase
         logger.info("LlamAgent API server shutting down...")
 
-        # Stop all active runners first (runners call agent.chat, so stop before agent shutdown)
-        for sid, (runner, thread) in list(runner_sessions.items()):
+        # Snapshot runner + agent sessions inside the lock, run shutdown
+        # outside (same pattern as _get_agent eviction).
+        with _session_lock:
+            runners_snapshot = list(runner_sessions.items())
+            runner_sessions.clear()
+            agents_snapshot = list(agent_sessions.items())
+            agent_sessions.clear()
+
+        for sid, (runner, thread) in runners_snapshot:
             try:
                 runner.stop()
                 thread.join(timeout=5)
             except Exception as e:
                 logger.error("Failed to stop runner for session=%s: %s", sid, e)
-        runner_sessions.clear()
 
-        for sid, agent in agent_sessions.items():
+        for sid, agent in agents_snapshot:
             try:
                 agent.shutdown()
             except Exception as e:
                 logger.error("Failed to shutdown agent session=%s: %s", sid, e)
-        agent_sessions.clear()
         logger.info("All Agent instances cleaned up")
 
     # --- Create FastAPI app ---
@@ -472,24 +499,57 @@ def create_api_server(
             if request.url.path in exempt_paths:
                 return await call_next(request)
 
-            client_ip = request.client.host if request.client else "unknown"
+            # v3.8.1 R7-#6: prefer X-Forwarded-For when present so
+            # reverse-proxy deployments (Nginx / Cloudflare / load
+            # balancer) don't bucket all clients into the proxy IP and
+            # rate-limit each other into oblivion. First IP in the chain
+            # is the original client. Operators must configure their
+            # reverse proxy to set this header — without it any caller
+            # could spoof.
+            xff = request.headers.get("x-forwarded-for", "")
+            if xff:
+                client_ip = xff.split(",")[0].strip() or (
+                    request.client.host if request.client else "unknown"
+                )
+            else:
+                client_ip = request.client.host if request.client else "unknown"
             now = time.time()
 
-            # Clean expired records + check rate limit
-            timestamps = rate_limit_store.get(client_ip, [])
-            timestamps = [t for t in timestamps if now - t < self.window_seconds]
+            # v3.8.1 R7-#5: rate_limit_store mutations under _session_lock
+            # alongside agent_sessions / runner_sessions. Same lock keeps
+            # the per-request acquire count to one (rate check usually
+            # follows _get_agent in the handler).
+            # v3.8.1 R7-#7: periodic prune of empty timestamp lists.
+            # Pre-fix `rate_limit_store` accumulated keys for every IP
+            # forever, even after the window expired and timestamps
+            # filtered to []. Prune every 256 dispatches.
+            with _session_lock:
+                timestamps = rate_limit_store.get(client_ip, [])
+                timestamps = [t for t in timestamps if now - t < self.window_seconds]
 
-            if len(timestamps) >= self.max_requests:
-                return JSONResponse(
-                    status_code=429,
-                    content={
-                        "error": "rate_limit_exceeded",
-                        "message": f"Too many requests, please retry after {self.window_seconds} seconds",
-                    }
-                )
+                if len(timestamps) >= self.max_requests:
+                    return JSONResponse(
+                        status_code=429,
+                        content={
+                            "error": "rate_limit_exceeded",
+                            "message": f"Too many requests, please retry after {self.window_seconds} seconds",
+                        }
+                    )
 
-            timestamps.append(now)
-            rate_limit_store[client_ip] = timestamps
+                timestamps.append(now)
+                rate_limit_store[client_ip] = timestamps
+
+                # v3.8.1 R7-#7: periodic prune of empty/stale entries.
+                # Counter on the middleware instance — cheap and bounded.
+                self._prune_counter = getattr(self, "_prune_counter", 0) + 1
+                if self._prune_counter >= 256:
+                    self._prune_counter = 0
+                    stale = [
+                        ip for ip, ts in rate_limit_store.items()
+                        if not [t for t in ts if now - t < self.window_seconds]
+                    ]
+                    for ip in stale:
+                        rate_limit_store.pop(ip, None)
             return await call_next(request)
 
     app.add_middleware(RateLimitMiddleware, max_requests=60, window_seconds=60)
@@ -810,11 +870,13 @@ def create_api_server(
         sid = request.session_id or "default"
         agent = _get_agent(sid)
 
-        if sid in runner_sessions:
-            raise HTTPException(
-                status_code=400,
-                detail={"error": "runner_already_active", "message": "Runner already active for this session. Stop it first."},
-            )
+        # v3.8.1 R7-#5: lock the runner_sessions check + insert
+        with _session_lock:
+            if sid in runner_sessions:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"error": "runner_already_active", "message": "Runner already active for this session. Stop it first."},
+                )
 
         # Switch to continuous mode
         try:
@@ -831,7 +893,8 @@ def create_api_server(
         runner_thread = threading.Thread(target=runner.run, daemon=True)
         runner_thread.start()
 
-        runner_sessions[sid] = (runner, runner_thread)
+        with _session_lock:
+            runner_sessions[sid] = (runner, runner_thread)
         return {"status": "started", "session_id": sid}
 
     @app.post(
@@ -846,7 +909,8 @@ def create_api_server(
     ):
         """Stop the ContinuousRunner for a session."""
         sid = session_id or "default"
-        entry = runner_sessions.pop(sid, None)
+        with _session_lock:
+            entry = runner_sessions.pop(sid, None)
         if not entry:
             raise HTTPException(
                 status_code=400,
@@ -1070,9 +1134,20 @@ def create_api_server(
         3. Server streams back {"type": "chunk", "content": "..."}
         4. Finally sends {"type": "done", "content": "full reply"}
         5. On error, returns {"type": "error", "content": "error message"}
+
+        Session routing (v3.8.1 R7-#8): per-session agent isolation via
+        URL query string ``?session_id=<sid>``. Pre-fix all WS clients
+        shared the singleton "default" agent so chat history /
+        persona / runner state leaked cross-client. Old clients without
+        the query string fall back to "default" (zero break). New
+        clients connect to e.g. ``wss://host/ws/chat?session_id=alice``
+        for isolation. Industry-standard pattern (Slack RTM / Discord
+        Gateway / OpenAI Realtime).
         """
         await websocket.accept()
-        logger.info("WebSocket client connected")
+        # v3.8.1 R7-#8: read session_id from URL query, fallback "default"
+        sid = websocket.query_params.get("session_id") or "default"
+        logger.info("WebSocket client connected: session=%s", sid)
 
         # Authentication (if token is configured)
         if API_AUTH_TOKEN:
@@ -1103,7 +1178,8 @@ def create_api_server(
                 await websocket.close(code=4002)
                 return
 
-        agent = _get_agent()
+        # v3.8.1 R7-#8: per-session agent (sid from URL query string)
+        agent = _get_agent(sid)
 
         try:
             while True:

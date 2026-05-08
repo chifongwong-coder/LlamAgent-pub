@@ -99,12 +99,23 @@ class ChromaVectorBackend(VectorBackend):
         if results and results["documents"]:
             for i, doc in enumerate(results["documents"][0]):
                 meta = results["metadatas"][0][i] if results["metadatas"] else {}
-                dist = results["distances"][0][i] if results["distances"] else 0
+                # v3.8.1 R7-#16: missing distances → score should be a
+                # sentinel (None), NOT 1.0. Pre-fix ``dist = 0`` mapped
+                # to ``score = 1.0`` (a perfect match) which contaminated
+                # rerank: a result with no distance info ranked above
+                # results with real distances. Now: missing distance →
+                # score=None; downstream rerankers must handle None
+                # explicitly (skip / penalize).
+                if results["distances"]:
+                    dist = results["distances"][0][i]
+                    score = round(1 / (1 + dist), 4)
+                else:
+                    score = None
                 items.append({
                     "id": results["ids"][0][i],
                     "text": doc,
                     "metadata": meta,
-                    "score": round(1 / (1 + dist), 4),
+                    "score": score,
                 })
         return items
 

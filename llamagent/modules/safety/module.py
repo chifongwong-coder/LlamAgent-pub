@@ -95,11 +95,30 @@ class SafetyModule(Module):
         return response
 
     def on_shutdown(self) -> None:
-        """Close audit log file handler to prevent resource leaks."""
+        """Close audit log file handlers added by THIS guard instance.
+
+        v3.8.1 R7-#22: only remove handlers self.guard added (tracked in
+        self.guard._own_handlers). Pre-fix walked logger.handlers[:] and
+        removed every handler — multi-agent deployments had agent A's
+        shutdown silence agent B's audit log because the underlying
+        logging.getLogger("safety_audit") is process-shared.
+        """
         if self.guard and hasattr(self.guard, '_logger'):
-            for handler in self.guard._logger.handlers[:]:
-                handler.close()
+            own_handlers = getattr(self.guard, '_own_handlers', None)
+            if own_handlers is None:
+                # Defensive: if older SafetyGuard instance lacks the
+                # tracking list, fall back to the v3.7.x behavior so
+                # tests with mock guards don't break — but log a warning
+                # so the issue surfaces in audit.
+                logger.debug("[Safety] guard lacks _own_handlers tracking; skipping handler cleanup")
+                return
+            for handler in list(own_handlers):
+                try:
+                    handler.close()
+                except Exception:
+                    pass
                 self.guard._logger.removeHandler(handler)
+            own_handlers.clear()
 
     # ------------------------------------------------------------------
     # Command Checking (for internal tool use)

@@ -226,7 +226,31 @@ class JobModule(Module):
             return os.path.realpath(getattr(agent, "playground_dir", os.getcwd()))
 
         if os.path.isabs(cwd):
-            return os.path.realpath(cwd)
+            resolved = os.path.realpath(cwd)
+            # v3.8.1 R7-#20: validate absolute cwd lives under
+            # ``playground_dir`` or ``write_root``. Pre-fix any absolute
+            # path was accepted, letting an auto_approve LLM run
+            # ``start_job(cwd="/etc", command="cat passwd")`` and
+            # bypass the sandbox boundary.
+            #
+            # round-4 fix: check the raw attr for empty BEFORE realpath.
+            # ``os.path.realpath("")`` silently returns ``os.getcwd()``
+            # which would make CWD a valid boundary on bare/half-init
+            # agents — defeating the whole check.
+            playground_raw = getattr(agent, "playground_dir", "") or ""
+            write_root_raw = getattr(agent, "write_root", "") or ""
+            boundaries = []
+            if playground_raw:
+                boundaries.append(os.path.realpath(playground_raw))
+            if write_root_raw:
+                boundaries.append(os.path.realpath(write_root_raw))
+            for boundary in boundaries:
+                if resolved == boundary or resolved.startswith(boundary + os.sep):
+                    return resolved
+            raise PermissionError(
+                f"start_job cwd {cwd!r} resolves outside playground_dir / "
+                f"write_root — refusing to execute"
+            )
 
         # Relative path -> anchor to project_dir (matches file-tool semantics)
         return os.path.realpath(os.path.join(agent.project_dir, cwd))
@@ -410,13 +434,46 @@ class JobModule(Module):
 
         Returns a list of dicts with path, size, and mtime fields,
         sorted by modification time (most recent first).
+
+        v3.8.1 R7-#21: when cwd is the agent's project_dir or write_root
+        (i.e. NOT a fresh scratch directory), os.walk could enumerate the
+        entire repository — leaking filename + size of every project
+        file to the model. Limit to top-level entries + cap to
+        ``_ARTIFACT_LIST_MAX`` items so a non-scratch cwd doesn't dump
+        the whole tree.
         """
         cwd = handle.cwd
         start_time = handle.start_time
         artifacts = []
+        # v3.8.1 R7-#21: when cwd is project_dir / write_root (not a
+        # per-job scratch dir), only enumerate top-level entries.
+        agent = getattr(self, "agent", None)
+        project_root = getattr(agent, "project_dir", "") if agent else ""
+        write_root = getattr(agent, "write_root", "") if agent else ""
+        deep_walk = True
+        if project_root:
+            try:
+                if os.path.realpath(cwd) == os.path.realpath(project_root):
+                    deep_walk = False
+            except OSError:
+                pass
+        if write_root and deep_walk:
+            try:
+                if os.path.realpath(cwd) == os.path.realpath(write_root):
+                    deep_walk = False
+            except OSError:
+                pass
 
         try:
-            for root, _dirs, files in os.walk(cwd):
+            if deep_walk:
+                walker = os.walk(cwd)
+            else:
+                # Top-level only (do not descend) — list files in cwd
+                walker = [(cwd, [], [
+                    name for name in os.listdir(cwd)
+                    if os.path.isfile(os.path.join(cwd, name))
+                ])]
+            for root, _dirs, files in walker:
                 for fname in files:
                     fpath = os.path.join(root, fname)
                     try:
@@ -429,12 +486,16 @@ class JobModule(Module):
                             })
                     except OSError:
                         continue
+                if not deep_walk:
+                    break  # top-level only
         except OSError:
             pass
 
         # Sort by modification time (most recent first)
         artifacts.sort(key=lambda a: a["mtime"], reverse=True)
-        return artifacts
+        # v3.8.1 R7-#21: cap to top 50 entries to avoid context blow-up
+        # on jobs that touch many files in scratch.
+        return artifacts[:50]
 
     # ================================================================
     # Profile resolution

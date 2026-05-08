@@ -59,9 +59,21 @@ MODULE_GROUPS = {
 
 
 def apply_presets(config, module_names: list[str]):
-    """Apply smart defaults for selected modules. Only sets values still at default."""
+    """Apply smart defaults for selected modules. Only sets values still at default.
+
+    v3.8.1 R7-#24: build the reference defaults from a Config instance
+    that bypasses ``_load_yaml`` / ``_apply_env_overrides``, so the
+    'still at default' comparison reflects code-level dataclass defaults
+    rather than the user's YAML / env overrides. Pre-fix calling
+    ``Config()`` re-loaded the user's YAML, so any key the user set
+    via YAML matched ``defaults`` and got silently overwritten by the
+    preset.
+    """
     from llamagent.core.config import Config
-    defaults = Config()
+    # Bypass init's YAML / env override paths; only run _set_defaults.
+    defaults = Config.__new__(Config)
+    defaults._set_defaults()
+    defaults._post_process()
     for name in module_names:
         for key, value in MODULE_PRESETS.get(name, {}).items():
             if hasattr(config, key) and getattr(config, key) == getattr(defaults, key):

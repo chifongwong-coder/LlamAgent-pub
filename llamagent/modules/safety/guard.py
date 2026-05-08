@@ -48,10 +48,20 @@ class SafetyGuard:
             r"(?i)\[INST\]|\[/INST\]|<\|system\|>|<\|user\|>",
         ]
 
-        # Command blacklist: high-risk system commands
+        # Command blacklist: high-risk system commands.
+        # v3.8.1 R7-#1: extended rm-rf patterns to cover variants pre-fix
+        # silently allowed: -rfv, -fr, --recursive --force long form, and
+        # split flags like ``rm -r -f /``. Regex still single-token best-
+        # effort; users wanting bulletproof shell parsing should run their
+        # agent under sandbox with execute_command + execution_policy
+        # restricting working directory (see SandboxModule).
         self._blocked_commands = [
-            r"\brm\s+(-\w*\s+)*-rf\b",      # rm -rf
-            r"\brm\s+(-\w*\s+)*-fr\b",      # rm -fr
+            r"\brm\s+(-\w*\s+)*-rf?\w*\b",   # rm -rf, -rfv, etc.
+            r"\brm\s+(-\w*\s+)*-fr?\w*\b",   # rm -fr, -frv, etc.
+            r"\brm\s+(-\w*\s+)*-r\b.*-f\b",  # rm -r ... -f (split flags)
+            r"\brm\s+(-\w*\s+)*-f\b.*-r\b",  # rm -f ... -r (split flags)
+            r"\brm\s+--recursive\b.*--force\b",   # long form
+            r"\brm\s+--force\b.*--recursive\b",   # long form, swapped
             r"\bmkfs\b",                      # format filesystem
             r"\bdd\s+",                       # dd disk operation
             r"\bshutdown\b",                  # shutdown
@@ -94,9 +104,19 @@ class SafetyGuard:
     # ------------------------------------------------------------------
 
     def _setup_logger(self, log_path: str) -> None:
-        """Configure audit logger."""
+        """Configure audit logger.
+
+        v3.8.1 R7-#22: track which handler we add so on_shutdown can
+        remove ONLY our handler. Pre-fix `removeHandler` walked
+        ``logger.handlers[:]`` which silently drops handlers other
+        SafetyGuard / SafetyModule instances added on the same shared
+        ``safety_audit`` logger — multi-agent deployments saw agent A's
+        shutdown silence agent B's audit log.
+        """
         self._logger = logging.getLogger("safety_audit")
         self._logger.setLevel(logging.INFO)
+        # v3.8.1 R7-#22: track handlers we add so we only remove our own
+        self._own_handlers: list[logging.Handler] = []
 
         if not self._logger.handlers:
             try:
@@ -106,10 +126,12 @@ class SafetyGuard:
                 )
                 handler.setFormatter(formatter)
                 self._logger.addHandler(handler)
+                self._own_handlers.append(handler)
             except IOError:
                 # Cannot write to log file, use console output
                 handler = logging.StreamHandler()
                 self._logger.addHandler(handler)
+                self._own_handlers.append(handler)
 
     # ------------------------------------------------------------------
     # Input Checking

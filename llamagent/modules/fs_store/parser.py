@@ -1,13 +1,66 @@
 """Markdown parsing utilities for FS-based storage.
 
-Provides frontmatter parsing, section splitting, and frontmatter rendering.
-Uses simple string parsing — no PyYAML dependency.
+v3.8.1 R7-#12: frontmatter parsing delegated to ``python-frontmatter``
+(industry-standard wrapper around ``yaml.safe_load``; same approach
+Hermes / Nanobot / OpenCode all use). The legacy 50-line custom
+line-parser is preserved as ``_legacy_parse_frontmatter`` for fallback
+when strict YAML parsing fails on user files written under v3.7.x's
+permissive subset (description with unquoted ':', tab indentation,
+trailing comma in lists, raw '{...}' values, etc.).
+
+Fallback is NOT time-bounded — kept indefinitely so legacy skill files
+keep loading. The framework emits a structured ``[skill-migrate]``
+warning per file when fallback fires; the ``migrate-skills`` builtin
+skill picks up these warnings and offers to repair the files in place.
 """
 
 import re
 import logging
 
+import frontmatter as _frontmatter
+
 logger = logging.getLogger(__name__)
+
+
+def _split_list_items_respecting_quotes(inner: str) -> list[str]:
+    """v3.8.1 R7-#13: split inline-list inner content by ',' but
+    respect quoted-string boundaries.
+
+    Used by ``_parse_value`` (legacy fallback path; strict YAML in
+    ``parse_frontmatter`` doesn't go through here). Pre-fix a list like
+    ``["hello, world", "next"]`` got split into 4 items because the
+    plain ``inner.split(",")`` ignored quotes.
+    """
+    items: list[str] = []
+    cur: list[str] = []
+    in_quotes: str | None = None
+    escape = False
+    for ch in inner:
+        if escape:
+            cur.append(ch)
+            escape = False
+            continue
+        if ch == "\\" and in_quotes == '"':
+            cur.append(ch)
+            escape = True
+            continue
+        if in_quotes:
+            cur.append(ch)
+            if ch == in_quotes:
+                in_quotes = None
+            continue
+        if ch in ('"', "'"):
+            in_quotes = ch
+            cur.append(ch)
+            continue
+        if ch == ",":
+            items.append("".join(cur).strip())
+            cur = []
+            continue
+        cur.append(ch)
+    if cur:
+        items.append("".join(cur).strip())
+    return items
 
 
 def _parse_value(raw: str):
@@ -36,7 +89,10 @@ def _parse_value(raw: str):
         inner = value[1:-1].strip()
         if not inner:
             return []
-        items = [item.strip() for item in inner.split(",")]
+        # v3.8.1 R7-#13: quote-aware split. Pre-fix ``inner.split(",")``
+        # broke list elements that themselves contained commas (e.g.
+        # ``["hello, world", "next"]`` got split to 4 items).
+        items = _split_list_items_respecting_quotes(inner)
         return [_parse_value(item) for item in items]
 
     # Quoted string — strip quotes and return as-is
@@ -60,26 +116,61 @@ def _parse_value(raw: str):
     return value
 
 
-def parse_frontmatter(content: str) -> tuple[dict, str]:
-    """Parse YAML frontmatter from markdown content.
+def parse_frontmatter(content: str, *, filepath: str | None = None) -> tuple[dict, str]:
+    """Parse YAML frontmatter from markdown content (v3.8.1 R7-#12).
 
-    Frontmatter is expected between ``---`` markers at the start of the file.
+    Strict YAML parse via ``python-frontmatter`` first; falls back to the
+    legacy lenient line-parser when strict fails. Fallback emits a
+    ``[skill-migrate]`` warning so the builtin migrate-skills skill can
+    offer to repair the file in place when the user asks.
+
+    Args:
+        content: full markdown text (may include ``---`` frontmatter markers).
+        filepath: optional path for the warning context (skill migrator
+            scrapes log lines for paths to repair).
 
     Returns:
-        (metadata_dict, body_text). If no frontmatter is found, returns
-        ({}, content).
+        (metadata_dict, body_text). If no frontmatter, returns ({}, content).
     """
     if not content:
         return {}, ""
 
     stripped = content.lstrip("\n")
+    if not stripped.startswith("---"):
+        return {}, content
 
-    # Must start with --- on its own line
+    try:
+        post = _frontmatter.loads(content)
+        return dict(post.metadata), post.content
+    except Exception as e:
+        # Round-4 reviewer: catch broad — yaml.YAMLError, ScannerError,
+        # ConstructorError, plus malformed delimiter quirks all surface
+        # here. Don't break the agent; log and fall back so legacy
+        # skill files keep loading.
+        logger.warning(
+            "[skill-migrate] frontmatter at %s could not be strict-parsed "
+            "(%s: %s). Loaded via legacy lenient parser. Run the "
+            "'migrate-skills' builtin skill to fix in place.",
+            filepath or "<unknown>", type(e).__name__, str(e)[:80],
+        )
+        return _legacy_parse_frontmatter(content)
+
+
+def _legacy_parse_frontmatter(content: str) -> tuple[dict, str]:
+    """Legacy lenient line-parser — fallback for v3.7.x permissive files.
+
+    Pre-v3.8.1 this WAS ``parse_frontmatter``. Now retained as the
+    fallback for files that strict YAML rejects (description with
+    unquoted ``:``, tab indentation, ``[a, b,]`` trailing comma, raw
+    ``{role}`` values, etc.). NOT time-bounded — kept indefinitely so
+    legacy skill files keep working; users can repair in-place via the
+    ``migrate-skills`` builtin skill when convenient.
+    """
+    stripped = content.lstrip("\n")
     lines = stripped.splitlines()
     if not lines or lines[0].strip() != "---":
         return {}, content
 
-    # Find the closing --- on its own line (not as substring within a value)
     end_line_idx = None
     for i in range(1, len(lines)):
         if lines[i].strip() == "---":

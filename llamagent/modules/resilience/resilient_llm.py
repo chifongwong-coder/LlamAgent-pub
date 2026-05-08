@@ -140,7 +140,11 @@ class ResilientLLM(LLMClient):
             try:
                 result = self._fallback_llm.chat(messages, **kwargs)
                 # Successful failover → set primary cooldown
-                cooldown = min(last_error.retry_after, 300) if last_error.retry_after > 0 else 60
+                # v3.8.1 R7-#9: enforce minimum cooldown of 60s.
+                # Pre-fix a tiny ``Retry-After: 0.5`` from a server
+                # still in failure mode would set cooldown to 0.5s
+                # and we'd immediately retry into the same error.
+                cooldown = max(60.0, min(last_error.retry_after, 300)) if last_error.retry_after > 0 else 60
                 with self._cooldown_lock:
                     self._primary_cooldown_until = time.time() + cooldown
                 logger.info("Primary cooldown set for %.0fs", cooldown)

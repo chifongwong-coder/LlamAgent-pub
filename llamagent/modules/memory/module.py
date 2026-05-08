@@ -177,6 +177,24 @@ class MemoryModule(Module):
         self._pending_query: str | None = None  # For hybrid mode on_output
         self._last_consolidation: float = 0.0  # Timestamp of last consolidation
 
+    def __deepcopy__(self, memo):
+        """v3.8.1 R7-#23: ``threading.Lock`` / ``threading.Event`` /
+        ``threading.Thread`` (the v3.8.1-introduced consolidation
+        lifecycle attrs) are not deepcopy-safe. The child agent factory
+        deepcopies the parent's ToolsModule etc.; if it also walks
+        through MemoryModule (e.g. via _apply_shared_modules's parent
+        introspection), the deepcopy crashes with 'cannot pickle
+        _thread.lock'. Same pattern as ProjectSyncService /
+        JobHandle from v3.7.8 B2.
+
+        Returning ``self`` is correct because the child factory rebinds
+        the memory module via ``_apply_shared_modules`` immediately
+        after; a brief shared reference during the deepcopy walk is
+        harmless.
+        """
+        memo[id(self)] = self
+        return self
+
     # ============================================================
     # Lifecycle
     # ============================================================
@@ -184,6 +202,18 @@ class MemoryModule(Module):
     def on_attach(self, agent):
         """Initialize storage backend, compiler, merger, and register tools."""
         super().on_attach(agent)
+
+        # v3.8.1 R7-#23 (§9.5): background consolidation lifecycle.
+        # Pre-fix on_input ran self._consolidate() inline — N LLM calls
+        # blocked the user's chat reply. Now spawn a daemon thread, with
+        # cancel-then-join shutdown ordering (1s join, see on_shutdown).
+        import threading
+        self._consolidation_thread: "threading.Thread | None" = None
+        self._consolidation_lock = threading.Lock()
+        # Round-5 fix: must initialize _shutdown_event in on_attach so
+        # on_shutdown can call .set() without AttributeError on agents
+        # that never trigger consolidation.
+        self._shutdown_event = threading.Event()
 
         # Resolve modes from config
         self._write_mode = getattr(agent.config, "memory_mode", "off")
@@ -330,15 +360,72 @@ class MemoryModule(Module):
         self._available = other._available
         self._backend = other._backend
 
+    def on_shutdown(self) -> None:
+        """v3.8.1 R7-#23: cancel-then-join with 1s bound.
+
+        Step 1: signal cancel — the consolidation worker checks
+        ``self._shutdown_event.is_set()`` between batches and self-exits.
+        Step 2: 1s join (NOT 5s) — short bound so api_server session
+        eviction (which calls agent.shutdown OUTSIDE the session lock
+        per §9.6) doesn't lock-block other sessions for 5s. If worker
+        is wedged in a single LLM call past 1s, it gets reaped by the
+        OS on process exit (daemon thread). Acceptable tradeoff vs
+        unbounded shutdown latency — in-flight FsStore writes are
+        atomic (per-fact), so partial state is always consistent;
+        cross-fact dedup logic may leak duplicates if cancelled
+        mid-batch. Documented honestly.
+        """
+        if not hasattr(self, "_shutdown_event"):
+            return  # bypass-init agents (test fixtures) skip
+        self._shutdown_event.set()
+        if self._consolidation_thread and self._consolidation_thread.is_alive():
+            self._consolidation_thread.join(timeout=1.0)
+            if self._consolidation_thread.is_alive():
+                logger.warning(
+                    "[Memory] Consolidation didn't exit within 1s after "
+                    "cancel signal — daemon thread continues; OS reaps "
+                    "on process exit. In-flight fact write may be "
+                    "incomplete; per-fact atomic-write protects against "
+                    "partial files but cross-fact dedup may leak."
+                )
+
     def on_input(self, user_input: str) -> str:
-        """Check if memory consolidation is needed (hybrid mode auto-trigger)."""
+        """v3.8.1 R7-#23: spawn background consolidation thread instead
+        of blocking the chat path. The user's reply latency drops back
+        to LLM-call-only; consolidation completes async.
+        """
         if self._write_mode == "hybrid" and self._should_consolidate():
-            try:
-                self._consolidate()
-            except Exception as e:
-                logger.warning("[Memory] Auto-consolidation failed: %s", e)
+            self._spawn_background_consolidation()
 
         return user_input
+
+    def _spawn_background_consolidation(self) -> None:
+        """v3.8.1 R7-#23: launch consolidation on a daemon thread with
+        a re-entry guard. If the previous consolidation is still running,
+        skip — don't spawn a second thread that would race on store
+        writes.
+        """
+        import threading
+        with self._consolidation_lock:
+            if (self._consolidation_thread is not None
+                    and self._consolidation_thread.is_alive()):
+                logger.debug("[Memory] Consolidation already running, skipping")
+                return
+            self._consolidation_thread = threading.Thread(
+                target=self._consolidate_safe,
+                daemon=True,
+                name="memory-consolidation",
+            )
+            self._consolidation_thread.start()
+
+    def _consolidate_safe(self) -> None:
+        """v3.8.1 R7-#23: catch-all wrapper for background thread.
+        Pre-fix sync inline catch was visible to user; background thread
+        log is the only signal now."""
+        try:
+            self._consolidate()
+        except Exception as e:
+            logger.warning("[Memory] Background consolidation failed: %s", e)
 
     # ============================================================
     # Tool registration
@@ -991,6 +1078,12 @@ class MemoryModule(Module):
         max_deletes = max(1, int(len(all_facts) * 0.3))  # 30% cap
 
         for batch in self._batch(prioritized, 30):
+            # v3.8.1 R7-#23: cancel checkpoint per batch (between LLM
+            # calls). Worker self-exits cleanly during shutdown without
+            # waiting for a long LLM call to time out.
+            if getattr(self, "_shutdown_event", None) and self._shutdown_event.is_set():
+                logger.info("[Memory] Consolidation cancelled mid-batch")
+                return f"Consolidation cancelled: {total_reviewed} reviewed, {total_deleted} archived"
             if total_deleted >= max_deletes:
                 break  # Deletion cap reached
 

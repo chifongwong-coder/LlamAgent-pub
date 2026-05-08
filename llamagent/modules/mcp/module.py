@@ -75,7 +75,14 @@ class MCPModule(Module):
         self._init_client(server_configs)
 
     def _init_client(self, server_configs: dict) -> None:
-        """Initialize MCP client and connect to all configured servers."""
+        """Initialize MCP client and connect to all configured servers.
+
+        v3.8.1 R7-#2: connect_all runs on the client's persistent
+        background event loop (separate thread). This works identically
+        whether the caller is in a sync context or already inside an
+        outer asyncio loop (FastAPI / Gradio / Jupyter) — pre-fix the
+        per-call ``asyncio.run`` left sessions referencing destroyed loops.
+        """
         try:
             from llamagent.modules.mcp.client import MCPClient, MCP_AVAILABLE
 
@@ -85,35 +92,23 @@ class MCPModule(Module):
 
             self.client = MCPClient(server_configs)
 
-            # Detect if already in async environment
+            # Start the persistent loop BEFORE submitting any coroutine.
+            # Sessions opened via connect_all() will live on this loop;
+            # subsequent call_tool / disconnect must run on the same loop.
+            self.client._loop.start()
             try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
+                results = self.client._loop.submit(
+                    self.client.connect_all(), timeout=30
+                )
+            except Exception as e:
+                logger.warning("[MCP] connection failed: %s", e)
+                return
 
-            if loop and loop.is_running():
-                # Async environment: run connect_all() in a separate thread to avoid
-                # event loop conflict. The 30s blocking is acceptable for one-time
-                # startup during on_attach (not called in hot path).
-                from concurrent.futures import ThreadPoolExecutor
-                try:
-                    with ThreadPoolExecutor(max_workers=1) as pool:
-                        results = pool.submit(lambda: asyncio.run(self.client.connect_all())).result(timeout=30)
-                    self._connected = any(results.values())
-                    if self._connected:
-                        self._bridge_tools()
-                    else:
-                        logger.warning("[MCP] All server connections failed, please check configuration")
-                except Exception as e:
-                    logger.warning("[MCP] Async environment connection failed: %s", e)
+            self._connected = any(results.values())
+            if self._connected:
+                self._bridge_tools()
             else:
-                # Synchronous environment, connect immediately
-                results = asyncio.run(self.client.connect_all())
-                self._connected = any(results.values())
-                if self._connected:
-                    self._bridge_tools()
-                else:
-                    logger.warning("[MCP] All server connections failed, please check configuration")
+                logger.warning("[MCP] All server connections failed, please check configuration")
 
         except ImportError:
             logger.info(_MCP_INSTALL_HINT)
@@ -189,31 +184,36 @@ class MCPModule(Module):
     # ============================================================
 
     def on_shutdown(self) -> None:
-        """Disconnect all MCP Server connections and release resources."""
+        """Disconnect all MCP server connections and release resources.
+
+        v3.8.1 R7-#2 canonical shutdown ordering:
+            1. submit ``disconnect_all`` onto the persistent loop (where
+               sessions were opened) and wait for the future
+            2. ``call_soon_threadsafe(loop.stop)``
+            3. ``thread.join(timeout=5)``
+
+        Doing disconnect on a fresh short-lived loop is REJECTED — would
+        re-introduce the very "different event loop" RuntimeError this
+        fix closes (see ``_loop.py`` module docstring).
+        """
         if self.client is None:
             return
 
         try:
-            # Detect event loop environment
+            # Step 1: disconnect on persistent loop (sessions live there)
             try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop and loop.is_running():
-                # In async environment, disconnect via thread pool
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(
-                        asyncio.run,
-                        self.client.disconnect_all(),
-                    )
-                    future.result(timeout=10)
-            else:
-                asyncio.run(self.client.disconnect_all())
+                self.client._loop.submit(
+                    self.client.disconnect_all(), timeout=5
+                )
+            except Exception as e:
+                logger.warning(
+                    "[MCP] disconnect_all on persistent loop failed: %s", e
+                )
+            # Steps 2-3: stop loop + join thread
+            self.client._loop.stop(join_timeout=5.0)
 
             self._connected = False
             logger.info("[MCP] All connections disconnected")
 
         except Exception as e:
-            logger.warning("[MCP] Error during disconnection: %s", e)
+            logger.warning("[MCP] Error during shutdown: %s", e)

@@ -196,9 +196,15 @@ def create_web_ui() -> "gr.Blocks":
             "Then try again."
         )
 
-    # Shared state
-    current_agent = {"agent": None}
-    runner_state = {"runner": None, "thread": None}
+    # v3.8.1 R7-#4: per-Gradio-session state (NOT closure-level globals).
+    # Pre-fix ``current_agent = {"agent": None}`` + ``runner_state = {...}``
+    # were closure-captured dicts shared across all browser clients —
+    # multi-user / share-link / LAN deployments leaked chat history,
+    # persona, and runner state cross-client. Fix: each session gets its
+    # own dict via ``gr.State`` (created inside the Blocks below). Each
+    # callback receives ``session`` as its last input arg and mutates it
+    # in-place; Gradio preserves the reference within a session, so we
+    # don't have to thread state through outputs.
 
     # ---- Callback functions ----
 
@@ -221,7 +227,7 @@ def create_web_ui() -> "gr.Blocks":
 
         return "user", "LlamAgent", "A helpful AI assistant", gr.update(visible=True)
 
-    def build_agent_click(modules, role, name, desc, save_check, mode):
+    def build_agent_click(modules, role, name, desc, save_check, mode, session):
         """Build agent from config panel."""
         if not name.strip():
             return (
@@ -234,17 +240,17 @@ def create_web_ui() -> "gr.Blocks":
             )
 
         # Stop old runner first (before agent shutdown, since runner calls agent.chat)
-        old_runner = runner_state.get("runner")
+        old_runner = session.get("runner")
         if old_runner:
             old_runner.stop()
-            old_thread = runner_state.get("thread")
+            old_thread = session.get("thread")
             if old_thread:
                 old_thread.join(timeout=5)
-            runner_state["runner"] = None
-            runner_state["thread"] = None
+            session["runner"] = None
+            session["thread"] = None
 
         # Shutdown old agent after runner is stopped
-        old_agent = current_agent.get("agent")
+        old_agent = session.get("agent")
         if old_agent:
             try:
                 old_agent.shutdown()
@@ -253,7 +259,7 @@ def create_web_ui() -> "gr.Blocks":
 
         try:
             agent = _build_agent(modules, role, name.strip(), desc.strip(), mode=mode)
-            current_agent["agent"] = agent
+            session["agent"] = agent
 
             # Save persona if requested
             if save_check:
@@ -297,13 +303,13 @@ def create_web_ui() -> "gr.Blocks":
                 gr.update(visible=False),
             )
 
-    def chat_respond(message, history):
+    def chat_respond(message, history, session):
         """Handle chat messages with streaming support. Routes to inject in continuous mode."""
         if not message.strip():
             yield history or [], ""
             return
 
-        agent = current_agent.get("agent")
+        agent = session.get("agent")
         if agent is None:
             history = history or []
             history.append({"role": "assistant", "content": "Please build an agent first using the configuration panel above."})
@@ -311,7 +317,7 @@ def create_web_ui() -> "gr.Blocks":
             return
 
         # W1: Continuous mode -- route to runner.inject()
-        runner = runner_state.get("runner")
+        runner = session.get("runner")
         if runner and not runner._stopped.is_set():
             try:
                 response = runner.inject(message)
@@ -347,15 +353,15 @@ def create_web_ui() -> "gr.Blocks":
                 response = f"Error: {e}"
             yield history + [{"role": "assistant", "content": response}], ""
 
-    def clear_chat():
+    def clear_chat(session):
         """Clear chat history."""
-        if current_agent.get("agent"):
-            current_agent["agent"].clear_conversation()
+        if session.get("agent"):
+            session["agent"].clear_conversation()
         return [], ""
 
-    def upload_handler(files):
+    def upload_handler(files, session):
         """Handle document uploads for knowledge base."""
-        agent = current_agent.get("agent")
+        agent = session.get("agent")
         if not agent:
             return "Please build an agent first."
         if not files:
@@ -376,13 +382,13 @@ def create_web_ui() -> "gr.Blocks":
 
         return "\n".join(results)
 
-    def start_runner_click(trigger_type, timer_interval, timer_message, file_watch_dir):
+    def start_runner_click(trigger_type, timer_interval, timer_message, file_watch_dir, session):
         """Start ContinuousRunner with configured trigger."""
-        agent = current_agent.get("agent")
+        agent = session.get("agent")
         if not agent:
             return "Please build an agent first."
 
-        if runner_state.get("runner"):
+        if session.get("runner"):
             return "Runner is already active. Stop it first."
 
         import threading
@@ -400,10 +406,10 @@ def create_web_ui() -> "gr.Blocks":
             triggers.append(FileTrigger(watch_dir))
 
         runner = ContinuousRunner(agent, triggers, poll_interval=1.0)
-        runner_state["runner"] = runner
+        session["runner"] = runner
 
         t = threading.Thread(target=runner.run, daemon=True)
-        runner_state["thread"] = t
+        session["thread"] = t
         t.start()
 
         return "Runner started. Click 'Refresh' to see results, 'Stop' to end."
@@ -417,25 +423,25 @@ def create_web_ui() -> "gr.Blocks":
             history.append({"role": "assistant", "content": content})
         return history
 
-    def stop_runner_click():
+    def stop_runner_click(session):
         """Stop ContinuousRunner."""
-        runner = runner_state.get("runner")
+        runner = session.get("runner")
         if not runner:
             return [], "No runner active."
 
         runner.stop()
-        t = runner_state.get("thread")
+        t = session.get("thread")
         if t:
             t.join(timeout=5)
 
         log = runner.get_log()  # thread-safe copy
         history = _log_to_history(log)
 
-        runner_state["runner"] = None
-        runner_state["thread"] = None
+        session["runner"] = None
+        session["thread"] = None
 
         # Switch agent back to interactive mode (consistent with CLI/API)
-        agent = current_agent.get("agent")
+        agent = session.get("agent")
         if agent:
             try:
                 agent.set_mode("interactive")
@@ -444,9 +450,9 @@ def create_web_ui() -> "gr.Blocks":
 
         return history, f"Runner stopped. {len(log)} task(s) completed."
 
-    def refresh_runner_click():
+    def refresh_runner_click(session):
         """Refresh chatbot with runner results so far."""
-        runner = runner_state.get("runner")
+        runner = session.get("runner")
         if not runner:
             return [], "No runner active."
 
@@ -454,9 +460,9 @@ def create_web_ui() -> "gr.Blocks":
         history = _log_to_history(log)
         return history, f"Runner: Active | Tasks completed: {len(log)}"
 
-    def refresh_skills_click():
+    def refresh_skills_click(session):
         """Scan agent's skill module and return skills dataframe."""
-        agent = current_agent.get("agent")
+        agent = session.get("agent")
         if not agent or not agent.has_module("skill"):
             return [], ""
 
@@ -488,9 +494,9 @@ def create_web_ui() -> "gr.Blocks":
         detail_text = f"{len(rows)} skill(s) loaded:\n" + "\n".join(detail_parts)
         return rows, detail_text
 
-    def refresh_memory_click():
+    def refresh_memory_click(session):
         """Get memory module statistics."""
-        agent = current_agent.get("agent")
+        agent = session.get("agent")
         if not agent or not agent.has_module("memory"):
             return "Memory module not loaded."
 
@@ -508,9 +514,9 @@ def create_web_ui() -> "gr.Blocks":
         except Exception:
             return f"Memory module loaded. Mode: {agent.config.memory_mode}"
 
-    def search_memory_click(query):
+    def search_memory_click(query, session):
         """Search memories by keyword."""
-        agent = current_agent.get("agent")
+        agent = session.get("agent")
         if not agent or not agent.has_module("memory"):
             return "Memory module not loaded."
 
@@ -540,9 +546,9 @@ def create_web_ui() -> "gr.Blocks":
         except Exception as e:
             return f"Search error: {e}"
 
-    def refresh_sessions_click():
+    def refresh_sessions_click(session):
         """Scan persistence directory and return sessions dataframe."""
-        agent = current_agent.get("agent")
+        agent = session.get("agent")
         if not agent:
             return [], "Build an agent first."
 
@@ -572,6 +578,11 @@ def create_web_ui() -> "gr.Blocks":
         title="LlamAgent",
         theme=gr.themes.Soft(),
     ) as demo:
+
+        # v3.8.1 R7-#4: per-Gradio-session state. Lambda factory ensures
+        # each browser session gets a fresh dict instance (sharing one
+        # mutable default would re-introduce the cross-session leak).
+        session_st = gr.State(value=lambda: {"agent": None, "runner": None, "thread": None})
 
         gr.Markdown("# LlamAgent\n**Configure your agent, then start chatting**")
 
@@ -697,7 +708,7 @@ def create_web_ui() -> "gr.Blocks":
                 )
                 upload_btn = gr.Button("Upload", variant="primary")
             upload_result = gr.Textbox(label="Result", interactive=False, lines=2)
-            upload_btn.click(fn=upload_handler, inputs=[file_upload], outputs=[upload_result])
+            upload_btn.click(fn=upload_handler, inputs=[file_upload, session_st], outputs=[upload_result])
 
         # Skills panel (visible when skill module is loaded)
         with gr.Accordion("Skills", open=False, visible=False) as skills_panel:
@@ -731,57 +742,62 @@ def create_web_ui() -> "gr.Blocks":
 
         build_btn.click(
             fn=build_agent_click,
-            inputs=[module_checkboxes, role_radio, persona_name_input, persona_desc_input, save_checkbox, mode_dropdown],
+            inputs=[module_checkboxes, role_radio, persona_name_input, persona_desc_input, save_checkbox, mode_dropdown, session_st],
             outputs=[msg_input, status_display, chatbot, continuous_panel, skills_panel, memory_panel],
         )
 
         send_btn.click(
             fn=chat_respond,
-            inputs=[msg_input, chatbot],
+            inputs=[msg_input, chatbot, session_st],
             outputs=[chatbot, msg_input],
         )
         msg_input.submit(
             fn=chat_respond,
-            inputs=[msg_input, chatbot],
+            inputs=[msg_input, chatbot, session_st],
             outputs=[chatbot, msg_input],
         )
-        clear_btn.click(fn=clear_chat, outputs=[chatbot, msg_input])
+        clear_btn.click(fn=clear_chat, inputs=[session_st], outputs=[chatbot, msg_input])
 
         # Continuous runner bindings
         start_runner_btn.click(
             fn=start_runner_click,
-            inputs=[trigger_type, timer_interval, timer_message, file_watch_dir],
+            inputs=[trigger_type, timer_interval, timer_message, file_watch_dir, session_st],
             outputs=[runner_status],
         )
         stop_runner_btn.click(
             fn=stop_runner_click,
+            inputs=[session_st],
             outputs=[chatbot, runner_status],
         )
         refresh_runner_btn.click(
             fn=refresh_runner_click,
+            inputs=[session_st],
             outputs=[chatbot, runner_status],
         )
 
         # Skills panel bindings
         refresh_skills_btn.click(
             fn=refresh_skills_click,
+            inputs=[session_st],
             outputs=[skills_table, skill_detail],
         )
 
         # Memory panel bindings
         refresh_memory_btn.click(
             fn=refresh_memory_click,
+            inputs=[session_st],
             outputs=[memory_stats_display],
         )
         search_memory_btn.click(
             fn=search_memory_click,
-            inputs=[memory_search_input],
+            inputs=[memory_search_input, session_st],
             outputs=[memory_results_display],
         )
 
         # Sessions panel bindings
         refresh_sessions_btn.click(
             fn=refresh_sessions_click,
+            inputs=[session_st],
             outputs=[session_table, session_status],
         )
 

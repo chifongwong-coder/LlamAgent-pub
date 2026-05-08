@@ -17,6 +17,7 @@ uvicorn>=0.20.0
 
 # pip install llamagent[skill]
 pyyaml>=6.0
+python-frontmatter>=1.0  # v3.8.1 R7-#12: industry-standard frontmatter wrapper around PyYAML (Hermes/Nanobot/OpenCode all use real YAML); see fs_store/parser.py
 
 # pip install llamagent[mcp]
 mcp>=1.0.0

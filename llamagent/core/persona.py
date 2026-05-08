@@ -279,17 +279,33 @@ class PersonaManager:
             logger.warning("Failed to load persona file (%s): %s", self.storage_path, e)
 
     def _save(self):
-        """Save persona data to the JSON file."""
+        """Save persona data to the JSON file.
+
+        v3.8.1 R7-#14: atomic write via tmp + os.replace. Pre-fix wrote
+        directly to ``self.storage_path``; mid-write crash (Ctrl-C,
+        OOM, disk full) left a half-written file that ``_load``'s
+        ``json.JSONDecodeError`` swallowed silently — user lost ALL
+        personas on next start. ``os.replace`` is atomic on POSIX and
+        Win32; failure leaves the original file untouched.
+        """
         dir_path = os.path.dirname(self.storage_path)
         if dir_path:
             os.makedirs(dir_path, exist_ok=True)
+        tmp_path = self.storage_path + ".tmp"
         try:
-            with open(self.storage_path, "w", encoding="utf-8") as f:
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(
                     [asdict(p) for p in self._personas.values()],
                     f,
                     ensure_ascii=False,
                     indent=2,
                 )
+            os.replace(tmp_path, self.storage_path)
         except IOError as e:
             logger.error("Failed to save persona file (%s): %s", self.storage_path, e)
+            # Clean up tmp on failure
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass

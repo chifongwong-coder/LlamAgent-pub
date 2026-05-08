@@ -486,6 +486,13 @@ class Config:
                 try:
                     if expected_type == bool and isinstance(value, str):
                         value = value.lower() in ("true", "1", "yes")
+                    elif expected_type == bool and isinstance(value, int):
+                        # v3.8.1 R7-#27: coerce int 0/1 to bool. Pre-fix
+                        # YAML ``auto_approve: 1`` left value as int(1),
+                        # then later ``config.auto_approve is True``
+                        # checks failed because 1 is not True. PyYAML
+                        # parses 1/0 as int by default unless quoted.
+                        value = bool(value)
                     elif expected_type in (int, float, str) and not isinstance(value, expected_type):
                         value = expected_type(value)
                     elif expected_type in (list, dict) and not isinstance(value, expected_type):

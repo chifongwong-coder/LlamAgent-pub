@@ -17,6 +17,108 @@ Core design:
 A bare LlamAgent is a fully functional conversational Agent. Each
 module loaded grants a new capability.
 
+v3.8.1 highlights (round-7 static audit cleanup pack — 13 commits, 30
+findings closed, 1 builtin skill added):
+
+- **R7-#2 MCP cross-loop fix**: ``MCPClient`` now owns a persistent
+  background event loop on a daemon thread. All coroutines (connect,
+  call, disconnect) run on that loop via ``run_coroutine_threadsafe``.
+  Pre-fix per-call ``asyncio.run`` left sessions on destroyed loops;
+  FastAPI / Gradio / Jupyter deployments hit ``RuntimeError: bound
+  to a different event loop`` on first MCP tool invocation. New
+  ``modules/mcp/_loop.py:PersistentEventLoop`` helper.
+- **R7-#4 Web UI per-session state**: ``current_agent`` / ``runner_state``
+  closure-globals replaced with ``gr.State`` + lambda factory. Each
+  Gradio session gets its own dict instance — multi-user / share-link
+  / LAN deployments no longer leak chat history, persona, runner
+  state cross-client. 11 callbacks signature + body + ``.click()``
+  inputs all carry the new ``session`` parameter.
+- **R7-#5 + cross §9.5/§9.6 — API session pool RLock + snapshot-then-
+  shutdown-outside-lock**: single ``_session_lock`` (RLock) guards
+  ``agent_sessions / rate_limit_store / runner_sessions``. Eviction
+  pops inside the lock and runs ``agent.shutdown()`` OUTSIDE so a
+  slow on_shutdown (e.g. 1s memory consolidation join) doesn't
+  block other concurrent ``_get_agent`` calls.
+- **R7-#11 Skill pack revoke + persistence reload reconcile**:
+  ``SkillModule`` now tracks per-skill packs in ``_skill_added_packs``
+  and revokes packs of skills no longer activated each turn. New
+  ``pin_packs: bool = False`` ``SkillMeta`` field for skills that
+  legitimately need their packs persistent. ``on_attach`` reconciles
+  the tracker from ``agent._active_packs`` after persistence reload.
+  Replacement (not setdefault+update) so shrinking pack sets revoke
+  correctly. Behavior change: existing user skills without
+  ``pin_packs: true`` will see their packs auto-revoked on next
+  deactivation (was: persist forever).
+- **R7-#12 frontmatter migrated to python-frontmatter (industry
+  standard) + builtin migrate-skills skill**: ``fs_store/parser.py``
+  drops the 50-line custom line-parser in favor of
+  ``python-frontmatter`` (wrapper around ``yaml.safe_load``; same
+  library MkDocs/Pelican use). 3-layer architecture: strict parse
+  first, lenient legacy fallback on failure, ``[skill-migrate]``
+  warning so the new ``migrate-skills`` builtin skill can offer
+  to repair files in-place. Hermes-style nested metadata that the
+  custom parser couldn't handle now works. Fallback preserved
+  indefinitely (no time deadline) so legacy v3.7.x permissive files
+  keep loading.
+- **R7-#22 SafetyModule logger handler tracking**:
+  ``SafetyGuard._setup_logger`` records own handlers in
+  ``self._own_handlers``; ``on_shutdown`` removes only those.
+  Pre-fix walked ``logger.handlers[:]`` removing every handler on the
+  process-shared ``safety_audit`` logger — agent A's shutdown
+  silenced agent B's audit log.
+- **R7-#23 Memory consolidation background thread + cancel-then-join**:
+  ``MemoryModule.on_input`` now spawns a daemon thread for
+  ``_consolidate``, with re-entry guard. ``on_shutdown`` does
+  cancel-then-join with 1s bound (NOT 5s) so api_server session
+  eviction's ``shutdown`` (running OUTSIDE the session lock per
+  §9.6) doesn't lock-block other sessions for 5s. ``__deepcopy__``
+  returns self — threading primitives aren't pickle-safe.
+- **R7-#1/#20/#21 JobModule security pack**: rm-rf regex extended
+  (``-rfv``, split flags, long-form ``--recursive --force``);
+  absolute ``cwd`` validated against ``playground_dir``/``write_root``
+  (raises PermissionError outside boundaries; ``realpath('')``
+  fallback edge case fixed in round-4); artifact list capped to
+  top-level when cwd == project_dir/write_root + 50-entry cap to
+  avoid context blow-up.
+- **R7-#3 / #6 / #7 / #8 API hardening**: ClientSession ``async with``
+  paired enter/exit; rate limiter reads ``X-Forwarded-For`` for
+  reverse-proxy deployments; rate_limit_store periodic prune of
+  empty entries; WebSocket ``?session_id=<sid>`` query string for
+  per-session agent isolation (industry standard pattern).
+- **R7-#13 / #14 / #28 storage**: fs_store parser quote-aware list
+  split (``["a, b", "c"]`` no longer breaks); PersonaManager._save
+  atomic via tmp+os.replace (mid-write crash no longer loses all
+  personas); FSStore filename defense-in-depth realpath-bounded
+  to base_dir.
+- **R7-#16 / #17 / #18 / #19 RAG correctness**: missing-distance
+  sentinel (None instead of falsy 1.0); SQLite shared connection
+  user-space lock around index/search/delete/clear/close; vector/
+  lexical eventual-consistency contract documented + warning log;
+  reranker dedup via ``dict.fromkeys``.
+- **NIT pack (R7-#9/#10/#15/#24/#25/#27/#29/#30)**: cooldown floor
+  60s; ``Retry-After`` HTTP-date support; prepare_trace_message
+  defensive copy; apply_presets uses code-level defaults (bypasses
+  user YAML re-load); ContinuousRunner inject TOCTOU lock; YAML
+  bool int-coercion; SkillIndex case-insensitive alias collision
+  check; MCPClient.max_retries doc clarification.
+- **Q6 ChildContract-6**: child agent factory shallow-copies parent's
+  ``_persisted_files`` LRU so child read of parent-persisted tool
+  result paths don't trigger redundant re-persistence.
+
+> Migrating to v3.8.1 (集成开发者注意事项):
+>   - **Behavior change**: skills without ``pin_packs: true`` lose
+>     their packs each turn (was: persist forever).
+>   - **Behavior change**: ``start_job(cwd=<absolute path outside
+>     playground/write_root>)`` raises PermissionError (was:
+>     silently accepted).
+>   - **New dependency**: ``python-frontmatter>=1.0`` (PyYAML wrapper,
+>     0 transitive new deps).
+>   - **Warning** emit: legacy v3.7.x permissive frontmatter files
+>     emit ``[skill-migrate]`` log warnings on load. Files still
+>     load via fallback parser. Run the ``migrate-skills`` builtin
+>     skill (auto-triggers on natural-language queries about
+>     "fix / migrate / repair / yaml") to upgrade in place.
+
 v3.8 highlights (architectural root-cause fix: ``project_dir`` lifted
 to Config — eliminates the entire init-ordering bug class):
 - **`Config.project_dir` / `Config.playground_dir` fields**: two new
@@ -484,7 +586,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "3.8"
+__version__ = "3.8.1"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager
