@@ -1,0 +1,6 @@
+name: migrate-skills
+description: Re-format skill files when LlamAgent emits frontmatter migration warnings (legacy lenient parser detected non-strict YAML).
+tags: [migrate, fix, repair, yaml, skill, frontmatter, modernize, upgrade]
+invocation: auto-trigger
+required_tool_packs:
+  - path-fallback

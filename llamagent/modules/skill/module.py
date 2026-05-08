@@ -460,28 +460,22 @@ class SkillModule(Module):
         if not os.path.isfile(content_path):
             return {"success": False, "error": f"Skill file not found: {content_path}"}
 
-        # 1. Prepare final content (prepend frontmatter for format B/C)
+        # 1. Prepare final content (prepend frontmatter for format B/C).
+        # v3.8.1 R7-#12: read old frontmatter via parse_frontmatter
+        # (which auto-falls-back to legacy lenient parser when strict
+        # YAML rejects the file — supports v3.7.x permissive files).
+        # Write back via python-frontmatter so the new file is strict.
+        # This is the in-place migration path the migrate-skills builtin
+        # skill exercises.
         final_content = new_content
         if meta.source_format in ("frontmatter", "plain_md"):
+            import frontmatter as _frontmatter
             from llamagent.modules.fs_store.parser import parse_frontmatter
             with open(content_path, "r", encoding="utf-8") as f:
-                old_fm, _ = parse_frontmatter(f.read())
+                old_fm, _ = parse_frontmatter(f.read(), filepath=content_path)
             if old_fm:
-                fm_lines = ["---"]
-                for k, v in old_fm.items():
-                    if isinstance(v, list):
-                        # Serialize lists as YAML-compatible format: [item1, item2]
-                        fm_lines.append(f"{k}: [{', '.join(str(x) for x in v)}]")
-                    elif isinstance(v, bool):
-                        fm_lines.append(f"{k}: {'true' if v else 'false'}")
-                    elif isinstance(v, str) and (":" in v or '"' in v or "'" in v or "\n" in v):
-                        # Quote strings with special characters for YAML safety
-                        escaped = v.replace('"', '\\"')
-                        fm_lines.append(f'{k}: "{escaped}"')
-                    else:
-                        fm_lines.append(f"{k}: {v}")
-                fm_lines.append("---\n")
-                final_content = "\n".join(fm_lines) + new_content
+                new_post = _frontmatter.Post(new_content, **old_fm)
+                final_content = _frontmatter.dumps(new_post)
 
         # 2. Security scan BEFORE writing (fail fast)
         scan_error = self._security_scan(final_content)
