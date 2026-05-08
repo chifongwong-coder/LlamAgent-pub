@@ -165,6 +165,51 @@ class ToolsModule(Module):
         self.agent_store: AgentToolManager | None = None
         self._is_admin: bool = False
 
+    @classmethod
+    def build_isolated_for(cls, agent: "LlamAgent") -> "ToolsModule":
+        """v3.8.2 P5-2: build a child-bound ToolsModule with child-owned
+        ScratchService + ProjectSyncService and register only the
+        service-bound tools (workspace + project_sync).
+
+        Skips the full ``on_attach`` path (admin/role/disk tool loading)
+        because the child agent factory's deepcopy of ``parent._tools``
+        already populated child._tools with builtins / common / role
+        tools. The factory only needs to *replace* the service-bound
+        entries so closures bind to the child's services, not the
+        parent's. ``_register_workspace_tools`` and
+        ``_register_project_sync_tools`` overwrite via
+        ``agent.register_tool``, so calling them here flips the
+        closure target without touching anything else.
+
+        Pre-v3.8.2 the child_agent factory had a private
+        ``_build_isolated_tools_module`` helper that did exactly this
+        but lived in the child_agent module and reached into ToolsModule
+        / ScratchService / ProjectSyncService / ToolRegistry internals
+        — a P5 layer-poking violation. v3.8.2 hoists the construction
+        to a public class method on ToolsModule so the child_agent
+        factory only depends on the public ``ToolsModule``surface.
+        """
+        from llamagent.modules.tools.scratch import ScratchService
+        from llamagent.modules.tools.project_sync import ProjectSyncService
+        from llamagent.modules.tools.registry import ToolRegistry, global_registry
+
+        mod = cls()
+        mod.agent = agent
+        mod.common_registry = global_registry
+        mod.agent_registry = ToolRegistry()
+        mod._is_admin = False
+        mod.scratch_service = ScratchService(
+            agent, scratch_id=agent.config.scratch_id
+        )
+        mod.project_sync_service = ProjectSyncService(
+            agent, mod.scratch_service
+        )
+        # Register service-bound tools — overwrite parent-bound entries
+        # in agent._tools so closures bind to mod's services.
+        mod._register_workspace_tools()
+        mod._register_project_sync_tools()
+        return mod
+
     def on_attach(self, agent):
         """Initialization logic when module is attached to an Agent."""
         super().on_attach(agent)
