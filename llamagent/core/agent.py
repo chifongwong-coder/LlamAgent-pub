@@ -1420,8 +1420,17 @@ class LlamAgent:
         own ``__init__`` already ran ``_invoke_pending_factories()``
         with an empty list (no-op); this method seeds + invokes for
         real.
+
+        Defensive read: ``getattr`` so mock-test fixtures that bypass
+        ``__init__`` (and therefore lack ``_hook_factories``) don't
+        AttributeError. Same pattern as v3.8 commit 1b's defensive
+        ``config.project_dir`` read.
         """
-        self._hook_factories = list(parent._hook_factories)
+        self._hook_factories = list(getattr(parent, "_hook_factories", []))
+        # Also defensive on self side — bypass-init self may not have
+        # the attr until inherit_hook_factories_from is called. The
+        # assignment above creates it; _invoke_pending_factories
+        # proceeds normally.
         self._invoke_pending_factories()
 
     # v3.7.3: class-level per-thread reentry tracker. Each thread sees its
