@@ -82,10 +82,14 @@ class LLMReranker(Reranker):
             else:
                 raise ValueError(f"Unexpected response type: {type(result)}")
 
-            # Validate and reorder
-            valid_indices = [
+            # Validate and reorder.
+            # v3.8.1 R7-#19: dedupe via dict.fromkeys (order-preserving).
+            # Pre-fix LLM output [0, 0, 1] produced reranked = [doc0,
+            # doc0, doc1] — duplicate result. dict.fromkeys keeps first
+            # occurrence position and dedupes the rest.
+            valid_indices = list(dict.fromkeys(
                 i for i in indices if isinstance(i, int) and 0 <= i < len(documents)
-            ]
+            ))
 
             if not valid_indices:
                 raise ValueError("No valid indices in response")

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from llamagent.modules.rag.embedding import EmbeddingProvider
@@ -120,14 +123,38 @@ class RetrievalPipeline:
         return result
 
     def save(self, id: str, text: str, metadata: dict) -> None:
-        """Save a document to both vector and lexical backends."""
+        """Save a document to both vector and lexical backends.
+
+        v3.8.1 R7-#18 (eventual consistency, documented):
+            Vector save runs first, then lexical. If vector succeeds and
+            lexical fails (transient I/O, disk full mid-write), the
+            ``id`` exists in vector but NOT in lexical — subsequent
+            ``delete(id)`` will leave a stale lexical entry that doesn't
+            match anything in vector but still scores in lexical search.
+
+            Strict atomicity (rollback vector when lexical fails) was
+            considered and rejected per v3.8.1 plan §9.2 audit decision:
+            it would slow the common path and most callers don't
+            actually care about the stale lexical entry (the next save
+            for the same id upserts the lexical entry anyway).
+
+            Eventual consistency is the contract; consumers needing
+            strict atomicity should layer their own transaction.
+        """
         embedding = self.embedding.embed_texts([text])[0]
         self.vector.save(id, text, embedding, metadata)
         if self.lexical:
             try:
                 self.lexical.index(id, text, metadata)
-            except Exception:
-                pass  # Best-effort: lexical index failure doesn't block vector save
+            except Exception as e:
+                # v3.8.1 R7-#18: log so eventual-consistency drift is
+                # debuggable (pre-fix silent ``pass`` left no trace).
+                logger.warning(
+                    "[RAG] lexical index failed for id=%s; vector save "
+                    "succeeded. Eventual consistency contract: stale "
+                    "lexical entry possible until next save. Error: %s",
+                    id, e,
+                )
 
     def delete(self, id: str) -> None:
         """Delete a document from both backends."""

@@ -40,6 +40,13 @@ class SQLiteFTSBackend(LexicalBackend):
         self._db_path = db_path
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # v3.8.1 R7-#17 (§9.3): user-space lock around all _conn.execute
+        # paths. sqlite3 with check_same_thread=False allows multi-thread
+        # access but does NOT itself serialize — concurrent execute on
+        # the same connection corrupted cursor state. lock covers
+        # index/search/delete/clear/close per round-4 reviewer.
+        import threading as _t
+        self._lock = _t.Lock()
         # Create FTS5 virtual table if not exists
         self._conn.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS fts_index USING fts5(id, text, metadata)"
@@ -54,32 +61,34 @@ class SQLiteFTSBackend(LexicalBackend):
     def index(self, id: str, text: str, metadata: dict) -> None:
         """Index a document. Upserts by deleting any existing entry with the same ID first."""
         meta_str = json.dumps(metadata, ensure_ascii=False)
-        # Upsert: delete old then insert
-        self._conn.execute("DELETE FROM fts_index WHERE id = ?", (id,))
-        self._conn.execute("DELETE FROM documents WHERE id = ?", (id,))
-        self._conn.execute(
-            "INSERT INTO fts_index (id, text, metadata) VALUES (?, ?, ?)",
-            (id, text, meta_str),
-        )
-        self._conn.execute(
-            "INSERT INTO documents (id, text, metadata) VALUES (?, ?, ?)",
-            (id, text, meta_str),
-        )
-        self._conn.commit()
+        with self._lock:
+            # Upsert: delete old then insert
+            self._conn.execute("DELETE FROM fts_index WHERE id = ?", (id,))
+            self._conn.execute("DELETE FROM documents WHERE id = ?", (id,))
+            self._conn.execute(
+                "INSERT INTO fts_index (id, text, metadata) VALUES (?, ?, ?)",
+                (id, text, meta_str),
+            )
+            self._conn.execute(
+                "INSERT INTO documents (id, text, metadata) VALUES (?, ?, ?)",
+                (id, text, meta_str),
+            )
+            self._conn.commit()
 
     def search(self, query: str, top_k: int) -> list[dict]:
         """Search using FTS5 full-text matching. Returns results ranked by relevance."""
         # Escape special FTS5 characters
         safe_query = query.replace('"', '""')
-        try:
-            rows = self._conn.execute(
-                "SELECT id, text, metadata, rank FROM fts_index "
-                "WHERE fts_index MATCH ? ORDER BY rank LIMIT ?",
-                (f'"{safe_query}"', top_k),
-            ).fetchall()
-        except Exception:
-            # If FTS match fails (e.g., empty query), return empty
-            return []
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT id, text, metadata, rank FROM fts_index "
+                    "WHERE fts_index MATCH ? ORDER BY rank LIMIT ?",
+                    (f'"{safe_query}"', top_k),
+                ).fetchall()
+            except Exception:
+                # If FTS match fails (e.g., empty query), return empty
+                return []
 
         results = []
         for row in rows:
@@ -97,18 +106,21 @@ class SQLiteFTSBackend(LexicalBackend):
 
     def delete(self, id: str) -> None:
         """Remove a document from both the FTS index and the documents table."""
-        self._conn.execute("DELETE FROM fts_index WHERE id = ?", (id,))
-        self._conn.execute("DELETE FROM documents WHERE id = ?", (id,))
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute("DELETE FROM fts_index WHERE id = ?", (id,))
+            self._conn.execute("DELETE FROM documents WHERE id = ?", (id,))
+            self._conn.commit()
 
     def clear(self) -> None:
         """Remove all documents from the index."""
-        self._conn.execute("DELETE FROM fts_index")
-        self._conn.execute("DELETE FROM documents")
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute("DELETE FROM fts_index")
+            self._conn.execute("DELETE FROM documents")
+            self._conn.commit()
 
     def close(self) -> None:
         """Close the database connection."""
-        if self._conn:
-            self._conn.close()
-            self._conn = None
+        with self._lock:
+            if self._conn:
+                self._conn.close()
+                self._conn = None
