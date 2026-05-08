@@ -84,6 +84,11 @@ class MCPClient:
         self._connections: dict[str, Any] = {}
         # Tool list cache: {server_name: [tool_object_list]}
         self._tools_cache: dict[str, list] = {}
+        # v3.8.1 R7-#2: persistent background event loop. All coroutines
+        # touching self._sessions (connect, call, disconnect) run on this
+        # loop so sessions never reference a destroyed loop.
+        from llamagent.modules.mcp._loop import PersistentEventLoop
+        self._loop = PersistentEventLoop(name="mcp-loop")
 
     # ============================================================
     # Connection Management
@@ -405,27 +410,17 @@ class MCPToolBridge:
         mcp_client = self.mcp_client
 
         def bridge_func(**kwargs) -> str:
-            """Synchronous wrapper: calls async MCP tool, automatically handles event loop environment."""
-            try:
-                # Check if there's already a running event loop
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop and loop.is_running():
-                # Already in async environment, use thread pool to avoid blocking
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(
-                        asyncio.run,
-                        mcp_client.call_tool(server_name, tool.name, kwargs),
-                    )
-                    return future.result(timeout=mcp_client.timeout)
-            else:
-                # No event loop, create a new one
-                return asyncio.run(
-                    mcp_client.call_tool(server_name, tool.name, kwargs)
-                )
+            """Synchronous wrapper: calls async MCP tool on the client's
+            persistent loop. v3.8.1 R7-#2: pre-fix this opened a fresh
+            loop per call (or short-lived loop in a thread pool when an
+            outer loop was running) — both leaked sessions across loops.
+            Now all calls go through the persistent loop the session was
+            opened on.
+            """
+            return mcp_client._loop.submit(
+                mcp_client.call_tool(server_name, tool.name, kwargs),
+                timeout=mcp_client.timeout,
+            )
 
         # Set function metadata (used by tool registry)
         bridge_func.__doc__ = f"[{server_name}] {tool.description}"
