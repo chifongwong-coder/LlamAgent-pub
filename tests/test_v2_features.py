@@ -3715,7 +3715,7 @@ def test_v38x_lifecycle_smoke(tmp_path, mock_llm_client):
     assert len(child._hook_factories) == 1
     assert len(child._hooks.get(HookEvent.POST_TOOL_USE, [])) == 1
 
-    # v3.8.1 §9.5 + v3.8.6 shutdown chain: cancel-then-join, no exception
+    # v3.8.1 §9.5 shutdown chain: cancel-then-join, no exception
     agent.shutdown()
     child.shutdown()
     # No assertion: just verify no exception through combined shutdown.

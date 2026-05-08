@@ -273,7 +273,7 @@ class HookRegistration:
 
 @dataclass
 class _HookFactoryRegistration:
-    """v3.8.3 R7-#... ChildContract-7 fix: a hook FACTORY registration.
+    """v3.8.3 ChildContract-7 fix: a hook FACTORY registration.
 
     Unlike ``HookRegistration`` (which records a fully-bound handler
     on a single agent), a factory registration carries a ``factory``

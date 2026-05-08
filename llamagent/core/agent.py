@@ -1309,6 +1309,16 @@ class LlamAgent:
             use that. Factories that bypass these accessors silently
             undo the v3.8.2 信使 fix one user-code level out.
 
+            Step-ordering caveat (round-1 reviewer NIT): when invoked
+            via ``inherit_hook_factories_from`` at child_agent factory
+            step 4a, the factory body sees the child BEFORE step 5
+            (mode setup), step 6 (authz scope import), step 7
+            (``_tool_state`` / ``_persisted_files`` shallow-copy from
+            parent), and step 8 (``_apply_shared_modules``). If your
+            factory closure depends on these later-stage attributes,
+            access them at handler-fire time (lazy read of
+            ``ctx.agent.<attr>``), not at factory-creation time.
+
         ⚠️ Stateless-factory contract (load-bearing — framework cannot
             enforce):
             The factory MUST be a stateless callable. Each invocation
