@@ -269,3 +269,35 @@ class HookRegistration:
     matcher: HookMatcher | None
     priority: int       # Lower = earlier execution. Code default=100, YAML default=200
     source: str         # "code" / "yaml" / future: "plugin" / "policy"
+
+
+@dataclass
+class _HookFactoryRegistration:
+    """v3.8.3 R7-#... ChildContract-7 fix: a hook FACTORY registration.
+
+    Unlike ``HookRegistration`` (which records a fully-bound handler
+    on a single agent), a factory registration carries a ``factory``
+    callable that produces a fresh handler bound to whichever agent
+    receives it. The agent's ``_invoke_pending_factories`` runs each
+    factory at __init__ end (or post-init when the factory is added
+    later); the child_agent factory replays them on each child via
+    ``LlamAgent.inherit_hook_factories_from``.
+
+    This sidesteps the closure-rebind impossibility: Python's
+    ``func.__closure__`` cell vars are read-only at the public ABI
+    layer, so a handler registered against one agent cannot be
+    "rebound" to another agent. By holding the factory (not its
+    output) we let each agent invoke it fresh and produce a handler
+    closing over THAT agent's state.
+
+    See plan §1.1 for the stateless-factory contract — the framework
+    cannot enforce that the factory is side-effect-free, so the
+    contract is documented in ``LlamAgent.register_hook_factory``
+    docstring as a load-bearing warning.
+    """
+
+    event: HookEvent
+    factory: Callable      # factory(agent: LlamAgent) -> HookCallback | HookHandler
+    matcher: HookMatcher | None
+    priority: int
+    source: str
