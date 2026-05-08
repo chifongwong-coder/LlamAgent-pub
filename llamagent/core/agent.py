@@ -7,7 +7,8 @@ After loading modules via register_module(), the Agent gains tool calling, RAG, 
 Core components:
 - LlamAgent:         Main Agent class containing the chat() entry point and run_react() engine
 - Module:             Pluggable module base class that interacts with the Agent via pipeline callbacks
-- ExecutionStrategy:  Pluggable execution strategy interface, replacing the deprecated on_execute callback
+- ExecutionStrategy:  Pluggable execution strategy interface (the on_execute
+                      legacy callback was removed in v3.8.2)
 """
 
 from __future__ import annotations
@@ -198,19 +199,16 @@ class SimpleReAct(ExecutionStrategy):
     """
     Default execution strategy: directly runs the ReAct loop.
 
-    Returns text response directly when there are no tool_calls; otherwise loops through tool calls.
+    Returns text response directly when there are no tool_calls; otherwise
+    loops through tool calls.
 
-    Backward compatible: if a module overrides on_execute() (deprecated), its result is used first.
+    v3.8.2 E5: the ``Module.on_execute`` fallback loop was removed.
+    Modules that previously intercepted execution must now register an
+    ``ExecutionStrategy`` via ``agent.set_execution_strategy(...)`` (the
+    pattern PlanningModule already uses). See v3.8.2 release notes.
     """
 
     def execute(self, query: str, context: str, agent: LlamAgent) -> str:
-        # Backward compatibility: check if any module intercepts via on_execute callback
-        for mod in agent.modules.values():
-            if type(mod).on_execute is not Module.on_execute:
-                result = mod.on_execute(query, context)
-                if result is not None:
-                    return result
-
         # Get tool schemas
         tools_schema = agent.get_all_tool_schemas()
 
@@ -438,16 +436,16 @@ class Module:
         """
         return response
 
-    # --- Deprecated Callbacks (backward-compatible shims for un-migrated modules) ---
-
-    def on_execute(self, query: str, context: str) -> str | None:
-        """
-        [Deprecated] Execution interception callback; returning non-None skips default execution.
-
-        In the target architecture, this is replaced by ExecutionStrategy. This method is retained
-        only for backward compatibility with modules that have not yet migrated (e.g., reasoning module).
-        """
-        return None
+    # v3.8.2 E5: ``on_execute`` callback removed. Modules that need to
+    # intercept the execution flow must now register an
+    # ``ExecutionStrategy`` via ``agent.set_execution_strategy(...)``.
+    # PlanningModule.on_attach has used this pattern since v3.7; the
+    # parallel on_execute fallback in SimpleReAct.execute (and the base
+    # method here) was a deprecated shim retained for un-migrated
+    # modules. v3.8.2 finishes the migration: anyone overriding
+    # on_execute now gets a no-op (Python doesn't error on a missing
+    # base method when subclasses define their own — but the framework
+    # never CALLS it, so the override is dead code).
 
 
 # ======================================================================
