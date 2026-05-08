@@ -836,10 +836,15 @@ class LlamAgent:
         """
         Get the active task ID for scope storage/lookup.
 
-        Priority: controller.state.task_id > _current_task_id (PlanReAct legacy).
+        Priority: controller.get_active_task_id() > _current_task_id
+        (PlanReAct legacy).
+
+        v3.8.2 P1-1: routed through the controller's public getter
+        rather than directly reading ``self._controller.state.task_id``
+        (信使 principle — agent doesn't inspect controller internals).
         """
         if self.mode == "task" and self._controller:
-            tid = self._controller.state.task_id
+            tid = self._controller.get_active_task_id()
             if tid:
                 return tid
         return getattr(self, "_current_task_id", None)
