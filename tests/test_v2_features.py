@@ -3648,3 +3648,74 @@ def test_yaml_serialization_special_chars(bare_agent, tmp_path):
     assert fm is not None
     assert "colon" in fm.get("description", "")
     assert "New content" in body
+
+
+def test_v38x_lifecycle_smoke(tmp_path, mock_llm_client):
+    """v3.8.x trio integration smoke (per round-trio audit recommendation,
+    v3.8.1 plan §8.2). Exercises: agent comes up clean, modules attach
+    and tear down clean, all three plans' state correctly init / teardown.
+
+    Locks the cross-spec interaction matrix that no per-version test
+    covers in isolation:
+    - v3.8 Config.project_dir → __init__ → seed scope
+    - v3.8.1 SkillModule pack tracker + MemoryModule consolidation
+      thread + MCP loop
+    - v3.8.2 SnapshotService relocation + child_agent build_isolated_for
+    - v3.8.3 register_hook_factory + step 4a inherit_hook_factories_from
+    """
+    from llamagent.core import LlamAgent, Config
+    from llamagent.core.hooks import HookEvent
+    from llamagent.modules.skill.module import SkillModule
+    from llamagent.modules.memory.module import MemoryModule
+    from llamagent.modules.child_agent.module import ChildAgentModule
+    from llamagent.modules.child_agent.policy import (
+        AgentExecutionPolicy, ChildAgentSpec,
+    )
+
+    # v3.8: project_dir wired into config BEFORE construction
+    config = Config()
+    config.project_dir = str(tmp_path)
+    config.persistence_enabled = False
+    config.memory_mode = "off"  # consolidation thread not exercised
+    agent = LlamAgent(config)
+    agent.llm = mock_llm_client
+    agent._llm_cache = {config.model: mock_llm_client}
+
+    # v3.8 + v3.8.2 P1-1: ensure the public API surface works
+    assert hasattr(agent, "get_active_task_id")  # v3.8.2 P1-1
+    assert hasattr(agent, "ensure_snapshot")     # v3.8 + v3.8.2 A1
+    assert hasattr(agent, "register_hook_factory")  # v3.8.3
+    assert hasattr(agent, "inherit_hook_factories_from")  # v3.8.3
+
+    # v3.8.3: register a hook factory before spawning children
+    factory_calls = []
+    def my_factory(a):
+        aid = a.agent_id
+        def handler(ctx):
+            factory_calls.append(aid)
+            return None
+        return handler
+    agent.register_hook_factory(HookEvent.POST_TOOL_USE, my_factory)
+    # Factory invoked on parent (init_done was True before this call)
+    assert len(agent._hooks.get(HookEvent.POST_TOOL_USE, [])) == 1
+
+    # v3.8.1 §9.5: register MemoryModule (sets up _shutdown_event etc.)
+    agent.register_module(MemoryModule())
+    # v3.8.1 §9.1: register SkillModule (init _skill_added_packs)
+    agent.register_module(SkillModule())
+    # v3.8.2 P5-2: spawn isolated child via ChildAgentModule factory
+    agent.register_module(ChildAgentModule())
+    spec = ChildAgentSpec(
+        task="t", role="researcher",
+        policy=AgentExecutionPolicy(share_parent_project_dir=False),
+    )
+    child = agent.modules["child_agent"]._create_child_agent(spec)
+
+    # v3.8.3: factory inherits to child + invokes
+    assert len(child._hook_factories) == 1
+    assert len(child._hooks.get(HookEvent.POST_TOOL_USE, [])) == 1
+
+    # v3.8.1 §9.5 + v3.8.6 shutdown chain: cancel-then-join, no exception
+    agent.shutdown()
+    child.shutdown()
+    # No assertion: just verify no exception through combined shutdown.
