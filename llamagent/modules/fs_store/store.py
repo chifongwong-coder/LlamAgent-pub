@@ -23,6 +23,31 @@ class FSStore:
         os.makedirs(self._base_dir, exist_ok=True)
         logger.debug("FSStore initialized at %s", self._base_dir)
 
+    def _validate_filename(self, filename: str) -> str:
+        """v3.8.1 R7-#28: defense-in-depth check that filename stays
+        inside ``self._base_dir``. Pre-fix all callers passed
+        sanitized filenames internally, but the surface had no
+        boundary check — a bug or misuse passing ``"../etc/passwd"``
+        would silently write outside the base dir.
+
+        Returns the abspath on success (used for the actual open call);
+        raises ValueError when the path would escape base_dir. We
+        compare on ``realpath`` (so macOS ``/var`` → ``/private/var``
+        symlinks don't trigger false positives) but return the abspath
+        because that's what other callers historically used.
+        """
+        target = os.path.abspath(os.path.join(self._base_dir, filename))
+        base_real = os.path.realpath(self._base_dir)
+        # Resolve target through any existing symlinks; for non-existing
+        # paths realpath returns the input abspath unchanged on POSIX.
+        target_real = os.path.realpath(target)
+        if not (target_real.startswith(base_real + os.sep) or target_real == base_real):
+            raise ValueError(
+                f"FSStore filename {filename!r} escapes base_dir "
+                f"{self._base_dir!r}; refusing to write."
+            )
+        return target
+
     def write_file(self, filename: str, content: str) -> None:
         """Atomic write: write to a temporary file then rename.
 
@@ -30,7 +55,7 @@ class FSStore:
             filename: File name (not a path) within the base directory.
             content: Text content to write.
         """
-        target = os.path.join(self._base_dir, filename)
+        target = self._validate_filename(filename)
         tmp_path = target + ".tmp"
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
@@ -55,7 +80,11 @@ class FSStore:
         Returns:
             File content as a string, or None if the file does not exist.
         """
-        path = os.path.join(self._base_dir, filename)
+        # v3.8.1 R7-#28: same boundary check as write_file (DiD)
+        try:
+            path = self._validate_filename(filename)
+        except ValueError:
+            return None
         if not os.path.isfile(path):
             return None
         try:

@@ -22,6 +22,47 @@ import frontmatter as _frontmatter
 logger = logging.getLogger(__name__)
 
 
+def _split_list_items_respecting_quotes(inner: str) -> list[str]:
+    """v3.8.1 R7-#13: split inline-list inner content by ',' but
+    respect quoted-string boundaries.
+
+    Used by ``_parse_value`` (legacy fallback path; strict YAML in
+    ``parse_frontmatter`` doesn't go through here). Pre-fix a list like
+    ``["hello, world", "next"]`` got split into 4 items because the
+    plain ``inner.split(",")`` ignored quotes.
+    """
+    items: list[str] = []
+    cur: list[str] = []
+    in_quotes: str | None = None
+    escape = False
+    for ch in inner:
+        if escape:
+            cur.append(ch)
+            escape = False
+            continue
+        if ch == "\\" and in_quotes == '"':
+            cur.append(ch)
+            escape = True
+            continue
+        if in_quotes:
+            cur.append(ch)
+            if ch == in_quotes:
+                in_quotes = None
+            continue
+        if ch in ('"', "'"):
+            in_quotes = ch
+            cur.append(ch)
+            continue
+        if ch == ",":
+            items.append("".join(cur).strip())
+            cur = []
+            continue
+        cur.append(ch)
+    if cur:
+        items.append("".join(cur).strip())
+    return items
+
+
 def _parse_value(raw: str):
     """Parse a single YAML-like value string into a Python type.
 
@@ -48,7 +89,10 @@ def _parse_value(raw: str):
         inner = value[1:-1].strip()
         if not inner:
             return []
-        items = [item.strip() for item in inner.split(",")]
+        # v3.8.1 R7-#13: quote-aware split. Pre-fix ``inner.split(",")``
+        # broke list elements that themselves contained commas (e.g.
+        # ``["hello, world", "next"]`` got split to 4 items).
+        items = _split_list_items_respecting_quotes(inner)
         return [_parse_value(item) for item in items]
 
     # Quoted string — strip quotes and return as-is
