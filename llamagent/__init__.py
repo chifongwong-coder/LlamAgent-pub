@@ -18,7 +18,8 @@ A bare LlamAgent is a fully functional conversational Agent. Each
 module loaded grants a new capability.
 
 v3.8.2 highlights (architecture cleanup — A1 + E5 + P1-1 + P5-2 + P6-4
-audit, 8 commits, ~80 LOC net delete from twin-factory consolidation):
+audit, 7 git commits + 1 private audit doc, ~80 LOC net delete from
+twin-factory consolidation):
 
 - **A1 — SnapshotService P5 inversion**: ``modules/tools/snapshot.py``
   relocated to ``core/snapshot.py``. Pre-fix ``core/agent.py`` ran

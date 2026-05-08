@@ -28,6 +28,7 @@ from llamagent.core.config import Config
 from llamagent.core.contract import PipelineOutcome
 from llamagent.core.zone import ConfirmRequest, ConfirmResponse
 from llamagent.core.controller import ModeAction, TaskModeController
+from llamagent.core.snapshot import SnapshotConfig, SnapshotService
 from llamagent.core.hooks import (
     CallableHandler,
     HookCallback,
@@ -739,7 +740,9 @@ class LlamAgent:
         Returns the snapshot directory path on success, None otherwise.
         """
         if not hasattr(self, "_snapshot_service"):
-            from llamagent.core.snapshot import SnapshotService, SnapshotConfig
+            # v3.8.2 NIT-3: import hoisted to top of file (eliminates the
+            # lazy-import "half-init" latent failure surface — any import
+            # error now fails fast at module load instead of mid-__init__).
             cfg = SnapshotConfig(
                 enabled=bool(getattr(self.config, "snapshot_enabled", False)
                              or getattr(self.config, "auto_approve", False)),

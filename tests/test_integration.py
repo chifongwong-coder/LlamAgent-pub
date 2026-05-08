@@ -77,7 +77,7 @@ class TestModuleIntegration:
     """Consolidated module integration flow tests."""
 
     def test_module_integration_flow(self, mock_llm_client, tmp_path):
-        """Safety hooks, planning strategy, load order, and legacy on_execute compat."""
+        """Safety hooks, planning strategy, load order, and ExecutionStrategy injection (v3.8.2 E5)."""
         agent = _create_test_agent(mock_llm_client)
 
         # --- SafetyModule provides hooks without affecting tool execution ---
