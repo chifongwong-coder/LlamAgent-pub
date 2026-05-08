@@ -79,7 +79,43 @@ class JobModule(Module):
                 agent.config, "job_cancel_join_timeout", 5.0
             ),
         )
+        self._register_job_tools_on(agent)
 
+    @classmethod
+    def build_isolated_for(cls, agent: "LlamAgent") -> "JobModule | None":
+        """v3.8.2 P5-2: build a child-bound JobModule with its own
+        JobService and register the four job tools so closures bind
+        to the child's service.
+
+        Returns None when ``agent.tool_executor is None`` — JobModule
+        requires SandboxModule (the child agent factory inherited
+        ``tool_executor`` from parent in step 7, but if the parent
+        also has no tool_executor the child still doesn't).
+
+        Skips the SandboxModule hard-dependency LOG (on_attach already
+        logged it on the parent path); just returns None silently.
+        """
+        if agent.tool_executor is None:
+            return None
+        mod = cls()
+        mod.agent = agent
+        mod.service = JobService(
+            max_active=getattr(agent.config, "job_max_active", 10),
+            cancel_join_timeout=getattr(agent.config, "job_cancel_join_timeout", 5.0),
+        )
+        mod._register_job_tools_on(agent)
+        return mod
+
+    def _register_job_tools_on(self, agent) -> None:
+        """v3.8.2 P5-2: single source of truth for the four job-tool
+        registrations. Both ``on_attach`` and ``build_isolated_for``
+        call this. Pre-fix the four ``register_tool`` calls were inline
+        in ``on_attach`` AND duplicated 60+ lines verbatim in
+        ``child_agent/module.py:_register_isolated_job_tools`` — a
+        v3.5-twin-factory mistake (any change to the on_attach
+        registration block needed to be mirrored manually). v3.8.2
+        consolidates to one helper.
+        """
         # --- start_job (sl=2, common) ---
         # v3.6: takes_agent=True so a child agent's start_job resolves cwd
         # against the child's project_dir / scratch_root instead of the
