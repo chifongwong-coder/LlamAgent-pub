@@ -174,6 +174,8 @@ class MemoryModule(Module):
         self._read_mode: str = "off"
         self._backend: str = "rag"
         self._available: bool = False
+        self._pending_query: str | None = None  # For hybrid mode on_output
+        self._last_consolidation: float = 0.0  # Timestamp of last consolidation
 
     def __deepcopy__(self, memo):
         """v3.8.1 R7-#23: ``threading.Lock`` / ``threading.Event`` /
@@ -192,8 +194,6 @@ class MemoryModule(Module):
         """
         memo[id(self)] = self
         return self
-        self._pending_query: str | None = None  # For hybrid mode on_output
-        self._last_consolidation: float = 0.0  # Timestamp of last consolidation
 
     # ============================================================
     # Lifecycle
