@@ -102,6 +102,13 @@ class ContinuousRunner:
         self._task_running = False                         # True while _run_task executes
         self._current_interruptible = True                 # Current task interruptible?
         self._aborted_by_inject = False                    # Runner-internal abort tracking
+        # v3.8.1 R7-#25: lock for inject-immediate TOCTOU. Pre-fix
+        # ``inject`` checked ``self._task_running and ...`` then called
+        # ``self.agent.abort()`` without locking — task could complete
+        # between check and abort, and abort would target the NEXT
+        # task. Now: read flags + call abort under one critical
+        # section.
+        self._inject_lock = threading.Lock()
 
     def inject(self, message: str, immediate: bool = False) -> str:
         """
@@ -128,9 +135,14 @@ class ContinuousRunner:
 
         if immediate:
             self._urgent_queue.put(item)
-            if self._task_running and self._current_interruptible:
-                self._aborted_by_inject = True
-                self.agent.abort()
+            # v3.8.1 R7-#25: atomic check-then-abort under _inject_lock
+            # so the running task can't transition to "done" between
+            # the read and the abort call (which would then target
+            # whatever task starts next).
+            with self._inject_lock:
+                if self._task_running and self._current_interruptible:
+                    self._aborted_by_inject = True
+                    self.agent.abort()
         else:
             self._normal_queue.put(item)
 
@@ -191,8 +203,12 @@ class ContinuousRunner:
 
     def _run_task(self, task_input: str, trigger: Trigger) -> None:
         """Execute one task with optional timeout, record to task_log."""
-        self._current_interruptible = getattr(trigger, "interruptible", True)
-        self._task_running = True
+        # v3.8.1 R7-#25: take the same lock that inject() uses so
+        # task_running flag transitions are observed atomically across
+        # threads. Setting both flags under one critical section.
+        with self._inject_lock:
+            self._current_interruptible = getattr(trigger, "interruptible", True)
+            self._task_running = True
 
         entry = TaskLogEntry(
             trigger_type=type(trigger).__name__,
@@ -222,7 +238,8 @@ class ContinuousRunner:
             entry.error = str(e)
             logger.error("Task failed: %s", e)
         finally:
-            self._task_running = False
+            with self._inject_lock:
+                self._task_running = False
             self._current_interruptible = True
 
         entry.duration = time.time() - start

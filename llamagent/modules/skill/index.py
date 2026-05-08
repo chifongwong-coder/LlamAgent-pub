@@ -168,7 +168,11 @@ class SkillIndex:
         self._skills[meta.name] = meta
         for alias in meta.aliases:
             key = alias.lower()
-            if key in self._skills:
+            # v3.8.1 R7-#29: alias collision check must compare in the
+            # same case as _skills storage. _skills is keyed on
+            # case-preserved name (meta.name); compare alias lowercase
+            # against lowercase skill names.
+            if key in {n.lower() for n in self._skills}:
                 continue
             if key not in self._alias_map:
                 self._alias_map[key] = meta.name

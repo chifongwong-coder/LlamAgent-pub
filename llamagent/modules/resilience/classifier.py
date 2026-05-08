@@ -156,13 +156,24 @@ def _extract_retry_after(error: Exception) -> float:
                     return float(ms) / 1000.0
                 except (ValueError, TypeError):
                     pass
-            # retry-after (seconds)
+            # retry-after (seconds OR HTTP-date per RFC 7231)
             sec = headers.get("retry-after")
             if sec is not None:
                 try:
                     return float(sec)
                 except (ValueError, TypeError):
-                    pass
+                    # v3.8.1 R7-#10: try HTTP-date (RFC 7231 allows it)
+                    try:
+                        from email.utils import parsedate_to_datetime
+                        dt = parsedate_to_datetime(str(sec))
+                        if dt is not None:
+                            import datetime as _dt
+                            now = _dt.datetime.now(tz=dt.tzinfo) if dt.tzinfo else _dt.datetime.now()
+                            delta = (dt - now).total_seconds()
+                            if delta > 0:
+                                return float(delta)
+                    except (ValueError, TypeError, AttributeError):
+                        pass
 
     # Try error message text
     msg = str(error)

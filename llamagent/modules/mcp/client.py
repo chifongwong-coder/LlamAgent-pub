@@ -73,11 +73,14 @@ class MCPClient:
                     }
                 }
             timeout: Per-call timeout in seconds
-            max_retries: Maximum number of retries
+            max_retries: Maximum total attempts (NOT additional retries —
+                v3.8.1 R7-#30 clarification: ``range(self.max_retries)``
+                runs N total tries, not 1+N. Renamed semantically; the
+                attribute name kept for backward compatibility.
         """
         self.server_configs = server_configs
         self.timeout = timeout
-        self.max_retries = max_retries
+        self.max_retries = max_retries  # alias of "max_attempts" semantically
         # Active sessions: {server_name: ClientSession}
         self._sessions: dict[str, Any] = {}
         # Connection context managers (for cleanup)

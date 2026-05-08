@@ -130,7 +130,14 @@ class CompressionModule(Module):
         Applies configured compression strategies:
         - Strip thinking from assistant messages (if strip_thinking=True)
         - Compress tool results (if strategy != 'none' and content > max_chars)
+
+        v3.8.1 R7-#15: copy ``msg`` so caller's dict is not mutated.
+        Pre-fix this helper mutated the caller's message in place,
+        which surprised callers that reused the same dict for
+        logging / hooks. Defensive copy is cheap (shallow); nested
+        ``content`` is replaced by reassignment, not mutation.
         """
+        msg = dict(msg)
         role = msg.get("role")
 
         # Strip thinking from assistant messages
