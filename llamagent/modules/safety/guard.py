@@ -94,9 +94,19 @@ class SafetyGuard:
     # ------------------------------------------------------------------
 
     def _setup_logger(self, log_path: str) -> None:
-        """Configure audit logger."""
+        """Configure audit logger.
+
+        v3.8.1 R7-#22: track which handler we add so on_shutdown can
+        remove ONLY our handler. Pre-fix `removeHandler` walked
+        ``logger.handlers[:]`` which silently drops handlers other
+        SafetyGuard / SafetyModule instances added on the same shared
+        ``safety_audit`` logger — multi-agent deployments saw agent A's
+        shutdown silence agent B's audit log.
+        """
         self._logger = logging.getLogger("safety_audit")
         self._logger.setLevel(logging.INFO)
+        # v3.8.1 R7-#22: track handlers we add so we only remove our own
+        self._own_handlers: list[logging.Handler] = []
 
         if not self._logger.handlers:
             try:
@@ -106,10 +116,12 @@ class SafetyGuard:
                 )
                 handler.setFormatter(formatter)
                 self._logger.addHandler(handler)
+                self._own_handlers.append(handler)
             except IOError:
                 # Cannot write to log file, use console output
                 handler = logging.StreamHandler()
                 self._logger.addHandler(handler)
+                self._own_handlers.append(handler)
 
     # ------------------------------------------------------------------
     # Input Checking
