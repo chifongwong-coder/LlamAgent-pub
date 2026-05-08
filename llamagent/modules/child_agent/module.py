@@ -1314,6 +1314,19 @@ class ChildAgentModule(Module):
         # CONFIG before LlamAgent(config) so __init__ runs on the right
         # paths. Eliminates the entire init-ordering bug class.
 
+        # ---- 4a. (v3.8.3) Inherit parent's hook factories ----
+        # Closes ChildContract-7: callable hooks registered on parent
+        # via register_hook_factory now follow LLM-spawn-tool-created
+        # children too. Public API call into the agent — child_agent
+        # doesn't poke at child._hook_factories directly (P5 cleanliness
+        # — same hygiene as v3.8.2 P5-2's build_isolated_for class
+        # methods on Tools/JobModule).
+        # Child's own __init__ (step 3 above) already ran
+        # _invoke_pending_factories() with an empty list (no-op);
+        # inherit_hook_factories_from seeds the list AND invokes for
+        # real, registering each factory's child-bound handler.
+        child.inherit_hook_factories_from(parent)
+
         # ---- 5. Mode setup ----
         if is_continuous:
             child.confirm_handler = None

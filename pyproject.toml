@@ -28,6 +28,8 @@ dependencies = [
     "litellm>=1.40.0",
     "python-dotenv>=1.0.0",
     "requests>=2.28.0",
+    "pyyaml>=6.0",            # used by config / skill modules — was transitive via litellm; declare explicitly
+    "python-frontmatter>=1.0", # v3.8.1 R7-#12: fs_store/parser.py top-level import — mandatory for any agent that loads fs-backed memory / skill / knowledge stores
 ]
 
 [project.optional-dependencies]

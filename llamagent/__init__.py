@@ -17,6 +17,111 @@ Core design:
 A bare LlamAgent is a fully functional conversational Agent. Each
 module loaded grants a new capability.
 
+v3.8.3 highlights (ChildContract-7 closed via additive
+``register_hook_factory`` API + v3.8.x trio migration consolidation):
+
+- **`register_hook_factory(event, factory, *, matcher, priority, source)`**:
+  new ``LlamAgent`` public API. Unlike ``register_hook`` (per-agent;
+  handler binds to THIS agent's state, not inherited by child),
+  factories are kept on a separate list and re-invoked at each child
+  agent's construction. The factory receives the new agent instance
+  and returns a fresh handler bound to THAT agent's state. Solves
+  the LLM-spawn case where ``spawn_child`` creates a child dynamically
+  — integrators previously had no injection point between agent
+  construction and first hook event.
+
+  Sidesteps Python's closure-rebind impossibility (``func.__closure__``
+  cell vars are read-only at the public ABI). The factory pattern
+  doesn't try to rebind a handler — it produces a fresh handler
+  per agent.
+
+- **`unregister_hook_factory(factory) -> int`**: per-agent removal.
+  Already-spawned children retain the factory-generated handler in
+  their own ``_hooks`` table — unregister is NOT retroactive.
+
+- **`inherit_hook_factories_from(parent)` + child_agent step 4a**:
+  ``_create_child_agent`` between step 4 marker and step 5 mode setup
+  invokes ``child.inherit_hook_factories_from(parent)``. List-level
+  shallow copy of parent's factory registrations + immediate replay
+  on the child. Public API call, not private attribute poke (P5
+  cleanliness — same hygiene as v3.8.2 P5-2's ``build_isolated_for``).
+
+- **`_HookFactoryRegistration`** dataclass added to ``core/hooks.py``
+  (mirrors ``HookRegistration``'s shape but holds factory not handler).
+
+- **`_init_done` sentinel** on ``LlamAgent``: ``True`` at end of
+  ``__init__`` after ``_invoke_pending_factories()`` drains any
+  pre-init registrations. ``register_hook_factory`` uses it to
+  decide between "queue for __init__-end invoke" (pre _init_done)
+  vs "invoke immediately" (post _init_done — the common path for
+  Module.on_attach-style integrator wiring).
+
+- **Factory raise = log + skip**: a buggy factory cannot break agent
+  init or sibling factory registrations. ``_invoke_factory`` wraps
+  each call in try/except + warning log with traceback.
+
+- **Stateless contract** (load-bearing, framework-not-enforced):
+  factory body must be side-effect-free apart from creating the
+  handler. The docstring carries a top-level ⚠️ section. A test in
+  the private mock suite (``test_factory_with_state_documents_pollution``)
+  intentionally demonstrates the anti-pattern to lock the contract
+  on documentation, not on enforcement.
+
+- **Persistence reload**: factories live on agent INSTANCE, not on
+  ``Config``. After ``persistence_enabled=True`` reload, the new
+  ``LlamAgent(config)`` has empty ``_hook_factories``; integrators
+  MUST re-call ``register_hook_factory`` post-reload (same contract
+  as ``register_hook``).
+
+- **Trio integration test** (``tests/test_v2_features.py
+  ::test_v38x_lifecycle_smoke``): public smoke that locks the
+  cross-spec interaction across v3.8 + v3.8.1 + v3.8.2 + v3.8.3 —
+  Config.project_dir wiring, SkillModule + MemoryModule attach,
+  child_agent.build_isolated_for, register_hook_factory + step 4a
+  inheritance, combined shutdown chain.
+
+> Migrating to v3.8.x (consolidated trio note — covers v3.8.1 + v3.8.2
+> + v3.8.3 in one place per round-trio audit recommendation):
+>
+> **API breaks**:
+>   - **v3.8.2 E5**: ``Module.on_execute`` removed. Modules that
+>     overrode it must register an ``ExecutionStrategy`` via
+>     ``agent.set_execution_strategy(...)`` in ``on_attach`` (see
+>     PlanningModule for the canonical pattern, or the migrated
+>     ``tests/test_integration.py`` LegacyModule example).
+>
+> **Behavior changes**:
+>   - **v3.8.1 R7-#11**: skills without ``pin_packs: true`` lose
+>     their packs each turn (was: persist forever).
+>   - **v3.8.1 R7-#20**: ``start_job(cwd=<absolute path outside
+>     playground/write_root>)`` raises PermissionError (was:
+>     silently accepted).
+>
+> **Import-path moves (warnings only)**:
+>   - **v3.8.2 A1**: ``llamagent.modules.tools.snapshot`` is a
+>     2-version deprecation shim re-exporting from
+>     ``llamagent.core.snapshot``. Update imports; shim removed in
+>     v3.10.
+>
+> **New deps**:
+>   - **v3.8.1 R7-#12**: ``python-frontmatter>=1.0`` (PyYAML wrapper,
+>     0 transitive new deps).
+>
+> **New public APIs**:
+>   - **v3.8.2 P1-1**: ``LlamAgent.get_active_task_id`` /
+>     ``TaskModeController.get_active_task_id`` accessors. If
+>     reading ``agent._controller.state.task_id`` directly, switch.
+>   - **v3.8.3**: ``LlamAgent.register_hook_factory`` /
+>     ``unregister_hook_factory`` /
+>     ``inherit_hook_factories_from``.
+>
+> **Log-warning emit**:
+>   - **v3.8.1 R7-#12**: legacy v3.7.x permissive frontmatter files
+>     emit ``[skill-migrate]`` log warnings on load. Files still
+>     load via fallback parser. Run the ``migrate-skills`` builtin
+>     skill (auto-triggers on natural-language queries about
+>     "fix / migrate / repair / yaml") to upgrade in place.
+
 v3.8.2 highlights (architecture cleanup — A1 + E5 + P1-1 + P5-2 + P6-4
 audit, 7 git commits + 1 private audit doc, ~80 LOC net delete from
 twin-factory consolidation):
@@ -653,7 +758,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "3.8.2"
+__version__ = "3.8.3"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager
