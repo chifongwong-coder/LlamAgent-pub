@@ -48,10 +48,20 @@ class SafetyGuard:
             r"(?i)\[INST\]|\[/INST\]|<\|system\|>|<\|user\|>",
         ]
 
-        # Command blacklist: high-risk system commands
+        # Command blacklist: high-risk system commands.
+        # v3.8.1 R7-#1: extended rm-rf patterns to cover variants pre-fix
+        # silently allowed: -rfv, -fr, --recursive --force long form, and
+        # split flags like ``rm -r -f /``. Regex still single-token best-
+        # effort; users wanting bulletproof shell parsing should run their
+        # agent under sandbox with execute_command + execution_policy
+        # restricting working directory (see SandboxModule).
         self._blocked_commands = [
-            r"\brm\s+(-\w*\s+)*-rf\b",      # rm -rf
-            r"\brm\s+(-\w*\s+)*-fr\b",      # rm -fr
+            r"\brm\s+(-\w*\s+)*-rf?\w*\b",   # rm -rf, -rfv, etc.
+            r"\brm\s+(-\w*\s+)*-fr?\w*\b",   # rm -fr, -frv, etc.
+            r"\brm\s+(-\w*\s+)*-r\b.*-f\b",  # rm -r ... -f (split flags)
+            r"\brm\s+(-\w*\s+)*-f\b.*-r\b",  # rm -f ... -r (split flags)
+            r"\brm\s+--recursive\b.*--force\b",   # long form
+            r"\brm\s+--force\b.*--recursive\b",   # long form, swapped
             r"\bmkfs\b",                      # format filesystem
             r"\bdd\s+",                       # dd disk operation
             r"\bshutdown\b",                  # shutdown
