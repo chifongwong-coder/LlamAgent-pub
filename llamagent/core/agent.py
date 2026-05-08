@@ -598,6 +598,20 @@ class LlamAgent:
         # closures back to the parent agent and ``threading.local`` is
         # unpickleable.
         self._hooks: dict[HookEvent, list[HookRegistration]] = {}
+        # v3.8.3 ChildContract-7 fix: per-agent hook factory list. Each
+        # entry's factory(self_or_child) -> handler is invoked at
+        # __init__ end (and post-init when register_hook_factory is
+        # called after _init_done) and replayed on each spawned child
+        # via inherit_hook_factories_from. Pre-fix runtime register_hook
+        # didn't follow children — callable hook integrators had no
+        # injection point for LLM-spawned children.
+        from llamagent.core.hooks import _HookFactoryRegistration  # local: avoid top-level cycle
+        self._hook_factories: list[_HookFactoryRegistration] = []
+        # v3.8.3 sentinel — set True at the very end of __init__ (post
+        # _invoke_pending_factories). Used by register_hook_factory to
+        # decide between "queue for __init__-end invoke" (pre _init_done)
+        # vs "invoke immediately" (post _init_done).
+        self._init_done: bool = False
         self._session_started: bool = False
 
         # Register YAML-configured hooks
@@ -635,6 +649,18 @@ class LlamAgent:
 
         # v2.7: auto_approve = full project scope
         self._seed_auto_approve_scope()
+
+        # v3.8.3 ChildContract-7 fix: invoke any pending hook factories
+        # that integrators registered before constructing this agent
+        # (e.g. via Module.on_attach forwarding to register_hook_factory).
+        # First-time agents have an empty list — no-op. Children built
+        # via _create_child_agent get this list seeded by step 4a.
+        self._invoke_pending_factories()
+        # v3.8.3 sentinel: __init__ is done. register_hook_factory uses
+        # this to decide whether to invoke the factory immediately
+        # (post-init) or just append (during init — _invoke_pending
+        # above already drained any pending entries).
+        self._init_done = True
 
     def _seed_auto_approve_scope(self) -> None:
         """Seed a session-scoped project read/write scope when auto_approve is on.
@@ -1231,6 +1257,172 @@ class LlamAgent:
         self._hooks[event].sort(key=lambda r: r.priority)
 
         logger.debug("Hook registered: event=%s, source=%s, priority=%d", event.value, source, priority)
+
+    # ============================================================
+    # v3.8.3: Hook factory API (ChildContract-7 fix)
+    # ============================================================
+
+    def register_hook_factory(
+        self,
+        event: HookEvent,
+        factory: "Callable",
+        *,
+        matcher: HookMatcher | None = None,
+        priority: int = 100,
+        source: str = "code",
+    ) -> None:
+        """Register a hook FACTORY whose product follows the agent into
+        child agents.
+
+        Unlike ``register_hook`` (per-agent: registered handler binds to
+        THIS agent's state; not inherited by child), factories are kept
+        on a separate list and re-invoked at each child agent's
+        ``__init__``. The factory receives the new agent instance and
+        returns a fresh ``HookCallback`` or ``HookHandler`` bound to
+        THAT agent's state.
+
+        This solves the LLM-spawn case where a child is created
+        dynamically by the ``spawn_child`` tool — the integrating
+        developer has no chance to ``child.register_hook(...)`` between
+        agent construction and first hook event. Factories close that
+        gap without requiring closure-rebind hacks (Python's
+        ``func.__closure__`` cell vars are read-only at the public ABI).
+
+        Args:
+            event: Event type to listen for
+            factory: ``factory(agent) -> handler``. Called once per
+                agent construction (parent and each child). MUST be
+                deterministic and side-effect-free apart from creating
+                the handler.
+            matcher: Optional filter conditions (passed through to
+                each generated handler registration; same semantics as
+                ``register_hook``)
+            priority: Same as ``register_hook``
+            source: Registration source identifier ("code" / "yaml")
+
+        ⚠️ P1 contract for the factory body (round-2 trio audit):
+            Factories receive the agent via ``factory(agent)``;
+            DO NOT read ``agent._controller.state.task_id`` /
+            ``agent._authorization_engine.state`` / other private
+            attributes inside the factory body. v3.8.2 P1-1 introduced
+            ``agent.get_active_task_id()`` as the public courier API —
+            use that. Factories that bypass these accessors silently
+            undo the v3.8.2 信使 fix one user-code level out.
+
+        ⚠️ Stateless-factory contract (load-bearing — framework cannot
+            enforce):
+            The factory MUST be a stateless callable. Each invocation
+            (``factory(parent)``, then ``factory(child1)``, etc.) must
+            produce a fresh handler closing over ONLY the agent
+            argument it received. If the factory closes over external
+            mutable state (e.g. a counter, a list it appends to),
+            that state will leak across all agents in the lineage —
+            exactly the cross-agent state pollution this API was
+            designed to AVOID.
+
+        Notes:
+            - Factory raise during ``__init__`` (or step-4a inheritance
+              into a child) is logged with traceback and the factory is
+              SKIPPED for that agent. The loop continues to the next
+              factory — partial registration is preferred over total
+              init failure.
+            - Factories are NOT serialized by persistence. After a
+              ``persistence_enabled`` session reload, the new
+              ``LlamAgent(config)`` instance has an empty
+              ``_hook_factories`` list (factories live on agent
+              instance, not on ``Config``). The integrating developer
+              MUST re-call ``register_hook_factory`` post-reload.
+            - Unregister: ``unregister_hook_factory(factory)`` removes
+              from THIS agent only; previously-spawned children retain
+              the factory-generated handler (per-agent semantics).
+        """
+        from llamagent.core.hooks import _HookFactoryRegistration
+        reg = _HookFactoryRegistration(
+            event=event, factory=factory, matcher=matcher,
+            priority=priority, source=source,
+        )
+        self._hook_factories.append(reg)
+
+        # If __init__ already finished, invoke immediately so the
+        # factory's output handler is active for THIS agent.
+        # Subsequent children also inherit (see step 4a inheritance in
+        # modules/child_agent/module.py).
+        if getattr(self, "_init_done", False):
+            self._invoke_factory(reg)
+
+    def unregister_hook_factory(self, factory: "Callable") -> int:
+        """Remove a hook factory registration from this agent.
+
+        Returns the number of registrations removed (0 if factory was
+        never registered on this agent).
+
+        Note: existing children spawned BEFORE this call retain the
+        factory-generated handler in their own ``_hooks`` table —
+        unregister is per-agent, not retroactive. Future children
+        spawned AFTER unregister will not inherit the factory.
+        """
+        keep = []
+        removed = 0
+        for reg in self._hook_factories:
+            if reg.factory is factory:
+                removed += 1
+            else:
+                keep.append(reg)
+        self._hook_factories = keep
+        return removed
+
+    def _invoke_pending_factories(self) -> None:
+        """Run each registered factory and register the resulting
+        handler. Used by ``__init__`` (drains pre-init registrations)
+        and by ``inherit_hook_factories_from`` (drains parent's list
+        after copying). Idempotent for already-invoked factories
+        because ``register_hook`` always appends a fresh
+        ``HookRegistration`` — re-invoking would double-register;
+        callers should not call this twice on the same agent.
+        """
+        for reg in list(self._hook_factories):
+            self._invoke_factory(reg)
+
+    def _invoke_factory(self, reg) -> None:
+        """Run one factory and register its handler. Logs + swallows
+        any exception so a buggy factory cannot break agent init or
+        sibling factory registrations."""
+        try:
+            handler = reg.factory(self)
+            self.register_hook(
+                event=reg.event,
+                handler=handler,
+                matcher=reg.matcher,
+                priority=reg.priority,
+                source=reg.source,
+            )
+        except Exception as e:
+            logger.warning(
+                "[hook-factory] factory %r raised on agent init: %s",
+                getattr(reg.factory, "__qualname__", reg.factory), e,
+                exc_info=True,
+            )
+
+    def inherit_hook_factories_from(self, parent: "LlamAgent") -> None:
+        """Inherit factory registrations from parent and invoke them
+        on self.
+
+        Used by the child_agent factory (step 4a) to give a freshly-
+        constructed child the same hook-factory list as its parent.
+        Factories are stateless callables (factory(agent) -> handler),
+        so list-level shallow copy is sufficient: the list container
+        is independent (child can later register/unregister without
+        affecting parent), but the factory callable references are
+        shared.
+
+        Side effect: each inherited factory is immediately invoked
+        with ``self`` to register its child-bound handler. ``self``'s
+        own ``__init__`` already ran ``_invoke_pending_factories()``
+        with an empty list (no-op); this method seeds + invokes for
+        real.
+        """
+        self._hook_factories = list(parent._hook_factories)
+        self._invoke_pending_factories()
 
     # v3.7.3: class-level per-thread reentry tracker. Each thread sees its
     # own ``set`` of agent ids currently inside a hook handler. Storing on
