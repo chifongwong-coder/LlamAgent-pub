@@ -1483,6 +1483,16 @@ class ChildAgentModule(Module):
         # forward explicitly.
         child._tool_state = dict(parent._tool_state)
 
+        # v3.8.1 Q6 ChildContract-6: shallow-copy parent's _persisted_files
+        # LRU. Pre-fix child started with an empty OrderedDict, so when
+        # child read a tool result the parent had already persisted, the
+        # defense-line-2 LRU couldn't recognize the path → child re-
+        # persisted a redundant copy under tool_results/. Same shape as
+        # _tool_state shallow-copy above (service refs shared, container
+        # independent so child's later persists don't bleed to parent).
+        from collections import OrderedDict as _OD
+        child._persisted_files = _OD(getattr(parent, "_persisted_files", _OD()))
+
         if spec.policy and spec.policy.tool_allowlist is not None:
             for tool_name in spec.policy.tool_allowlist:
                 if tool_name in parent._tools:
