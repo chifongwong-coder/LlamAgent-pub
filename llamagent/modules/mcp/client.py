@@ -158,8 +158,13 @@ class MCPClient:
         self._connections[name] = client_ctx
         read, write = client
 
-        # Initialize MCP session (protocol handshake)
+        # v3.8.1 R7-#3: enter the ClientSession context manager so the
+        # disconnect path's ``await session.__aexit__(None, None, None)``
+        # has a matching __aenter__. Pre-fix __aexit__ ran without prior
+        # __aenter__, which is a protocol violation that some
+        # ClientSession implementations log a warning for.
         session = ClientSession(read, write)
+        await session.__aenter__()
         await asyncio.wait_for(session.initialize(), timeout=self.timeout)
 
         return session
@@ -178,8 +183,10 @@ class MCPClient:
         self._connections[name] = client_ctx
         read, write = client
 
-        # Initialize session
+        # v3.8.1 R7-#3: enter the ClientSession context manager (see
+        # _connect_stdio rationale).
         session = ClientSession(read, write)
+        await session.__aenter__()
         await asyncio.wait_for(session.initialize(), timeout=self.timeout)
 
         return session

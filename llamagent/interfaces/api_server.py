@@ -499,13 +499,30 @@ def create_api_server(
             if request.url.path in exempt_paths:
                 return await call_next(request)
 
-            client_ip = request.client.host if request.client else "unknown"
+            # v3.8.1 R7-#6: prefer X-Forwarded-For when present so
+            # reverse-proxy deployments (Nginx / Cloudflare / load
+            # balancer) don't bucket all clients into the proxy IP and
+            # rate-limit each other into oblivion. First IP in the chain
+            # is the original client. Operators must configure their
+            # reverse proxy to set this header — without it any caller
+            # could spoof.
+            xff = request.headers.get("x-forwarded-for", "")
+            if xff:
+                client_ip = xff.split(",")[0].strip() or (
+                    request.client.host if request.client else "unknown"
+                )
+            else:
+                client_ip = request.client.host if request.client else "unknown"
             now = time.time()
 
             # v3.8.1 R7-#5: rate_limit_store mutations under _session_lock
             # alongside agent_sessions / runner_sessions. Same lock keeps
             # the per-request acquire count to one (rate check usually
             # follows _get_agent in the handler).
+            # v3.8.1 R7-#7: periodic prune of empty timestamp lists.
+            # Pre-fix `rate_limit_store` accumulated keys for every IP
+            # forever, even after the window expired and timestamps
+            # filtered to []. Prune every 256 dispatches.
             with _session_lock:
                 timestamps = rate_limit_store.get(client_ip, [])
                 timestamps = [t for t in timestamps if now - t < self.window_seconds]
@@ -521,6 +538,18 @@ def create_api_server(
 
                 timestamps.append(now)
                 rate_limit_store[client_ip] = timestamps
+
+                # v3.8.1 R7-#7: periodic prune of empty/stale entries.
+                # Counter on the middleware instance — cheap and bounded.
+                self._prune_counter = getattr(self, "_prune_counter", 0) + 1
+                if self._prune_counter >= 256:
+                    self._prune_counter = 0
+                    stale = [
+                        ip for ip, ts in rate_limit_store.items()
+                        if not [t for t in ts if now - t < self.window_seconds]
+                    ]
+                    for ip in stale:
+                        rate_limit_store.pop(ip, None)
             return await call_next(request)
 
     app.add_middleware(RateLimitMiddleware, max_requests=60, window_seconds=60)
@@ -1105,9 +1134,20 @@ def create_api_server(
         3. Server streams back {"type": "chunk", "content": "..."}
         4. Finally sends {"type": "done", "content": "full reply"}
         5. On error, returns {"type": "error", "content": "error message"}
+
+        Session routing (v3.8.1 R7-#8): per-session agent isolation via
+        URL query string ``?session_id=<sid>``. Pre-fix all WS clients
+        shared the singleton "default" agent so chat history /
+        persona / runner state leaked cross-client. Old clients without
+        the query string fall back to "default" (zero break). New
+        clients connect to e.g. ``wss://host/ws/chat?session_id=alice``
+        for isolation. Industry-standard pattern (Slack RTM / Discord
+        Gateway / OpenAI Realtime).
         """
         await websocket.accept()
-        logger.info("WebSocket client connected")
+        # v3.8.1 R7-#8: read session_id from URL query, fallback "default"
+        sid = websocket.query_params.get("session_id") or "default"
+        logger.info("WebSocket client connected: session=%s", sid)
 
         # Authentication (if token is configured)
         if API_AUTH_TOKEN:
@@ -1138,7 +1178,8 @@ def create_api_server(
                 await websocket.close(code=4002)
                 return
 
-        agent = _get_agent()
+        # v3.8.1 R7-#8: per-session agent (sid from URL query string)
+        agent = _get_agent(sid)
 
         try:
             while True:
