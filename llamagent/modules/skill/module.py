@@ -74,6 +74,20 @@ class SkillModule(Module):
             names = [s.name for s in skills]
             logger.info("SkillModule loaded %d skill(s): %s", len(skills), names)
 
+        # v3.8.1 R7-#11: per-skill pack tracker.
+        # Each entry maps skill_name → set of pack names that skill added
+        # to ``agent._active_packs``. on_context revokes packs whose owning
+        # skill is no longer in the activated set (unless that skill is
+        # ``pin_packs=True``, in which case it never enters this dict).
+        self._skill_added_packs: dict[str, set[str]] = {}
+
+        # v3.8.1 R7-#11 round-5 (option c): rebuild tracker from any
+        # already-loaded ``_active_packs``. Persistence reload restores
+        # ``_active_packs`` from disk; without this, skill-added packs
+        # become unrevocable forever post-reload (the "round-1 reviewer
+        # REAL" lock from §9.1 round-5 audit).
+        self._rebuild_tracker_from_active_packs()
+
         # Register load_skill tool (L3: LLM can self-serve skill content).
         # truncatable=False: skill bodies are author-controlled content, not
         # tool output that needs persisting. If a skill is genuinely huge,
@@ -101,6 +115,29 @@ class SkillModule(Module):
             safety_level=1,
             truncatable=False,
         )
+
+    def _rebuild_tracker_from_active_packs(self) -> None:
+        """v3.8.1 R7-#11 round-5 option (c): seed _skill_added_packs by
+        intersecting agent._active_packs with each loaded auto-trigger
+        skill's required_tool_packs.
+
+        After persistence reload, ``agent._active_packs`` contains the set
+        from before save but ``_skill_added_packs`` starts empty. Without
+        this rebuild, packs in ``_active_packs`` whose owning skill is no
+        longer activated this turn would never get revoked. Multiple skills
+        may declare the same pack — that's harmless because cleanup only
+        cares about whether a recorded skill name leaves currently_activated;
+        re-add covers any over-revoke on the next turn.
+        """
+        active = getattr(self.agent, "_active_packs", None)
+        if not active:
+            return
+        for meta in self.index.all_skills():
+            if not meta.required_tool_packs or meta.pin_packs:
+                continue
+            overlap = set(meta.required_tool_packs) & set(active)
+            if overlap:
+                self._skill_added_packs[meta.name] = overlap
 
     def _build_scan_paths(self, agent: LlamAgent) -> list[tuple[str, str]]:
         """
@@ -223,6 +260,22 @@ class SkillModule(Module):
         # Record activated skills for cross-module queries (e.g. ReflectionModule)
         self._current_activated = activated
 
+        # v3.8.1 R7-#11: revoke last turn's auto-skill packs whose skill
+        # is no longer in this turn's activated set. Pinned skills
+        # (pin_packs=True) never enter _skill_added_packs so they survive.
+        # round-5 fix: full replacement (not setdefault+update) so a skill
+        # whose required_tool_packs SHRINKS between turns gets the dropped
+        # packs revoked when the skill next deactivates.
+        revoke = [
+            skill_name
+            for skill_name in self._skill_added_packs
+            if skill_name not in activated_names
+        ]
+        for skill_name in revoke:
+            for pack in self._skill_added_packs[skill_name]:
+                self.agent._active_packs.discard(pack)
+            del self._skill_added_packs[skill_name]
+
         # --- Inject activated skill content + activate tool packs ---
         blocks: list[str] = []
         for meta in activated:
@@ -235,6 +288,13 @@ class SkillModule(Module):
             if meta.required_tool_packs:
                 for pack_name in meta.required_tool_packs:
                     self.agent._active_packs.add(pack_name)
+                if not meta.pin_packs:
+                    # v3.8.1 R7-#11 round-5 BLOCKER fix: full replacement,
+                    # NOT setdefault+update. If the pack list shrinks
+                    # between activations, the old set must be replaced
+                    # wholesale so revoke catches the dropped packs next
+                    # time the skill deactivates.
+                    self._skill_added_packs[meta.name] = set(meta.required_tool_packs)
 
         # --- L3: inject skill index (exclude already activated) ---
         skill_index = self._build_skill_index(activated_names)

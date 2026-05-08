@@ -55,6 +55,13 @@ class SkillMeta:
     content_path: str = ""  # Full path to SKILL.md or .md file
     source_format: str = "config"  # "config" / "frontmatter" / "plain_md"
     always: bool = False  # L4: inject every turn
+    # v3.8.1 R7-#11: when True, packs added by this skill stay in
+    # ``agent._active_packs`` even after the skill deactivates. Default
+    # False means auto-revoke at next on_context where the skill is no
+    # longer in the activated set. Skills that legitimately need their
+    # packs to persist across turns (e.g. always-on tooling) declare
+    # ``pin_packs: true`` in frontmatter / config.yaml.
+    pin_packs: bool = False
 
 
 class SkillIndex:
@@ -221,6 +228,8 @@ class SkillIndex:
 
         # always flag (L4)
         always = bool(data.get("always", False))
+        # v3.8.1 R7-#11: pin_packs flag — skill's packs persist across turns
+        pin_packs = bool(data.get("pin_packs", False))
 
         return SkillMeta(
             name=str(name).strip(),
@@ -234,6 +243,7 @@ class SkillIndex:
             content_path=content_path,
             source_format="config",
             always=always,
+            pin_packs=pin_packs,
         )
 
     # ------------------------------------------------------------------
@@ -292,6 +302,8 @@ class SkillIndex:
 
         # Always
         always = bool(meta_dict.get("always", False))
+        # v3.8.1 R7-#11
+        pin_packs = bool(meta_dict.get("pin_packs", False))
 
         # source_format: "frontmatter" if we got real frontmatter, "plain_md" otherwise
         source_format = "frontmatter" if meta_dict else "plain_md"
@@ -307,6 +319,7 @@ class SkillIndex:
             content_path=skill_path,
             source_format=source_format,
             always=always,
+            pin_packs=pin_packs,
         )
 
     def _load_from_md_file(self, md_path: str) -> SkillMeta | None:
@@ -360,6 +373,8 @@ class SkillIndex:
 
         # Always
         always = bool(meta_dict.get("always", False))
+        # v3.8.1 R7-#11
+        pin_packs = bool(meta_dict.get("pin_packs", False))
 
         # source_format
         source_format = "frontmatter" if meta_dict else "plain_md"
@@ -375,6 +390,7 @@ class SkillIndex:
             content_path=md_path,
             source_format=source_format,
             always=always,
+            pin_packs=pin_packs,
         )
 
     # ------------------------------------------------------------------
