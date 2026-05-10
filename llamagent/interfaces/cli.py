@@ -109,18 +109,64 @@ def _ask_confirm(prompt: str, default: bool = True) -> bool:
 # ============================================================
 from llamagent import __version__ as VERSION
 
-BANNER = """
-[bold cyan]
-  _     _                    _                    _
- | |   | |                  / \\   __ _  ___ _ __ | |_
- | |   | | __ _ _ __ ___   / _ \\ / _` |/ _ \\ '_ \\| __|
- | |___| |/ _` | '_ ` _ \\ / ___ \\ (_| |  __/ | | | |_
- |_____|_|\\__,_|_| |_| |_/_/   \\_\\__, |\\___|_| |_|\\__|
-                                  |___/
-[/bold cyan]
-[bold white]  LlamAgent v{version} — Modular AI Agent Framework[/bold white]
-[dim]  Type /help for commands | Ctrl+C to return to setup[/dim]
-""".format(version=VERSION)
+# Chibi llama mascot holding a wrench (left) and screwdriver (right).
+# Active variant: cute / minimal — cleanest silhouette, instantly readable.
+LLAMA_ART = r"""
+                      /\__/\
+                     (      )
+                     ( ^  ^ )            _
+                     (   o  )           / \
+            ___       '----'           ( = )
+        <===___>--.  /      \  .------ | | |
+                  '-/        \-'       | | |
+                   '----------'         \|/
+                                         v
+"""
+
+# Variant 2 (detailed / textured) — wool-fluff shading, swap in if a busier
+# look is wanted. Left as a comment for future themes:
+# r"""
+#                        .-/\--/\-.
+#                       /          \
+#                      :  ^      ^  :
+#                      :     o      :          ___
+#                      :.          .:         /   \
+#             ___       '.________.'          | = |
+#         <===___>--.  /::........::\  .----- | : |
+#                   '-/::..........::\-'      |   |
+#                    /::::........::::\.       | |
+#                   /::::::........::::\        v
+#                   '------------------'
+# """
+#
+# Variant 3 (bold / blocky) — chunkier retro outline. Left as a comment:
+# r"""
+#                       /==\  /==\
+#                      /    \/    \
+#                     |  ^      ^  |
+#                     |     ()     |           ___
+#             ====     \    --    /           |===|
+#         <=======o-.   '--------'   .--o     |   |
+#                   '--/==========\-'         |   |
+#                     /============\           |||
+#                    /==============\          |||
+#                   '----------------'          v
+# """
+
+# Built without .format() so any literal { } / [ ] in the art can't blow up.
+BANNER = (
+    "\n[bold cyan]"
+    + LLAMA_ART
+    + "\n  _     _                    _                    _\n"
+    + " | |   | |                  / \\   __ _  ___ _ __ | |_\n"
+    + " | |   | | __ _ _ __ ___   / _ \\ / _` |/ _ \\ '_ \\| __|\n"
+    + " | |___| |/ _` | '_ ` _ \\ / ___ \\ (_| |  __/ | | | |_\n"
+    + " |_____|_|\\__,_|_| |_| |_/_/   \\_\\__, |\\___|_| |_|\\__|\n"
+    + "                                  |___/\n"
+    + "[/bold cyan]\n"
+    + f"[bold white]  LlamAgent v{VERSION} — Modular AI Agent Framework[/bold white]\n"
+    + "[dim]  Type /help for commands | Ctrl+C to return to setup[/dim]\n"
+)
 
 
 # ============================================================
