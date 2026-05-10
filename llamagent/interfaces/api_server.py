@@ -116,6 +116,7 @@ if HAS_FASTAPI:
         )
         session_id: Optional[str] = Field(
             default=None,
+            max_length=128,
             description="Session ID for maintaining context. If omitted, the default session is used",
         )
 
@@ -129,6 +130,7 @@ if HAS_FASTAPI:
         )
         session_id: Optional[str] = Field(
             default=None,
+            max_length=128,
             description="Session ID for maintaining context. If omitted, the default session is used",
         )
 
@@ -175,6 +177,7 @@ if HAS_FASTAPI:
         )
         session_id: Optional[str] = Field(
             default=None,
+            max_length=128,
             description="Session ID. If omitted, the default session is used",
         )
 
@@ -209,6 +212,7 @@ if HAS_FASTAPI:
         )
         session_id: Optional[str] = Field(
             default=None,
+            max_length=128,
             description="Session ID. If omitted, the default session is used",
         )
 
@@ -228,6 +232,7 @@ if HAS_FASTAPI:
         )
         session_id: Optional[str] = Field(
             default=None,
+            max_length=128,
             description="Session ID. If omitted, the default session is used",
         )
 
@@ -1147,6 +1152,12 @@ def create_api_server(
         await websocket.accept()
         # v3.8.1 R7-#8: read session_id from URL query, fallback "default"
         sid = websocket.query_params.get("session_id") or "default"
+        # v3.8.4: same 128-char ceiling enforced on the Pydantic-typed
+        # HTTP entry points. Query-string params don't go through Pydantic
+        # so the bound is enforced manually. 1008 = policy violation.
+        if len(sid) > 128:
+            await websocket.close(code=1008, reason="session_id exceeds 128 characters")
+            return
         logger.info("WebSocket client connected: session=%s", sid)
 
         # Authentication (if token is configured)
