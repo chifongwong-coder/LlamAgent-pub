@@ -14,6 +14,7 @@ import tempfile
 import pytest
 from unittest.mock import MagicMock
 
+from conftest import REPO_ROOT
 from llamagent.modules.sandbox.policy import (
     ExecutionPolicy,
     POLICY_SHELL_LIMITED,
@@ -189,7 +190,7 @@ class TestSandboxIntegrationAndCompat:
         agent2.confirm_handler = None
         agent2.interaction_handler = None
         agent2._confirm_wait_time = 0.0
-        agent2.project_dir = os.path.realpath(os.getcwd())
+        agent2.project_dir = REPO_ROOT
         agent2.playground_dir = os.path.realpath(os.path.join(agent2.project_dir, "llama_playground"))
         agent2.tool_executor = None
         agent2._tools = {}
@@ -232,7 +233,7 @@ class TestSandboxIntegrationAndCompat:
         agent3.confirm_handler = None
         agent3.interaction_handler = None
         agent3._confirm_wait_time = 0.0
-        agent3.project_dir = os.path.realpath(os.getcwd())
+        agent3.project_dir = REPO_ROOT
         agent3.playground_dir = os.path.realpath(os.path.join(agent3.project_dir, "llama_playground"))
         agent3.tool_executor = None
         agent3._tools = {}
