@@ -120,7 +120,10 @@ class FSStore:
         Args:
             filename: File name within the base directory.
         """
-        path = os.path.join(self._base_dir, filename)
+        try:
+            path = self._validate_filename(filename)
+        except ValueError:
+            return
         try:
             os.remove(path)
             logger.debug("Deleted file %s", filename)
@@ -142,7 +145,11 @@ class FSStore:
         Returns:
             True if the file exists, False otherwise.
         """
-        return os.path.isfile(os.path.join(self._base_dir, filename))
+        try:
+            path = self._validate_filename(filename)
+        except ValueError:
+            return False
+        return os.path.isfile(path)
 
     @property
     def base_dir(self) -> str:

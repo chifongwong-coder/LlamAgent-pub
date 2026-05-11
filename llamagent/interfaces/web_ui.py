@@ -18,6 +18,11 @@ separately from CLI entry points.
 
 import html
 import os
+from pathlib import Path
+
+# Resolve repo-root /images/llamagent.png from this file's location:
+# llamagent/interfaces/web_ui.py -> repo root is two parents up.
+_HERO_IMAGE_PATH = Path(__file__).resolve().parent.parent.parent / "images" / "llamagent.png"
 
 try:
     import gradio as gr
@@ -584,7 +589,25 @@ def create_web_ui() -> "gr.Blocks":
         # mutable default would re-introduce the cross-session leak).
         session_st = gr.State(value=lambda: {"agent": None, "runner": None, "thread": None})
 
-        gr.Markdown("# LlamAgent\n**Configure your agent, then start chatting**")
+        # v3.8.4: hero image + title side-by-side. Falls back to text-only
+        # markdown when the asset is missing (wheel installs that don't
+        # ship images/, etc.) so the UI never breaks on missing art.
+        if _HERO_IMAGE_PATH.is_file():
+            with gr.Row():
+                gr.Image(
+                    value=str(_HERO_IMAGE_PATH),
+                    height=140,
+                    container=False,
+                    show_label=False,
+                    show_download_button=False,
+                    interactive=False,
+                    scale=1,
+                )
+                gr.Markdown(
+                    "# LlamAgent\n**Configure your agent, then start chatting**"
+                )
+        else:
+            gr.Markdown("# LlamAgent\n**Configure your agent, then start chatting**")
 
         # ============================================
         # Configuration Panel

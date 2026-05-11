@@ -17,6 +17,66 @@ Core design:
 A bare LlamAgent is a fully functional conversational Agent. Each
 module loaded grants a new capability.
 
+v3.8.4 highlights (post-v3.8.3 audit cleanup + small CLI/Web feature):
+
+- **FSStore defense-in-depth completion**: ``FSStore.delete_file`` and
+  ``FSStore.file_exists`` now run the same realpath-bounded
+  ``_validate_filename`` check that v3.8.1 R7-#28 added to
+  ``write_file`` / ``read_file``. Both methods fail-soft on validation
+  failure (delete silently returns, file_exists returns False) — the
+  shape mirrors ``read_file``'s None-on-bad-path behaviour. Filenames
+  flowing into FSStore come from internal code paths, so practical
+  exploitability was low; the fix closes a documentation-vs-behaviour
+  gap rather than an exploitable hole.
+
+- **SkillIndex alias-collision diagnostic**: when an alias collides
+  with an existing skill name or another already-registered alias,
+  the new alias is dropped (first-write-wins, behaviour unchanged) but
+  now also emits a ``logger.warning`` naming the offending skill,
+  alias, and existing claimant. Side fix: the lowercase skill-name
+  set used to be rebuilt inside the per-alias loop; lifted out.
+
+- **api_server session_id length cap**: 5 Pydantic request models
+  (ChatRequest, ChatStreamRequest, ModeRequest, RunnerStartRequest,
+  InjectRequest) gain ``Field(..., max_length=128)`` on their
+  ``session_id``. The ``/ws/chat`` WebSocket endpoint enforces the
+  same 128-char ceiling manually because query-string params bypass
+  Pydantic; over-length closes the socket with code 1008 (policy
+  violation). 128 chars fits UUID + custom prefix; no charset pattern
+  is enforced because i18n / business IDs may use non-ASCII.
+
+  **Behaviour change**: HTTP requests with session_id over 128 chars
+  now get 422; WebSocket gets a 1008 close. Real-world break is
+  minimal (default ``"default"`` and UUIDs all fit), but document
+  this if you wrap the API server.
+
+- **CLI ASCII llama banner**: ``llamagent.interfaces.cli.BANNER`` now
+  shows a chibi llama mascot holding a wrench (left) and a
+  screwdriver (right) — same character as the project logo at
+  ``images/llamagent.png``. Three style variants are checked in
+  (active + two commented alternatives). The BANNER is built via
+  string concatenation rather than ``.format()`` so any literal ``{``
+  ``}`` in the art can't trigger KeyError at import time.
+
+- **Web UI hero image**: ``create_web_ui`` shows the project logo
+  (``images/llamagent.png``) next to the page title in a two-column
+  ``gr.Row``. Falls back to text-only title when the asset is missing
+  (e.g. wheel installs that don't ship ``images/``) via
+  ``Path.is_file()`` guard, so the UI never breaks on missing art.
+  Wheel packaging of the asset is intentionally deferred to a future
+  release.
+
+- **docs/modules/tools/api.md ScratchService rewrite**: the v3.4
+  ``WorkspaceService`` → ``ScratchService`` rename and the v3.3
+  removal of ``project:`` path prefix were never reflected in the
+  module API doc; v3.8.4 brings the doc in line with current code.
+  Also flags ``WORKSPACE_GUIDE`` → ``FILE_TOOL_GUIDE`` and the
+  removed ``sync_workspace_to_project`` tool. Private doc, gitignored.
+
+> Migrating to v3.8.4: only the ``session_id`` length cap is a public
+> behaviour change. Everything else is internal hardening, diagnostic,
+> or visual polish. No new dependencies.
+
 v3.8.3 highlights (ChildContract-7 closed via additive
 ``register_hook_factory`` API + v3.8.x trio migration consolidation):
 
@@ -758,7 +818,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "3.8.3"
+__version__ = "3.8.4"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager

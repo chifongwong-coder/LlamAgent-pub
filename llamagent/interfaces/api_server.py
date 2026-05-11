@@ -116,6 +116,7 @@ if HAS_FASTAPI:
         )
         session_id: Optional[str] = Field(
             default=None,
+            max_length=128,
             description="Session ID for maintaining context. If omitted, the default session is used",
         )
 
@@ -129,6 +130,7 @@ if HAS_FASTAPI:
         )
         session_id: Optional[str] = Field(
             default=None,
+            max_length=128,
             description="Session ID for maintaining context. If omitted, the default session is used",
         )
 
@@ -175,6 +177,7 @@ if HAS_FASTAPI:
         )
         session_id: Optional[str] = Field(
             default=None,
+            max_length=128,
             description="Session ID. If omitted, the default session is used",
         )
 
@@ -209,6 +212,7 @@ if HAS_FASTAPI:
         )
         session_id: Optional[str] = Field(
             default=None,
+            max_length=128,
             description="Session ID. If omitted, the default session is used",
         )
 
@@ -228,6 +232,7 @@ if HAS_FASTAPI:
         )
         session_id: Optional[str] = Field(
             default=None,
+            max_length=128,
             description="Session ID. If omitted, the default session is used",
         )
 
@@ -1144,9 +1149,18 @@ def create_api_server(
         for isolation. Industry-standard pattern (Slack RTM / Discord
         Gateway / OpenAI Realtime).
         """
-        await websocket.accept()
         # v3.8.1 R7-#8: read session_id from URL query, fallback "default"
         sid = websocket.query_params.get("session_id") or "default"
+        # v3.8.4: same 128-char ceiling enforced on the Pydantic-typed
+        # HTTP entry points. Query-string params don't go through Pydantic
+        # so the bound is enforced manually. Reject must happen BEFORE
+        # accept(): close-after-accept produces a confusing "upgraded then
+        # immediately closed" handshake. websocket.close() before accept()
+        # responds with HTTP 403 (Starlette default) instead.
+        if len(sid) > 128:
+            await websocket.close(code=1008, reason="session_id exceeds 128 characters")
+            return
+        await websocket.accept()
         logger.info("WebSocket client connected: session=%s", sid)
 
         # Authentication (if token is configured)

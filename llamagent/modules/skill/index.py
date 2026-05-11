@@ -166,16 +166,29 @@ class SkillIndex:
             return
 
         self._skills[meta.name] = meta
+        # v3.8.4: build the lowercase skill-name set once instead of per-alias.
+        # The original loop rebuilt it inside the for-body for every alias,
+        # which is O(n_skills * n_aliases) rebuild cost on every register call.
+        existing_names_lc = {n.lower() for n in self._skills}
         for alias in meta.aliases:
             key = alias.lower()
             # v3.8.1 R7-#29: alias collision check must compare in the
-            # same case as _skills storage. _skills is keyed on
-            # case-preserved name (meta.name); compare alias lowercase
-            # against lowercase skill names.
-            if key in {n.lower() for n in self._skills}:
+            # same case as _skills storage.
+            if key in existing_names_lc:
+                logger.warning(
+                    "Skill '%s' alias '%s' collides with an existing skill "
+                    "name; alias dropped.",
+                    meta.name, alias,
+                )
                 continue
-            if key not in self._alias_map:
-                self._alias_map[key] = meta.name
+            if key in self._alias_map:
+                logger.warning(
+                    "Skill '%s' alias '%s' already claimed by skill '%s'; "
+                    "alias dropped.",
+                    meta.name, alias, self._alias_map[key],
+                )
+                continue
+            self._alias_map[key] = meta.name
 
     def _parse_config(
         self, config_path: str, skill_dir: str, priority: str
