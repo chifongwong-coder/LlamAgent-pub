@@ -119,6 +119,20 @@ def make_stream_tool_call_chunks(tool_name: str, arguments: dict, call_id: str =
 # Fixtures
 # ============================================================
 
+
+@pytest.fixture(autouse=True)
+def _reset_safety_audit_logger():
+    """v3.8.5: SafetyGuard's audit logger moved to a process-lifetime
+    singleton. Reset module-level state between tests so each case sees
+    a clean slate (singleton state is set by the first construction;
+    later tests would otherwise inherit the previous test's log_path).
+    """
+    from llamagent.modules.safety.guard import _reset_audit_logger_for_tests
+    _reset_audit_logger_for_tests()
+    yield
+    _reset_audit_logger_for_tests()
+
+
 @pytest.fixture
 def mock_llm_client():
     """LLMClient with chat() mocked. Use client.set_responses([...]) to preset responses."""
