@@ -216,7 +216,9 @@ class ProcessRunnerBackend(AgentRunnerBackend):
         )
         if share_parent and self._parent_agent is not None:
             try:
-                parent_scopes = self._parent_agent._authorization_engine.export_scopes()
+                # v3.8.5 P5: use the public agent accessor instead of
+                # reaching into self._parent_agent._authorization_engine.
+                parent_scopes = self._parent_agent.export_authorization_scopes()
                 if parent_scopes:
                     data["parent_scopes"] = parent_scopes
             except Exception:
