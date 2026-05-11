@@ -6,6 +6,8 @@ Mock strategy: only mock litellm.completion(); all framework-internal methods ru
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -14,6 +16,15 @@ import pytest
 from llamagent.core.config import Config
 from llamagent.core.llm import LLMClient
 from llamagent.core.agent import LlamAgent
+
+
+# v3.8.5: anchor test agents to the repo root, not os.getcwd(). pytest
+# invoked from a non-repo dir would otherwise bind agent.project_dir
+# to the wrong place. Inline test files import this name (pytest's
+# conftest discovery puts the directory on sys.path, so plain
+# ``from conftest import REPO_ROOT`` works — already used elsewhere
+# in this file for make_llm_response).
+REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 
 
 # ============================================================
@@ -118,6 +129,20 @@ def make_stream_tool_call_chunks(tool_name: str, arguments: dict, call_id: str =
 # ============================================================
 # Fixtures
 # ============================================================
+
+
+@pytest.fixture(autouse=True)
+def _reset_safety_audit_logger():
+    """v3.8.5: SafetyGuard's audit logger moved to a process-lifetime
+    singleton. Reset module-level state between tests so each case sees
+    a clean slate (singleton state is set by the first construction;
+    later tests would otherwise inherit the previous test's log_path).
+    """
+    from llamagent.modules.safety.guard import _reset_audit_logger_for_tests
+    _reset_audit_logger_for_tests()
+    yield
+    _reset_audit_logger_for_tests()
+
 
 @pytest.fixture
 def mock_llm_client():
@@ -265,11 +290,10 @@ def bare_agent(mock_llm_client):
     agent.summary = None
     agent.conversation = agent.history
     agent._execution_strategy = None
-    import os
     agent.confirm_handler = None
     agent.interaction_handler = None
     agent._confirm_wait_time = 0.0
-    agent.project_dir = os.path.realpath(os.getcwd())
+    agent.project_dir = REPO_ROOT
     agent.playground_dir = os.path.realpath(os.path.join(agent.project_dir, "llama_playground"))
     agent.tool_executor = None
     agent._tools = {}

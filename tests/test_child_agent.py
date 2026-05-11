@@ -27,7 +27,7 @@ from llamagent.modules.child_agent.policy import (
 )
 from llamagent.modules.child_agent.module import ChildAgentModule
 
-from conftest import make_llm_response
+from conftest import make_llm_response, REPO_ROOT
 
 
 class TestModuleIntegrationAndBudget:
@@ -251,7 +251,7 @@ class TestZoneInheritanceAndBackwardCompat:
         agent2.confirm_handler = None
         agent2.interaction_handler = None
         agent2._confirm_wait_time = 0.0
-        agent2.project_dir = os.path.realpath(os.getcwd())
+        agent2.project_dir = REPO_ROOT
         agent2.playground_dir = os.path.realpath(os.path.join(agent2.project_dir, "llama_playground"))
         agent2.tool_executor = None
         agent2._tools = {}
@@ -259,7 +259,6 @@ class TestZoneInheritanceAndBackwardCompat:
         agent2._tools_version = 0
         agent2._hooks = {}
         agent2._session_started = False
-        agent2._in_hook = False
         agent2.mode = "interactive"
         agent2._controller = None
         agent2._current_task_id = None

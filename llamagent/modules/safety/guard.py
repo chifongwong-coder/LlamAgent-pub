@@ -8,9 +8,94 @@ Capabilities:
 4. Code scanning (scan_code): scan custom tool code and return suggested safety_level
 """
 
+import os
 import re
 import logging
+import threading
 from datetime import datetime
+
+
+logger = logging.getLogger(__name__)
+
+
+# ----------------------------------------------------------------------
+# Module-level audit-logger singleton (v3.8.5)
+# ----------------------------------------------------------------------
+#
+# v3.8.1 R7-#22 attempted to fix multi-agent audit log silencing by
+# tracking which handlers each SafetyGuard instance added. But the
+# original gate ``if not self._logger.handlers:`` meant only the FIRST
+# instance ever added a handler; subsequent instances saw existing
+# handlers and skipped, leaving their ``_own_handlers`` empty. When the
+# first instance's ``on_shutdown`` later removed the only handler, all
+# other still-running agents lost their audit log silently.
+#
+# v3.8.5 switches to a process-lifetime singleton: one handler installed
+# at first SafetyGuard construction, never removed by ``on_shutdown``,
+# automatically flushed/closed by ``logging.shutdown()`` at process exit.
+# This matches the operator expectation of a single ``safety_audit.log``
+# file per process and removes the multi-agent silencing class entirely.
+_AUDIT_LOGGER_SETUP_LOCK = threading.Lock()
+_AUDIT_LOGGER_INITIALIZED = False
+_AUDIT_LOGGER_PATH: str | None = None
+
+
+def _ensure_audit_logger(log_path: str) -> logging.Logger:
+    """Install the ``safety_audit`` handler exactly once per process.
+
+    First caller wins on ``log_path``; subsequent callers with a
+    different path get a warning so the misconfig is observable
+    (vs the silent first-wins behaviour v3.8.1 line-121 produced).
+    """
+    global _AUDIT_LOGGER_INITIALIZED, _AUDIT_LOGGER_PATH
+    audit = logging.getLogger("safety_audit")
+    audit.setLevel(logging.INFO)
+    with _AUDIT_LOGGER_SETUP_LOCK:
+        if _AUDIT_LOGGER_INITIALIZED:
+            try:
+                same = os.path.abspath(_AUDIT_LOGGER_PATH or "") == os.path.abspath(log_path)
+            except (TypeError, ValueError):
+                same = (_AUDIT_LOGGER_PATH == log_path)
+            if not same and _AUDIT_LOGGER_PATH is not None:
+                logger.warning(
+                    "Safety audit logger already initialized at %r; "
+                    "ignoring requested path %r. Multi-tenant deployments "
+                    "share a single audit handler per process.",
+                    _AUDIT_LOGGER_PATH, log_path,
+                )
+            return audit
+        try:
+            handler = logging.FileHandler(log_path, encoding="utf-8")
+            handler.setFormatter(
+                logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+            )
+            audit.addHandler(handler)
+            _AUDIT_LOGGER_PATH = log_path
+        except IOError:
+            audit.addHandler(logging.StreamHandler())
+            _AUDIT_LOGGER_PATH = "<stderr>"
+        _AUDIT_LOGGER_INITIALIZED = True
+        return audit
+
+
+def _reset_audit_logger_for_tests() -> None:
+    """Test-only: clear module-level singleton state.
+
+    NOT a public API. Tests that exercise SafetyGuard's logger setup
+    must reset this between cases via the conftest autouse fixture;
+    production code never calls it.
+    """
+    global _AUDIT_LOGGER_INITIALIZED, _AUDIT_LOGGER_PATH
+    with _AUDIT_LOGGER_SETUP_LOCK:
+        audit = logging.getLogger("safety_audit")
+        for h in list(audit.handlers):
+            try:
+                h.close()
+            except Exception:
+                pass
+            audit.removeHandler(h)
+        _AUDIT_LOGGER_INITIALIZED = False
+        _AUDIT_LOGGER_PATH = None
 
 
 class SafetyGuard:
@@ -104,34 +189,22 @@ class SafetyGuard:
     # ------------------------------------------------------------------
 
     def _setup_logger(self, log_path: str) -> None:
-        """Configure audit logger.
+        """Bind to the process-wide audit logger singleton.
 
-        v3.8.1 R7-#22: track which handler we add so on_shutdown can
-        remove ONLY our handler. Pre-fix `removeHandler` walked
-        ``logger.handlers[:]`` which silently drops handlers other
-        SafetyGuard / SafetyModule instances added on the same shared
-        ``safety_audit`` logger — multi-agent deployments saw agent A's
-        shutdown silence agent B's audit log.
+        v3.8.5: the per-instance ``_own_handlers`` tracking from v3.8.1
+        R7-#22 didn't actually solve multi-agent log silencing — only
+        the first SafetyGuard ever owned a handler (line-121 gate), so
+        its shutdown still removed the only handler. v3.8.5 moves to a
+        module-level singleton handler installed once per process and
+        never removed by ``on_shutdown`` (Python's ``logging.shutdown``
+        flushes at process exit). ``_own_handlers`` is kept as an empty
+        list for back-compat introspection.
         """
-        self._logger = logging.getLogger("safety_audit")
-        self._logger.setLevel(logging.INFO)
-        # v3.8.1 R7-#22: track handlers we add so we only remove our own
+        self._logger = _ensure_audit_logger(log_path)
+        # Back-compat: kept empty so external code that introspected the
+        # attribute (e.g., test mocks) doesn't AttributeError. New
+        # handlers are owned by the module singleton, not the instance.
         self._own_handlers: list[logging.Handler] = []
-
-        if not self._logger.handlers:
-            try:
-                handler = logging.FileHandler(log_path, encoding="utf-8")
-                formatter = logging.Formatter(
-                    "%(asctime)s | %(levelname)s | %(message)s"
-                )
-                handler.setFormatter(formatter)
-                self._logger.addHandler(handler)
-                self._own_handlers.append(handler)
-            except IOError:
-                # Cannot write to log file, use console output
-                handler = logging.StreamHandler()
-                self._logger.addHandler(handler)
-                self._own_handlers.append(handler)
 
     # ------------------------------------------------------------------
     # Input Checking

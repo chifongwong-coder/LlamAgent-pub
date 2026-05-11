@@ -245,6 +245,15 @@ class TaskModeController(ModeController):
         scopes: list[RequestedScope] = raw
 
         normalized = normalize_scopes(scopes)
+        # v3.8.5: defensive — drop scopes with empty ``actions`` lists.
+        # Internal callers (authorization._record_pending) always
+        # supply ``actions=[item.action]`` (non-empty), but the external
+        # ``AuthorizationEngine.import_scopes(..., source="external")``
+        # path could surface an empty list. Downstream consumers index
+        # ``actions[0]`` freely (line 270 + any caller reading
+        # ``contract.requested_scopes``), so filtering here keeps the
+        # contract well-formed and the index access safe.
+        normalized = [s for s in normalized if s.actions]
 
         # No CONFIRMABLE operations — skip contract, go straight to execute
         if not normalized:

@@ -8,7 +8,7 @@ import pytest
 
 from llamagent.core.agent import LlamAgent, Module
 from llamagent.core.config import Config
-from conftest import make_llm_response
+from conftest import make_llm_response, REPO_ROOT
 
 
 def _create_test_agent(mock_llm_client):
@@ -48,7 +48,7 @@ def _create_test_agent(mock_llm_client):
     import os
     agent.confirm_handler = None
     agent.interaction_handler = None
-    agent.project_dir = os.path.realpath(os.getcwd())
+    agent.project_dir = REPO_ROOT
     agent.playground_dir = os.path.realpath(os.path.join(agent.project_dir, "llama_playground"))
     agent.tool_executor = None
     agent._tools = {}
@@ -56,7 +56,6 @@ def _create_test_agent(mock_llm_client):
     agent._tools_version = 0
     agent._hooks = {}
     agent._session_started = False
-    agent._in_hook = False
     agent.mode = "interactive"
     agent._controller = None
     agent._current_task_id = None

@@ -861,6 +861,20 @@ class LlamAgent:
         result["mode"] = self.mode
         return result
 
+    def export_authorization_scopes(self) -> list[dict]:
+        """Export the agent's authorization scopes.
+
+        Returns a list of ``asdict()``-serialized ``ApprovalScope``
+        objects (not ``ApprovalScope`` instances). The dict form is
+        used by the child-agent process runner to seed share-parent
+        children via JSON spec; converting back to dataclass instances
+        would be a wasteful no-op round-trip.
+
+        v3.8.5 P5: public accessor so modules don't reach into
+        ``self._authorization_engine`` directly.
+        """
+        return self._authorization_engine.export_scopes()
+
     def get_active_task_id(self) -> str | None:
         """
         Get the active task ID for scope storage/lookup.

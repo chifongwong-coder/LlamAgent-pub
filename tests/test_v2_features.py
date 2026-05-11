@@ -841,7 +841,6 @@ def test_persistence_save_and_restore(bare_agent, mock_llm_client, tmp_path):
     agent2._tools_version = 0
     agent2._hooks = {}
     agent2._session_started = False
-    agent2._in_hook = False
     agent2.mode = "interactive"
     agent2._controller = None
     agent2._current_task_id = None
@@ -3686,6 +3685,17 @@ def test_v38x_lifecycle_smoke(tmp_path, mock_llm_client):
     assert hasattr(agent, "ensure_snapshot")     # v3.8 + v3.8.2 A1
     assert hasattr(agent, "register_hook_factory")  # v3.8.3
     assert hasattr(agent, "inherit_hook_factories_from")  # v3.8.3
+    assert hasattr(agent, "export_authorization_scopes")  # v3.8.5 P5
+
+    # v3.8.5: public P5 wrapper returns list[dict] (asdict-serialized).
+    exported = agent.export_authorization_scopes()
+    assert isinstance(exported, list)
+    for entry in exported:
+        assert isinstance(entry, dict), (
+            "export_authorization_scopes returns list[dict] for JSON "
+            "serialization in process-runner child spec; got "
+            f"{type(entry).__name__}"
+        )
 
     # v3.8.3: register a hook factory before spawning children
     factory_calls = []
