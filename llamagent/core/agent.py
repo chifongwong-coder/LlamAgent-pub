@@ -1863,7 +1863,13 @@ class LlamAgent:
                 # Backward compat: if handler returns bool, wrap it
                 response = ConfirmResponse(allow=bool(response))
         except Exception as e:
-            logger.warning("confirm_handler raised exception, defaulting to deny: %s", e)
+            # v3.8.6: include exc_info so the operator sees the stack trace.
+            # Defaulting to deny is correct fail-closed behavior, but a buggy
+            # handler should not be invisible.
+            logger.warning(
+                "confirm_handler raised exception, defaulting to deny: %s", e,
+                exc_info=True,
+            )
             response = ConfirmResponse(allow=False)
         self._confirm_wait_time += time.time() - t0
         return response

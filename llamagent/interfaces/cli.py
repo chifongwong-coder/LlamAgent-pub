@@ -1148,8 +1148,12 @@ def main():
         # Cleanup
         try:
             agent.shutdown()
-        except Exception:
-            pass
+        except Exception as e:
+            # v3.8.6: surface shutdown failures (e.g. memory consolidation
+            # join timeout, persistence flush failure) so users know why
+            # state may not have been saved. CLI convention is rich.console,
+            # not logging — this is user-visible at exit time.
+            console.print(f"[yellow]Warning: shutdown error: {e}[/yellow]")
 
         if result == "quit":
             break

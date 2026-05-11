@@ -28,6 +28,7 @@ def main():
     real_stdout = sys.stdout
     sys.stdout = sys.stderr
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
+    logger = logging.getLogger(__name__)
 
     # ---- parse arguments ----
     parser = argparse.ArgumentParser(description="LlamAgent subprocess runner")
@@ -180,14 +181,18 @@ def main():
                         "args_preview": str(ctx.data.get("args", ""))[:500],
                         "result_preview": str(ctx.data.get("result", ""))[:500],
                     })
-                except Exception:
-                    pass
+                except Exception as e:
+                    # v3.8.6: surface runlog failure at debug; disk full /
+                    # permission errors here mean audit trail is broken.
+                    logger.debug("Subprocess child runlog write failed: %s", e)
                 return HookResult.CONTINUE
 
             try:
                 agent.register_hook(HookEvent.POST_TOOL_USE, _runlog_tool_writer)
-            except Exception:
-                pass
+            except Exception as e:
+                # v3.8.6: same — surface hook setup failure so parent's
+                # error handling can detect a broken child.
+                logger.warning("Subprocess child failed to register runlog hook: %s", e)
 
         # Build prompt
         task = spec.get("task", "")

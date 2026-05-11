@@ -712,8 +712,14 @@ class MemoryModule(Module):
             if fact_id:
                 try:
                     self.store.update_fact_accessed(fact_id)
-                except Exception:
-                    pass  # Best-effort access tracking
+                except Exception as e:
+                    # v3.8.6: surface store errors at debug. Tracking is
+                    # best-effort (a failure shouldn't block recall) but
+                    # silent loss hides store-health issues.
+                    logger.debug(
+                        "[Memory] Failed to update access timestamp for %s: %s",
+                        fact_id, e,
+                    )
 
         # Format results
         lines = ["Found the following relevant memories:"]
