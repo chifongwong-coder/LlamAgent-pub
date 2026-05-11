@@ -70,12 +70,15 @@ class SafetyModule(Module):
 
         result = self.guard.check_input(user_input)
         if not result["safe"]:
-            logger.warning("[Safety] %s", result["reason"])
             if not result["sanitized_input"]:
                 # Injection attack or dangerous content: return empty string, agent.chat() will short-circuit
+                # v3.8.6: single warning at this site; v3.8.5 and earlier
+                # logged twice (outer "[Safety] %s" + inner "Unsafe input
+                # intercepted: %s") with identical reason.
                 logger.warning("[Safety] Unsafe input intercepted: %s", result["reason"])
                 return ""
             # Overly long input: return truncated text, continue processing
+            logger.warning("[Safety] Input truncated: %s", result["reason"])
             return result["sanitized_input"]
         return user_input
 

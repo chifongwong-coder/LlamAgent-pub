@@ -1844,9 +1844,8 @@ class LlamAgent:
 
         Boundary API called by ``AuthorizationEngine.confirm()``.
 
-        v3.7.3: renamed from ``_ask_confirmation``. The underscore form is
-        kept as a backward-compat alias (deprecation warning in
-        v3.7.4-v3.7.7, removal in v3.8.1).
+        v3.7.3: renamed from ``_ask_confirmation`` (alias kept as
+        DeprecationWarning shim through v3.8.5; removed in v3.8.6).
 
         Args:
             request: ConfirmRequest from the authorization engine
@@ -1863,23 +1862,17 @@ class LlamAgent:
                 # Backward compat: if handler returns bool, wrap it
                 response = ConfirmResponse(allow=bool(response))
         except Exception as e:
-            logger.warning("confirm_handler raised exception, defaulting to deny: %s", e)
+            # v3.8.6: include exc_info so the operator sees the stack trace.
+            # Defaulting to deny is correct fail-closed behavior, but a buggy
+            # handler should not be invisible.
+            logger.warning(
+                "confirm_handler raised exception, defaulting to deny: %s", e,
+                exc_info=True,
+            )
             response = ConfirmResponse(allow=False)
         self._confirm_wait_time += time.time() - t0
         return response
 
-    # v3.7.3: backward-compat alias.
-    # v3.7.8: now wrapped to emit DeprecationWarning so third-party plugins
-    # get a clear signal before v3.8.1 removes it entirely.
-    def _ask_confirmation(self, *args, **kwargs):
-        """Deprecated: use ask_confirmation. Removed in v3.8.1."""
-        import warnings
-        warnings.warn(
-            "LlamAgent._ask_confirmation is deprecated, "
-            "use ask_confirmation instead (removed in v3.8.1)",
-            DeprecationWarning, stacklevel=2,
-        )
-        return self.ask_confirmation(*args, **kwargs)
 
     def chat(self, user_input: str) -> str:
         """

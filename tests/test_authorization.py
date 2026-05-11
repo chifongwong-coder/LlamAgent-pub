@@ -247,13 +247,13 @@ def test_continuous_mode_scopes(bare_agent, tmp_path):
 
 
 # ============================================================
-# Flow 4: apply_update + _clear_all_scopes
+# Flow 4: apply_update + clear_all_scopes
 # ============================================================
 
 def test_apply_update_and_clear_scopes(bare_agent):
     """
     apply_update: write + clear task scopes, clear noop, clear session.
-    _clear_all_scopes: empty noop, populated clear with events.
+    clear_all_scopes: empty noop, populated clear with events.
     """
     engine = bare_agent._authorization_engine
     from llamagent.core.contract import AuthorizationUpdate

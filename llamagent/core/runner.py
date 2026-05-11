@@ -236,7 +236,9 @@ class ContinuousRunner:
         except Exception as e:
             entry.status = "error"
             entry.error = str(e)
-            logger.error("Task failed: %s", e)
+            # v3.8.6: include exc_info — background daemon thread errors are
+            # invisible without a stack trace.
+            logger.error("Task failed: %s", e, exc_info=True)
         finally:
             with self._inject_lock:
                 self._task_running = False
