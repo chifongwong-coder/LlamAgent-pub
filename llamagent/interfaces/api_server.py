@@ -30,6 +30,7 @@ separately from CLI entry points.
 
 import json
 import os
+import re
 import time
 import asyncio
 import logging
@@ -1083,7 +1084,15 @@ def create_api_server(
             tmp_path = None
             try:
                 content = await file.read()
-                filename = file.filename or "unknown"
+                # v3.8.5: sanitize before using as a tempfile suffix.
+                # file.filename comes from the client; "../var/log/foo"
+                # would let NamedTemporaryFile compose a path outside
+                # /tmp. basename strips POSIX traversal; replace + regex
+                # strip Windows backslashes and control chars (basename
+                # is OS-dependent and does NOT split on \\ on Linux).
+                raw_name = file.filename or "unknown"
+                filename = os.path.basename(raw_name).replace("\\", "_")
+                filename = re.sub(r"[\x00-\x1f/]", "_", filename) or "unknown"
 
                 import tempfile
                 with tempfile.NamedTemporaryFile(
