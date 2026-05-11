@@ -17,6 +17,82 @@ Core design:
 A bare LlamAgent is a fully functional conversational Agent. Each
 module loaded grants a new capability.
 
+v3.8.5 highlights (post-v3.8.4 audit cleanup — 7 commits, security
+hardening + P5 principle wrapper + test code modernization):
+
+- **Safety audit logger → process-lifetime singleton** (closes a real
+  v3.8.1 R7-#22 hole). Pre-fix the line-121 ``if not handlers`` gate
+  meant only the first SafetyGuard instance owned a handler; when
+  that instance's ``on_shutdown`` removed the handler, every still-
+  running agent silently lost its audit log. ``safety/guard.py`` now
+  installs the handler once per process via ``_ensure_audit_logger``
+  and never removes it on instance shutdown; ``logging.shutdown()``
+  flushes at process exit. Mismatched ``log_path`` requests get a
+  warning. A test-only ``_reset_audit_logger_for_tests`` + conftest
+  autouse fixture prevent cross-test pollution.
+
+- **CORS allowlist env-driven + wildcard rejected** (api_server.py).
+  Pre-fix ``allow_origins=["*"]`` + ``allow_credentials=True`` was
+  the credential-reflection misconfiguration. Now reads
+  ``CORS_ALLOW_ORIGINS`` env (comma-separated); default is dev
+  localhost on 7860/8000; ``*`` in the env raises ValueError at
+  startup. **Behaviour change**: cross-origin prod deployments must
+  set the env var (one-line recovery). Bearer-token auth path is
+  unaffected (Authorization header isn't a CORS credential).
+
+- **Upload tempfile suffix sanitized** (api_server.py). POST /upload
+  fed ``file.filename`` verbatim into ``NamedTemporaryFile(suffix=...)``;
+  a filename like ``../var/log/foo`` composed a path outside /tmp.
+  Sanitization is layered: ``os.path.basename`` strips POSIX, a
+  ``\\``-to-underscore replace catches Windows backslashes (basename
+  on Linux doesn't split them), and a control-char regex strips the
+  rest. Endpoint requires auth, so threat was "authenticated user
+  drops files outside /tmp", not RCE — defence-in-depth nonetheless.
+
+- **`LlamAgent.export_authorization_scopes()` public accessor**
+  (P5 wrapper). The child-agent process runner was reaching into
+  ``parent._authorization_engine.export_scopes()`` — a single-
+  underscore private attribute. New public method mirrors
+  ``get_active_task_id``'s style (placed adjacent in the
+  Execution-strategy section) and returns ``list[dict]`` (matching
+  the engine's ``asdict()`` serialization, used for the process spec
+  JSON). Two further inline/thread-runner sites in child_agent
+  module retain the private access — out of scope for this hotfix,
+  follow-up needed for full P5 alignment.
+
+- **Controller empty-actions filter**. ``controller.py`` indexed
+  ``s.actions[0]`` for every normalized scope; today all internal
+  callers pass non-empty action lists, but external import_scopes
+  could surface empty ones, IndexError'ing mid-contract. Filter at
+  line 247 removes empty-actions scopes defensively. No display-side
+  fallback (would be dead code after the filter).
+
+- **Test fixture cwd → ``REPO_ROOT``**. Eleven test sites
+  (3 conftest fixtures + 8 inline) bound ``agent.project_dir`` to
+  ``os.path.realpath(os.getcwd())``, making pytest behavior depend
+  on invocation directory. Migrated all 11 to a ``REPO_ROOT``
+  constant anchored at the repo root (via ``Path(__file__).resolve``).
+  Test-only change; framework code untouched.
+
+- **Test dead-code cleanup**. Five public + twelve internal lines of
+  ``agent._in_hook = False`` deleted — v3.7.3 moved the field to a
+  class-level ``threading.local``; per-instance assignment has been a
+  no-op for five releases. Also removed
+  ``tests_internal/test_multi_agent_mock.py.archived`` (residual file
+  from v2.4.1 multi_agent removal) and the skipped
+  ``TestMultiAgentPack`` class that still imported the deleted
+  ``MultiAgentModule``.
+
+> Migrating to v3.8.5 (only one user-visible behaviour change):
+>
+>   - **CORS_ALLOW_ORIGINS env var**: prod deployments serving
+>     cross-origin web clients must now explicitly list allowed
+>     origins. Local dev (web_ui port 7860, api_server port 8000)
+>     keeps working with default. ``CORS_ALLOW_ORIGINS=*`` is no
+>     longer accepted — list specific origins.
+>
+> All other changes are internal hardening or principle hygiene.
+
 v3.8.4 highlights (post-v3.8.3 audit cleanup + small CLI/Web feature):
 
 - **FSStore defense-in-depth completion**: ``FSStore.delete_file`` and
@@ -818,7 +894,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "3.8.4"
+__version__ = "3.8.5"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager
