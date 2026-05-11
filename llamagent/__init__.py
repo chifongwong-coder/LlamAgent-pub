@@ -17,6 +17,35 @@ Core design:
 A bare LlamAgent is a fully functional conversational Agent. Each
 module loaded grants a new capability.
 
+v3.8.6 highlights (post-v3.8.5 fresh-eyes audit — 3 commits, log quality
++ honored deprecation promise):
+
+- **Log quality** (commit 1): six sites where exceptions were caught
+  and either logged without a stack trace or swallowed entirely.
+  Behaviour preserved (fail-closed / fail-soft as appropriate);
+  observability restored. Touches confirm_handler exception path,
+  ContinuousRunner task-failure log, CLI interactive-setup
+  shutdown, agent_runner subprocess child setup, MemoryStore
+  access-tracking, and SafetyModule injection log (was double-
+  logged in v3.8.5).
+
+- **v3.7.3 underscore-prefixed aliases removed** (commit 2):
+  ``LlamAgent._ask_confirmation``,
+  ``AuthorizationEngine._switch_policy``, and
+  ``AuthorizationEngine._clear_all_scopes`` were renamed in v3.7.3
+  and wrapped with DeprecationWarning in v3.7.8, with a stated
+  removal target of v3.8.1. v3.8.1 through v3.8.5 shipped without
+  enforcing the deadline. v3.8.6 honors it. Zero internal callers;
+  3 deprecation-warning tests removed alongside.
+
+  > Migrating to v3.8.6: third-party plugins calling
+  > ``agent._ask_confirmation`` / ``engine._switch_policy`` /
+  > ``engine._clear_all_scopes`` must rename to the underscore-free
+  > public methods. The aliases have emitted DeprecationWarning
+  > since v3.7.8.
+
+No new dependencies; no other behaviour changes.
+
 v3.8.5 highlights (post-v3.8.4 audit cleanup — 7 commits, security
 hardening + P5 principle wrapper + test code modernization):
 
@@ -894,7 +923,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "3.8.5"
+__version__ = "3.8.6"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager
