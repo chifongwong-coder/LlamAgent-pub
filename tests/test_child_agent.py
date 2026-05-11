@@ -259,7 +259,6 @@ class TestZoneInheritanceAndBackwardCompat:
         agent2._tools_version = 0
         agent2._hooks = {}
         agent2._session_started = False
-        agent2._in_hook = False
         agent2.mode = "interactive"
         agent2._controller = None
         agent2._current_task_id = None

@@ -56,7 +56,6 @@ def _create_test_agent(mock_llm_client):
     agent._tools_version = 0
     agent._hooks = {}
     agent._session_started = False
-    agent._in_hook = False
     agent.mode = "interactive"
     agent._controller = None
     agent._current_task_id = None
