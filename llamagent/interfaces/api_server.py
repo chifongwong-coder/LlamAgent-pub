@@ -480,9 +480,33 @@ def create_api_server(
     )
 
     # --- CORS middleware ---
+    # v3.8.5: env-driven origin allowlist. Default is dev localhost
+    # only (4 entries); production deployments must set
+    # CORS_ALLOW_ORIGINS=https://app.example.com (comma-separated for
+    # multiple). allow_origins=["*"] + allow_credentials=True is
+    # rejected at startup because Starlette echoes the request Origin
+    # in that mode, producing credential reflection.
+    _cors_env = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
+    if _cors_env:
+        _allow_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
+        if "*" in _allow_origins:
+            raise ValueError(
+                "CORS_ALLOW_ORIGINS cannot contain '*' while allow_credentials=True. "
+                "List specific origins (e.g. 'https://app.example.com'). "
+                "See OWASP CORS guidance."
+            )
+    else:
+        # Dev defaults — web_ui (Gradio default 7860) + api_server
+        # default 8000. Custom ports MUST set CORS_ALLOW_ORIGINS.
+        _allow_origins = [
+            "http://localhost:7860",
+            "http://127.0.0.1:7860",
+            "http://localhost:8000",
+            "http://127.0.0.1:8000",
+        ]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # In production, replace with specific frontend domains
+        allow_origins=_allow_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
