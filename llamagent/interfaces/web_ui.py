@@ -20,9 +20,12 @@ import html
 import os
 from pathlib import Path
 
-# Resolve repo-root /images/llamagent.png from this file's location:
-# llamagent/interfaces/web_ui.py -> repo root is two parents up.
-_HERO_IMAGE_PATH = Path(__file__).resolve().parent.parent.parent / "images" / "llamagent.png"
+# Resolve the packaged hero asset from this file's location:
+# llamagent/interfaces/web_ui.py -> llamagent/assets/images/llamagent.png
+# Lives inside the package (since v3.8.8) so wheel installs ship it
+# via [tool.setuptools.package-data] in pyproject.toml. Editable
+# installs work too because the file is on disk.
+_HERO_IMAGE_PATH = Path(__file__).resolve().parent.parent / "assets" / "images" / "llamagent.png"
 
 try:
     import gradio as gr

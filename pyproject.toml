@@ -62,6 +62,12 @@ llamagent = "llamagent.main:main"
 [tool.setuptools.packages.find]
 include = ["llamagent*"]
 
+[tool.setuptools.package-data]
+# v3.8.8: ship the hero / promo PNGs alongside the package so the Web
+# UI loads them on wheel installs (not just editable). Web UI keeps a
+# Path.is_file() guard so missing assets degrade to text-only title.
+llamagent = ["assets/images/*.png"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
