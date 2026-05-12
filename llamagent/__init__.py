@@ -22,6 +22,39 @@ Core design:
 A bare LlamAgent is a fully functional conversational Agent. Each
 module loaded grants a new capability.
 
+v3.8.8 highlights (wheel packaging + module-level docs for the last
+two undocumented modules — 2 commits):
+
+- **Hero assets moved into the package** (commit 1): the v3.8.4 Web
+  UI hero image lived at repo-root ``images/`` so wheel installs
+  shipped without it; the UI fell through its ``Path.is_file()``
+  guard to a text-only header. Two deferral questions from the
+  v3.8.4 plan were answered (yes, wheel users exist; assets are
+  self-drawn, no license issue). Moved ``images/`` to
+  ``llamagent/assets/images/`` (preserved via ``git mv``), added
+  ``[tool.setuptools.package-data] llamagent = ["assets/images/*.png"]``
+  to ``pyproject.toml``, and updated the Web UI path resolution
+  from ``parent.parent.parent / "images"`` to ``parent.parent /
+  "assets" / "images"`` so both editable and wheel installs find
+  the PNGs. ``Path.is_file()`` guard kept as defense.
+
+- **Persistence + Resilience module-level docs** (commit 2): the
+  two modules without their own ``docs/modules/<name>/`` directory
+  are now described in ``docs/llamagent-architecture.md`` §6
+  alongside the recommended-load-order diagram. They don't get
+  their own subdirectory because (a) their user-facing API is
+  100% Config-field driven (no methods to call), (b) their runtime
+  behaviour is concentrated enough to fit a single architecture
+  subsection, and (c) the gitignored-doc maintenance cost of a
+  separate dir isn't justified for that surface area. Compression
+  keeps its own subdirectory (added in v3.8.8 prep work) because
+  the persistence-marker protocol it shares with ToolsModule is a
+  cross-module contract worth isolating.
+
+No behaviour change in the framework code; only the asset relocation
++ docs. Public 202/202 still pass; wheel build verified to include
+both PNGs under ``llamagent/assets/images/``.
+
 v3.8.7 highlights (close v3.8.5 backlog — 3 commits, ~120 LOC):
 
 - **P5 cleanup completed** (commit 1):
@@ -561,7 +594,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "3.8.7"
+__version__ = "3.8.8"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager
