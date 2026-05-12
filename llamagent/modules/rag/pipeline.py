@@ -173,3 +173,33 @@ class RetrievalPipeline:
                 self.lexical.clear()
             except Exception:
                 pass
+
+    def close(self) -> None:
+        """Release all backend resources.
+
+        v3.8.7: idempotent and exception-safe. Called from
+        MemoryModule.on_shutdown / RetrievalModule.on_shutdown so
+        process-lifetime resource holders (Chroma persistent client,
+        SQLite FTS connection, future reranker session) are released
+        on agent eviction (api_server LRU) without waiting for GC.
+
+        Reranker is included via ``hasattr`` guard. Today's
+        ``LLMReranker`` doesn't own resources (it wraps a shared LLM
+        client) so close is a no-op there. Future cross-encoder
+        rerankers with their own sessions will be cleaned up
+        automatically.
+        """
+        for backend, name in (
+            (getattr(self, "vector", None), "vector"),
+            (getattr(self, "lexical", None), "lexical"),
+            (getattr(self, "reranker", None), "reranker"),
+        ):
+            if backend is None:
+                continue
+            close_fn = getattr(backend, "close", None)
+            if close_fn is None:
+                continue
+            try:
+                close_fn()
+            except Exception as e:
+                logger.debug("%s backend close failed: %s", name, e)

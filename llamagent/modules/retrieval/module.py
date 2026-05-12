@@ -407,6 +407,26 @@ class RetrievalModule(Module):
             guide = RAG_GUIDE
         return f"{context}\n\n{guide}" if context else guide
 
+    def on_shutdown(self) -> None:
+        """v3.8.7: release retrieval pipeline resources on agent shutdown.
+
+        Closes the Chroma persistent client + SQLite FTS connection
+        held by the RAG pipeline. Without this, GC eventually
+        releases them, but api_server LRU eviction can accumulate
+        handles before GC kicks in (multi-agent server scenario).
+
+        fail-soft: a close error must not break agent shutdown.
+        """
+        if self._backend != "rag" or self.retriever is None:
+            return
+        pipeline = getattr(self.retriever, "pipeline", None)
+        if pipeline is None:
+            return
+        try:
+            pipeline.close()
+        except Exception as e:
+            logger.debug("[Retrieval] pipeline close failed: %s", e)
+
     # ------------------------------------------------------------------
     # Document loading interface (programmatic use)
     # ------------------------------------------------------------------
