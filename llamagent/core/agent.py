@@ -875,6 +875,37 @@ class LlamAgent:
         """
         return self._authorization_engine.export_scopes()
 
+    def import_authorization_scopes(
+        self,
+        scopes: list[dict],
+        *,
+        source: str = "trusted",
+    ) -> None:
+        """Import authorization scopes into this agent's engine.
+
+        Mirror of ``export_authorization_scopes``. Used by the
+        child-agent inline/thread runner to seed share-parent children
+        from parent scopes; persistence restore also uses the same
+        engine method.
+
+        Args:
+            scopes: List of ``asdict``-serialized ``ApprovalScope``
+                dicts (the shape produced by
+                ``export_authorization_scopes`` and persisted in v=2
+                session files).
+            source: ``"trusted"`` (default) skips validation — caller
+                is responsible for the data shape, used by
+                parent→child and persistence reload.
+                ``"external"`` validates each dict against the
+                ApprovalScope field whitelist (for untrusted JSON
+                entry points like MCP / HTTP).
+
+        v3.8.7 P5: completes the export/import symmetry started in
+        v3.8.5; public accessor so modules don't reach into
+        ``self._authorization_engine`` directly.
+        """
+        self._authorization_engine.import_scopes(scopes, source=source)
+
     def get_active_task_id(self) -> str | None:
         """
         Get the active task ID for scope storage/lookup.
