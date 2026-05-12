@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="images/llamagent.png" width="220" alt="LlamAgent">
+  <img src="llamagent/assets/images/llamagent.png" width="220" alt="LlamAgent">
 </p>
 
 <p align="center">
@@ -62,7 +62,7 @@ agent.register_module(PlanningModule())   # DAG-based task decomposition
 ## Modules
 
 <p align="center">
-  <img src="images/llamagent_work.png" alt="LlamAgent module architecture">
+  <img src="llamagent/assets/images/llamagent_work.png" alt="LlamAgent module architecture">
 </p>
 
 | Module | What it does |
