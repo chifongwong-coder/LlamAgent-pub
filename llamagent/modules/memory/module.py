@@ -389,6 +389,19 @@ class MemoryModule(Module):
                     "partial files but cross-fact dedup may leak."
                 )
 
+        # v3.8.7: release pipeline resources (Chroma client, SQLite FTS
+        # connection, future reranker sessions). Runs AFTER the
+        # consolidation join so the worker can't try to write to a
+        # closed pipeline. fail-soft: a close error must not block
+        # further shutdown steps.
+        if self.store is not None:
+            pipeline = getattr(self.store, "pipeline", None)
+            if pipeline is not None:
+                try:
+                    pipeline.close()
+                except Exception as e:
+                    logger.debug("[Memory] pipeline close failed: %s", e)
+
     def on_input(self, user_input: str) -> str:
         """v3.8.1 R7-#23: spawn background consolidation thread instead
         of blocking the chat path. The user's reply latency drops back

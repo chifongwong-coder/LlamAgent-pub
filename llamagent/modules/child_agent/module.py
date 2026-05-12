@@ -1367,9 +1367,14 @@ class ChildAgentModule(Module):
         # branch present pre-v3.8 was the workaround for the very
         # init-ordering bug v3.8 eliminates.
         if share_parent_project_dir:
-            parent_scopes = parent._authorization_engine.export_scopes()
+            # v3.8.7 P5: route through public agent accessors instead of
+            # reaching into parent._authorization_engine /
+            # child._authorization_engine. Completes the P5 hygiene work
+            # started in v3.8.5 c4 (which migrated the process-runner
+            # site at runners/process.py:219).
+            parent_scopes = parent.export_authorization_scopes()
             if parent_scopes:
-                child._authorization_engine.import_scopes(parent_scopes)
+                child.import_authorization_scopes(parent_scopes)
 
         # ---- 7. Tools: deepcopy from parent, filter, prune ----
         child._tools = {}

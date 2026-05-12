@@ -1,6 +1,10 @@
 """Vector storage backends for the RAG backend layer."""
 
+import logging
 from abc import ABC, abstractmethod
+
+
+logger = logging.getLogger(__name__)
 
 
 class VectorBackend(ABC):
@@ -180,3 +184,22 @@ class ChromaVectorBackend(VectorBackend):
             name=self.collection_name,
             metadata={"hnsw:space": "cosine"},
         )
+
+    def close(self) -> None:
+        """Release ChromaDB client resources.
+
+        v3.8.7: best-effort cleanup, safe across chromadb versions and
+        multi-call. ``hasattr`` guard handles older chromadb (<0.5)
+        without ``client.close()``; failure to close shouldn't break
+        agent shutdown.
+        """
+        if self._client is None:
+            return
+        try:
+            if hasattr(self._client, "close"):
+                self._client.close()
+        except Exception as e:
+            logger.debug("Chroma client close failed: %s", e)
+        finally:
+            self._client = None
+            self._collection = None
