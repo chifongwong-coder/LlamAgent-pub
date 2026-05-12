@@ -5,9 +5,12 @@ Core design:
 - core/ provides a standalone base Agent (conversation, LLM calls,
   authorization engine, write-boundary primitives, persistence
   round-trip contracts).
-- modules/ provides 15 pluggable enhanced capabilities (resilience,
+- modules/ provides 14 pluggable Module subclasses (resilience,
   safety, compression, persistence, sandbox, tools, job, retrieval,
-  rag, memory, skill, reflection, reasoning, mcp, child_agent).
+  memory, skill, reflection, reasoning, mcp, child_agent) plus two
+  shared infrastructure packages (``rag``: vector+lexical+rerank
+  pipeline used by retrieval / memory / reflection; ``fs_store``:
+  atomic file-backed key/value used by skill / memory / reflection).
   Loading a module is one line; modules are loosely coupled (graceful
   degradation when peers are absent). Toolsmith lives as a pack inside
   the tools module, not a separate module. The original v1.x
