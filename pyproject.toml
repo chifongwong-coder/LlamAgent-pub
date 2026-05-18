@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llamagent"
-version = "2.3.0"
+version = "3.8.8"
 description = "A modular AI Agent framework — plug in capabilities, not complexity."
 readme = "README.md"
 license = {text = "MIT"}
