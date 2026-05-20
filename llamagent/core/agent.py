@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Generator, Literal
 
 from llamagent.core.authorization import ApprovalScope, AuthorizationEngine
-from llamagent.core.config import Config
+from llamagent.core.config import Config, ConfigError
 from llamagent.core.contract import PipelineOutcome
 from llamagent.core.zone import ConfirmRequest, ConfirmResponse
 from llamagent.core.controller import ModeAction, TaskModeController
@@ -326,6 +326,45 @@ class PromptSlot:
     locked: bool = False
 
 
+def _validate_prompt_overrides(
+    declared_slots: dict[str, PromptSlot],
+    overrides: dict[str, str],
+    target_label: str,
+) -> None:
+    """Validate prompt slot overrides against the declared slot set.
+
+    Raises ConfigError on:
+    - unknown slot name (includes a difflib "Did you mean" hint when close)
+    - override targeting a locked slot
+    - non-string override value
+
+    Used by register_module (per-module overrides) and LlamAgent.__init__
+    (agent-level overrides). Orphan-target detection (override targeting an
+    unregistered module name) is a separate concern handled lazily at first
+    _build_system_prompt — see LlamAgent._validate_prompt_orphans.
+    """
+    import difflib
+
+    for slot_name, value in overrides.items():
+        if slot_name not in declared_slots:
+            declared_keys = sorted(declared_slots.keys())
+            hint = difflib.get_close_matches(slot_name, declared_keys, n=1, cutoff=0.6)
+            hint_str = f" Did you mean {hint[0]!r}?" if hint else ""
+            raise ConfigError(
+                f"{target_label}[{slot_name!r}]: slot not declared. "
+                f"Declared slots: {declared_keys}.{hint_str}"
+            )
+        if declared_slots[slot_name].locked:
+            raise ConfigError(
+                f"{target_label}[{slot_name!r}]: slot is locked and cannot be overridden."
+            )
+        if not isinstance(value, str):
+            raise ConfigError(
+                f"{target_label}[{slot_name!r}]: value must be str, "
+                f"got {type(value).__name__}."
+            )
+
+
 # ======================================================================
 # Module base class
 # ======================================================================
@@ -534,6 +573,29 @@ class LlamAgent:
     - safety:       Safety guardrails
     """
 
+    # v3.9.0: declarative customizable prompt slots for agent-level prompts.
+    # Empty here as a stub; C3 populates "behavioral_guidelines" when the
+    # L1 [Behavioral Guidelines] block is migrated to slot form.
+    PROMPT_SLOTS: dict[str, PromptSlot] = {}
+
+    # --- Prompt Slot API (v3.9.0) ---
+    # LlamAgent is not a Module subclass; the Module API is duplicated here
+    # by design (CLAUDE.md P6 — 3 short methods cost less than introducing
+    # a shared base class for two call sites). Agent has no PROMPT_SLOTS
+    # parent hierarchy, so get_prompt_slot does not walk the MRO.
+
+    def get_prompt_slot(self, name: str) -> str:
+        """Return the effective value of an agent-level slot."""
+        slot = self.PROMPT_SLOTS[name]  # KeyError on typo
+        if slot.locked:
+            return slot.default
+        return self.config.agent_prompts.get(name, slot.default)
+
+    @classmethod
+    def list_prompt_slots(cls) -> dict[str, PromptSlot]:
+        """Return a copy of the agent's declared slots."""
+        return dict(cls.PROMPT_SLOTS)
+
     def __init__(
         self,
         config: Config | None = None,
@@ -715,6 +777,23 @@ class LlamAgent:
         # First-time agents have an empty list — no-op. Children built
         # via _create_child_agent get this list seeded by step 4a.
         self._invoke_pending_factories()
+
+        # v3.9.0: validate agent-level prompt overrides (LlamAgent.PROMPT_SLOTS
+        # is declared on the class, so we can validate at __init__ end).
+        # Module-targeted overrides are validated lazily at register_module
+        # time; orphan checks (unknown module target) deferred to first
+        # _build_system_prompt to allow late module registration. getattr()
+        # defends against legacy Config objects built via __new__ that omit
+        # the new field.
+        agent_overrides = getattr(self.config, "agent_prompts", None) or {}
+        if agent_overrides:
+            _validate_prompt_overrides(
+                type(self).list_prompt_slots(),
+                agent_overrides,
+                "agent_prompts",
+            )
+        self._prompt_overrides_validated = False
+
         # v3.8.3 sentinel: __init__ is done. register_hook_factory uses
         # this to decide whether to invoke the factory immediately
         # (post-init) or just append (during init — _invoke_pending
@@ -874,6 +953,23 @@ class LlamAgent:
         Args:
             module: The module instance to register
         """
+        # v3.9.0: validate prompt slot overrides for this module BEFORE the
+        # try block. The validator does not depend on module.llm or on_attach
+        # state, so it can run first. Placing it outside the try keeps
+        # ConfigError from being re-wrapped by the except logger.error and
+        # surfaces a clean error to the caller. getattr() defends against
+        # legacy Config objects built via __new__ that may omit the new
+        # field — mirrors the existing module_models lookup below.
+        mod_overrides = (getattr(self.config, "module_prompts", None) or {}).get(
+            module.name, {}
+        )
+        if mod_overrides:
+            _validate_prompt_overrides(
+                type(module).list_prompt_slots(),
+                mod_overrides,
+                f"module_prompts[{module.name!r}]",
+            )
+
         try:
             # Set module-specific LLM before on_attach (module.name is a class attribute, available here)
             model_name = getattr(self.config, 'module_models', {}).get(module.name)

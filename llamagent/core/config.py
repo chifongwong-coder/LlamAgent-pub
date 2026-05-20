@@ -162,6 +162,16 @@ for _path, _attr, _type in _YAML_MAP:
         _VALID_YAML_PATHS.add(_path[:i + 1])
 
 
+class ConfigError(ValueError):
+    """Raised when Config contents are inconsistent.
+
+    v3.9.0: used by prompt slot validation (unknown slot, locked slot
+    override, non-string value, unregistered module target). Subclasses
+    ``ValueError`` so existing ``except ValueError`` handlers still catch
+    it without code churn.
+    """
+
+
 class Config:
     """
     Global configuration, each instance holds its own state independently.
@@ -353,6 +363,16 @@ class Config:
 
         # Per-module model overrides (module_name -> model_name)
         self.module_models: dict[str, str] = {}
+
+        # v3.9.0: per-module / per-agent prompt slot overrides.
+        # See docs/llamagent-v3.9-plan.md §2.3 for slot semantics. The
+        # framework validates these against each module's declared
+        # PROMPT_SLOTS at register_module time and raises ConfigError
+        # on locked-slot writes, unknown slot names, or unregistered
+        # module targets (the last is detected lazily at first
+        # _build_system_prompt to allow late module registration).
+        self.module_prompts: dict[str, dict[str, str]] = {}
+        self.agent_prompts: dict[str, str] = {}
 
         # Backend selection (FS vs RAG)
         self.retrieval_backend: str = "rag"
