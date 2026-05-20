@@ -300,6 +300,33 @@ def _infer_parameters_helper(func: Callable, skip_first_arg: bool = False) -> di
 
 
 # ======================================================================
+# PromptSlot (v3.9.0): declarative slot for customizable system prompts
+# ======================================================================
+
+
+@dataclass
+class PromptSlot:
+    """Declarative slot for a customizable system prompt fragment.
+
+    A slot represents a single overridable string in an Agent's or Module's
+    system prompt. Locked slots are framework-related (parsing contract,
+    safety guard, or position-sensitive); non-locked slots are pure
+    guidance the framework does not parse.
+
+    Subclasses declare slots via the class attribute ``PROMPT_SLOTS``.
+    Subclasses that extend a parent's slots MUST explicitly merge:
+    ``PROMPT_SLOTS = {**super().PROMPT_SLOTS, "new_slot": PromptSlot(...)}``.
+    The framework does not use metaclass magic; ``list_prompt_slots`` walks
+    the MRO so an unmerged subclass still exposes parent slots (parents
+    remain readable via ``get_prompt_slot``).
+    """
+
+    default: str
+    description: str
+    locked: bool = False
+
+
+# ======================================================================
 # Module base class
 # ======================================================================
 
@@ -335,6 +362,38 @@ class Module:
     # because most modules hold per-agent state that must NOT be
     # shared (e.g., LLM-bound helpers, per-session caches).
     shareable: bool = False
+
+    # v3.9.0: declarative customizable prompt slots. Empty on the base
+    # class; subclasses extend via {**super().PROMPT_SLOTS, "new": ...}.
+    PROMPT_SLOTS: dict[str, PromptSlot] = {}
+
+    # --- Prompt Slot API (v3.9.0) ---
+
+    def get_prompt_slot(self, name: str) -> str:
+        """Return the effective value of a slot (override if set, else default).
+
+        Raises RuntimeError if called before on_attach (self.agent unset).
+        Raises KeyError if the slot name is not declared (fail fast on typos).
+        """
+        if not hasattr(self, "agent") or self.agent is None:
+            raise RuntimeError(
+                f"{type(self).__name__}.get_prompt_slot({name!r}) called "
+                "before on_attach. Slot access requires self.agent."
+            )
+        all_slots = type(self).list_prompt_slots()
+        slot = all_slots[name]
+        if slot.locked:
+            return slot.default
+        overrides = (self.agent.config.module_prompts or {}).get(self.name, {})
+        return overrides.get(name, slot.default)
+
+    @classmethod
+    def list_prompt_slots(cls) -> dict[str, PromptSlot]:
+        """Merged slot view walking the MRO (subclass slots override parents)."""
+        merged: dict[str, PromptSlot] = {}
+        for klass in reversed(cls.__mro__):
+            merged.update(getattr(klass, "PROMPT_SLOTS", {}))
+        return merged
 
     # --- Lifecycle Callbacks ---
 
