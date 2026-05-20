@@ -1218,6 +1218,15 @@ class ChildAgentModule(Module):
 
         # ---- 1. Build config ----
         config = copy.copy(parent.config)
+        # v3.9.0: copy.copy is shallow — without these resets, child would
+        # silently inherit parent's prompt overrides via dict reference.
+        # By design (plan §2.5) child_agent does NOT inherit prompt slot
+        # overrides: prompts are role-coupled and a child's role is
+        # independent of the parent's. module_models keeps the parent's
+        # default-inherit semantics because model assignments are
+        # infrastructure config, not role-coupled.
+        config.module_prompts = {}
+        config.agent_prompts = {}
         if is_continuous:
             # Force clean construction; set_mode below establishes the continuous scope.
             config.authorization_mode = "interactive"
