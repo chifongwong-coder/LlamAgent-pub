@@ -552,6 +552,18 @@ class Module:
 # ======================================================================
 
 
+# v3.9.0: default value for the agent-level `behavioral_guidelines` prompt
+# slot. Bullets only — the framework wraps with "\n[Behavioral Guidelines]\n"
+# in _build_system_prompt (fixed template wrapping; see plan §2.1 example).
+# Users overriding this slot write only the bullet body, never the header.
+DEFAULT_BEHAVIORAL_GUIDELINES = (
+    "- Results returned by tools are real data; do not fabricate or modify them\n"
+    "- When a tool call fails, try an alternative approach instead of repeating the same call\n"
+    "- When uncertain, proactively ask the user rather than guessing\n"
+    "- Respect permission boundaries; do not exceed authorized operations"
+)
+
+
 class LlamAgent:
     """
     LlamAgent: modular AI Agent core engine.
@@ -574,9 +586,20 @@ class LlamAgent:
     """
 
     # v3.9.0: declarative customizable prompt slots for agent-level prompts.
-    # Empty here as a stub; C3 populates "behavioral_guidelines" when the
-    # L1 [Behavioral Guidelines] block is migrated to slot form.
-    PROMPT_SLOTS: dict[str, PromptSlot] = {}
+    # The framework wraps the slot value in "\n[Behavioral Guidelines]\n"
+    # in _build_system_prompt — users override only the bullet body.
+    PROMPT_SLOTS: dict[str, PromptSlot] = {
+        "behavioral_guidelines": PromptSlot(
+            default=DEFAULT_BEHAVIORAL_GUIDELINES,
+            description=(
+                "Behavioral guidance bullets shown to the LLM under the "
+                "'[Behavioral Guidelines]' header. The framework owns the "
+                "header line; do NOT include it in your override — write "
+                "only the bullet lines."
+            ),
+            locked=False,
+        ),
+    }
 
     # --- Prompt Slot API (v3.9.0) ---
     # LlamAgent is not a Module subclass; the Module API is duplicated here
@@ -589,12 +612,26 @@ class LlamAgent:
         slot = self.PROMPT_SLOTS[name]  # KeyError on typo
         if slot.locked:
             return slot.default
-        return self.config.agent_prompts.get(name, slot.default)
+        agent_prompts = getattr(self.config, "agent_prompts", None) or {}
+        return agent_prompts.get(name, slot.default)
 
-    @classmethod
-    def list_prompt_slots(cls) -> dict[str, PromptSlot]:
-        """Return a copy of the agent's declared slots."""
-        return dict(cls.PROMPT_SLOTS)
+    def list_prompt_slots(self) -> dict[str, dict[str, PromptSlot]]:
+        """Combined slot view for this agent.
+
+        Returns a two-level dict keyed by target:
+          - ``"_agent"`` -> the agent's own PROMPT_SLOTS
+          - each registered module name -> that module's MRO-merged slots
+
+        ``_agent`` is purely a grouping label in the return value; it is
+        NOT a Config field name (Config has the separate ``agent_prompts``
+        field for agent-level overrides).
+        """
+        view: dict[str, dict[str, PromptSlot]] = {
+            "_agent": dict(type(self).PROMPT_SLOTS),
+        }
+        for mod_name, mod in self.modules.items():
+            view[mod_name] = type(mod).list_prompt_slots()
+        return view
 
     def __init__(
         self,
@@ -788,7 +825,9 @@ class LlamAgent:
         agent_overrides = getattr(self.config, "agent_prompts", None) or {}
         if agent_overrides:
             _validate_prompt_overrides(
-                type(self).list_prompt_slots(),
+                # Direct class-attribute access: agent has no inheritance
+                # chain for slots (LlamAgent is not a subclass hierarchy).
+                type(self).PROMPT_SLOTS,
                 agent_overrides,
                 "agent_prompts",
             )
@@ -922,6 +961,36 @@ class LlamAgent:
                 config=cfg,
             )
         return self._snapshot_service.ensure_taken()
+
+    def _validate_prompt_orphans(self) -> None:
+        """v3.9.0: detect module_prompts targets that don't match a registered module.
+
+        Called lazily from _build_system_prompt the first time after each
+        register_module call (the sentinel ``_prompt_overrides_validated`` is
+        reset to False there). Raises ConfigError on any unrecognized target
+        with a difflib "Did you mean" hint when a close match exists. See
+        plan §2.4.
+        """
+        import difflib
+
+        module_prompts = getattr(self.config, "module_prompts", None) or {}
+        if not module_prompts:
+            return
+        registered = sorted(self.modules.keys())
+        for target, overrides in module_prompts.items():
+            if target in self.modules:
+                continue
+            hint = difflib.get_close_matches(target, registered, n=1, cutoff=0.6)
+            hint_str = f" Did you mean {hint[0]!r}?" if hint else ""
+            # Pick a slot name from the override dict for the error path
+            # (the message must reference a concrete path so users find the
+            # offending YAML/Config entry).
+            slot_hint = next(iter(overrides), "<slot>") if isinstance(overrides, dict) else "<slot>"
+            raise ConfigError(
+                f"module_prompts[{target!r}][{slot_hint!r}]: "
+                f"no module named {target!r} is registered. "
+                f"Registered modules: {registered}.{hint_str}"
+            )
 
     def _compute_snapshot_session_id(self) -> str:
         """v3.8.2 A1: pluck a short session-id hint for snapshot naming.
@@ -2891,6 +2960,16 @@ class LlamAgent:
 
         Uses the persona's system_prompt when a Persona is set; otherwise uses the config default prompt.
         """
+        # v3.9.0: on first call, scan module_prompts for orphan target keys
+        # (keys that do not match any registered module). Deferred to first
+        # use because module registration happens after __init__ — see
+        # docs/llamagent-v3.9-plan.md §2.4. Flag is re-armed by
+        # register_module on every successful registration so chat ->
+        # register typo'd module -> chat still catches the typo.
+        if not getattr(self, "_prompt_overrides_validated", True):
+            self._validate_prompt_orphans()
+            self._prompt_overrides_validated = True
+
         # Persona identity
         base_prompt = (
             self.persona.to_system_prompt()
@@ -2899,13 +2978,10 @@ class LlamAgent:
         )
         parts = [base_prompt]
 
-        # Behavioral guidelines
+        # Behavioral guidelines (v3.9.0: slot-based; framework owns the header,
+        # slot value is bullets only — see DEFAULT_BEHAVIORAL_GUIDELINES).
         parts.append(
-            "\n[Behavioral Guidelines]\n"
-            "- Results returned by tools are real data; do not fabricate or modify them\n"
-            "- When a tool call fails, try an alternative approach instead of repeating the same call\n"
-            "- When uncertain, proactively ask the user rather than guessing\n"
-            "- Respect permission boundaries; do not exceed authorized operations"
+            f"\n[Behavioral Guidelines]\n{self.get_prompt_slot('behavioral_guidelines')}"
         )
 
         # Module capability descriptions
