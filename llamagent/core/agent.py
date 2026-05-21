@@ -326,6 +326,56 @@ class PromptSlot:
     locked: bool = False
 
 
+# ----------------------------------------------------------------------
+# Internal slot-access helpers (single source of truth)
+# ----------------------------------------------------------------------
+#
+# These two helpers exist so every PROMPT_SLOTS / override-dict access in
+# the v3.9.0 infrastructure flows through one funnel. Adding a new call
+# site in the future means routing it through these helpers — there is
+# no second code path for slot lookup or override reading. The previous
+# implementation had this logic inlined in 6 places, which led to two
+# symmetric bug classes (MRO walk inconsistent between Module/Agent
+# sides; isinstance defense inconsistent between validators/runtime
+# readers). See plan §"DRY for slot access" and CLAUDE.md.
+
+
+def _walk_mro_prompt_slots(cls) -> dict[str, PromptSlot]:
+    """Single source of truth for MRO-walked PROMPT_SLOTS access.
+
+    Walks ``cls.__mro__`` top-of-hierarchy first, merging each class's
+    declared ``PROMPT_SLOTS`` dict; later (deeper subclass) entries
+    override earlier ones with the same key. Used by both Module and
+    LlamAgent slot APIs so subclasses that fail to explicitly merge
+    ``{**super().PROMPT_SLOTS, ...}`` still expose parent slots.
+    """
+    merged: dict[str, PromptSlot] = {}
+    for klass in reversed(cls.__mro__):
+        merged.update(getattr(klass, "PROMPT_SLOTS", {}))
+    return merged
+
+
+def _read_override_dict(value, target_label: str) -> dict:
+    """Single source of truth for reading an override dict from Config.
+
+    Behavior:
+    - ``None`` (missing field on legacy __new__-built Config) -> ``{}``
+    - non-dict (type contract violation) -> raise friendly ConfigError
+    - dict (the normal case) -> return as-is
+
+    Loud failure on type violation matches plan §2.4 — catch malformed
+    config at the first read point rather than letting cryptic
+    ``AttributeError`` surface mid-chat.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError(
+            f"{target_label}: expected a dict, got {type(value).__name__}."
+        )
+    return value
+
+
 def _validate_prompt_overrides(
     declared_slots: dict[str, PromptSlot],
     overrides: dict[str, str],
@@ -419,20 +469,28 @@ class Module:
                 f"{type(self).__name__}.get_prompt_slot({name!r}) called "
                 "before on_attach. Slot access requires self.agent."
             )
-        all_slots = type(self).list_prompt_slots()
+        all_slots = _walk_mro_prompt_slots(type(self))
         slot = all_slots[name]
         if slot.locked:
             return slot.default
-        overrides = (self.agent.config.module_prompts or {}).get(self.name, {})
+        # Two-level dict read: top-level module_prompts must be a dict,
+        # per-module entry must also be a dict. Both go through the same
+        # guarded reader so any future config layout change is caught
+        # consistently at every entry point.
+        module_prompts = _read_override_dict(
+            getattr(self.agent.config, "module_prompts", None),
+            "config.module_prompts",
+        )
+        overrides = _read_override_dict(
+            module_prompts.get(self.name, {}),
+            f"config.module_prompts[{self.name!r}]",
+        )
         return overrides.get(name, slot.default)
 
     @classmethod
     def list_prompt_slots(cls) -> dict[str, PromptSlot]:
         """Merged slot view walking the MRO (subclass slots override parents)."""
-        merged: dict[str, PromptSlot] = {}
-        for klass in reversed(cls.__mro__):
-            merged.update(getattr(klass, "PROMPT_SLOTS", {}))
-        return merged
+        return _walk_mro_prompt_slots(cls)
 
     # --- Lifecycle Callbacks ---
 
@@ -608,18 +666,27 @@ class LlamAgent:
     # parent hierarchy, so get_prompt_slot does not walk the MRO.
 
     def get_prompt_slot(self, name: str) -> str:
-        """Return the effective value of an agent-level slot."""
-        slot = self.PROMPT_SLOTS[name]  # KeyError on typo
+        """Return the effective value of an agent-level slot.
+
+        Uses the MRO-walked slot set so subclasses of LlamAgent that
+        declare their own ``PROMPT_SLOTS`` (with or without explicit
+        super-merge) can still read inherited slots.
+        """
+        all_slots = _walk_mro_prompt_slots(type(self))
+        slot = all_slots[name]  # KeyError on typo
         if slot.locked:
             return slot.default
-        agent_prompts = getattr(self.config, "agent_prompts", None) or {}
+        agent_prompts = _read_override_dict(
+            getattr(self.config, "agent_prompts", None),
+            "config.agent_prompts",
+        )
         return agent_prompts.get(name, slot.default)
 
     def list_prompt_slots(self) -> dict[str, dict[str, PromptSlot]]:
         """Combined slot view for this agent.
 
         Returns a two-level dict keyed by target:
-          - ``"_agent"`` -> the agent's own PROMPT_SLOTS
+          - ``"_agent"`` -> the agent's own MRO-merged slots
           - each registered module name -> that module's MRO-merged slots
 
         ``_agent`` is purely a grouping label in the return value; it is
@@ -627,10 +694,10 @@ class LlamAgent:
         field for agent-level overrides).
         """
         view: dict[str, dict[str, PromptSlot]] = {
-            "_agent": dict(type(self).PROMPT_SLOTS),
+            "_agent": _walk_mro_prompt_slots(type(self)),
         }
         for mod_name, mod in self.modules.items():
-            view[mod_name] = type(mod).list_prompt_slots()
+            view[mod_name] = _walk_mro_prompt_slots(type(mod))
         return view
 
     def __init__(
@@ -815,19 +882,19 @@ class LlamAgent:
         # via _create_child_agent get this list seeded by step 4a.
         self._invoke_pending_factories()
 
-        # v3.9.0: validate agent-level prompt overrides (LlamAgent.PROMPT_SLOTS
-        # is declared on the class, so we can validate at __init__ end).
+        # v3.9.0: validate agent-level prompt overrides at __init__ end.
         # Module-targeted overrides are validated lazily at register_module
         # time; orphan checks (unknown module target) deferred to first
-        # _build_system_prompt to allow late module registration. getattr()
-        # defends against legacy Config objects built via __new__ that omit
-        # the new field.
-        agent_overrides = getattr(self.config, "agent_prompts", None) or {}
+        # _build_system_prompt to allow late module registration.
+        # Both reads route through _read_override_dict / _walk_mro_prompt_slots
+        # for single-source-of-truth defense (see helpers near PromptSlot).
+        agent_overrides = _read_override_dict(
+            getattr(self.config, "agent_prompts", None),
+            "config.agent_prompts",
+        )
         if agent_overrides:
             _validate_prompt_overrides(
-                # Direct class-attribute access: agent has no inheritance
-                # chain for slots (LlamAgent is not a subclass hierarchy).
-                type(self).PROMPT_SLOTS,
+                _walk_mro_prompt_slots(type(self)),
                 agent_overrides,
                 "agent_prompts",
             )
@@ -973,7 +1040,14 @@ class LlamAgent:
         """
         import difflib
 
-        module_prompts = getattr(self.config, "module_prompts", None) or {}
+        # Top-level module_prompts read goes through the same guarded
+        # helper used by register_module / Module.get_prompt_slot — a
+        # non-dict top-level surfaces a friendly ConfigError here rather
+        # than crashing the .items() iteration below.
+        module_prompts = _read_override_dict(
+            getattr(self.config, "module_prompts", None),
+            "config.module_prompts",
+        )
         if not module_prompts:
             return
         registered = sorted(self.modules.keys())
@@ -982,13 +1056,18 @@ class LlamAgent:
                 continue
             hint = difflib.get_close_matches(target, registered, n=1, cutoff=0.6)
             hint_str = f" Did you mean {hint[0]!r}?" if hint else ""
-            # Pick a slot name from the override dict for the error path
-            # (the message must reference a concrete path so users find the
-            # offending YAML/Config entry).
-            slot_hint = next(iter(overrides), "<slot>") if isinstance(overrides, dict) else "<slot>"
+            # Build the error path: include a concrete slot name when one
+            # exists (peek at the override dict if it's well-formed),
+            # otherwise just the target. Per-target overrides are NOT
+            # eagerly read through _read_override_dict here because a
+            # non-dict per-target value is moot when the target itself is
+            # orphaned — the loud failure focuses on the typo'd target.
+            if isinstance(overrides, dict) and overrides:
+                path = f"module_prompts[{target!r}][{next(iter(overrides))!r}]"
+            else:
+                path = f"module_prompts[{target!r}]"
             raise ConfigError(
-                f"module_prompts[{target!r}][{slot_hint!r}]: "
-                f"no module named {target!r} is registered. "
+                f"{path}: no module named {target!r} is registered. "
                 f"Registered modules: {registered}.{hint_str}"
             )
 
@@ -1026,15 +1105,21 @@ class LlamAgent:
         # try block. The validator does not depend on module.llm or on_attach
         # state, so it can run first. Placing it outside the try keeps
         # ConfigError from being re-wrapped by the except logger.error and
-        # surfaces a clean error to the caller. getattr() defends against
-        # legacy Config objects built via __new__ that may omit the new
-        # field — mirrors the existing module_models lookup below.
-        mod_overrides = (getattr(self.config, "module_prompts", None) or {}).get(
-            module.name, {}
+        # surfaces a clean error to the caller. Both reads (top-level
+        # module_prompts and per-module override dict) route through
+        # _read_override_dict so a non-dict at either level surfaces a
+        # friendly ConfigError instead of a cryptic AttributeError.
+        module_prompts = _read_override_dict(
+            getattr(self.config, "module_prompts", None),
+            "config.module_prompts",
+        )
+        mod_overrides = _read_override_dict(
+            module_prompts.get(module.name, {}),
+            f"config.module_prompts[{module.name!r}]",
         )
         if mod_overrides:
             _validate_prompt_overrides(
-                type(module).list_prompt_slots(),
+                _walk_mro_prompt_slots(type(module)),
                 mod_overrides,
                 f"module_prompts[{module.name!r}]",
             )
