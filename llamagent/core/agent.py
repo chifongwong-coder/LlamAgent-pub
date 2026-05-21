@@ -1059,6 +1059,13 @@ class LlamAgent:
 
             self.modules[module.name] = module
             logger.info("Module registered: %s (%s)", module.name, module.description)
+            # v3.9.0: rearm the orphan-check sentinel. A user that does
+            # chat("a") → register_module(new_mod) → chat("b") must have
+            # any typo in new_mod's name re-evaluated against the now-
+            # updated registered-modules set. Placed inside the try
+            # success path (after the modules[...] = module assignment
+            # so the new module is visible to the next orphan scan).
+            self._prompt_overrides_validated = False
         except Exception as e:
             logger.error("Module '%s' registration failed: %s", module.name, e)
             raise
