@@ -38,16 +38,27 @@ class LLMClient:
     When litellm is not installed, all calling methods return friendly error messages without raising exceptions.
     """
 
-    def __init__(self, model: str, api_retry_count: int = 1):
+    def __init__(self, model: str, api_retry_count: int = 1,
+                 disable_thinking: bool = False):
         """
         Initialize the LLM client.
 
         Args:
             model: Model identifier, e.g. "openai/gpt-4o-mini"
             api_retry_count: Number of retries on API call failure (retries N times, N+1 total calls)
+            disable_thinking: When True AND the model is an Ollama model,
+                inject ``reasoning_effort='disable'`` into every completion
+                call. LiteLLM 1.82+ maps the disable value to Ollama's
+                API-level ``think=False``, skipping the 30-60s thinking
+                burn on qwen3/qwen3.5/qwen3.6 thinking models. Other
+                providers (OpenAI o-series, Anthropic, DeepSeek) are
+                untouched — they have their own reasoning controls. Set
+                via ``Config.disable_thinking`` or YAML
+                ``llm.disable_thinking: true``.
         """
         self.model = model
         self.api_retry_count = api_retry_count
+        self.disable_thinking = disable_thinking
 
         # Context window size (attempt auto-detection)
         self.max_context_tokens: int = self._detect_max_context_tokens()
@@ -125,6 +136,11 @@ class LLMClient:
             kwargs["tool_choice"] = tool_choice
         if timeout is not None:
             kwargs["timeout"] = timeout
+        # v3.9.0+: route disable_thinking to LiteLLM's Ollama think=False.
+        # getattr defends against bypass-init paths (e.g. test fixtures
+        # that use LLMClient.__new__) where the attribute is never set.
+        if getattr(self, "disable_thinking", False) and self.model.startswith("ollama"):
+            kwargs["reasoning_effort"] = "disable"
 
         # Call with retry
         last_error = None
@@ -192,6 +208,12 @@ class LLMClient:
             kwargs["tools"] = tools
         if timeout is not None:
             kwargs["timeout"] = timeout
+        # v3.9.0+: same Ollama think=False injection as chat() — streaming
+        # would otherwise still emit <think>...</think> chunks first.
+        # getattr defends against bypass-init paths (e.g. test fixtures
+        # that use LLMClient.__new__) where the attribute is never set.
+        if getattr(self, "disable_thinking", False) and self.model.startswith("ollama"):
+            kwargs["reasoning_effort"] = "disable"
 
         last_error = None
         for attempt in range(self.api_retry_count + 1):

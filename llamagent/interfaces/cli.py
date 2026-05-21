@@ -1165,6 +1165,16 @@ def main():
     parser = _create_parser()
     args = parser.parse_args()
 
+    # v3.9.0+: if neither --modules nor --no-modules was passed but the
+    # YAML config sets ``modules``, use it as if the user had typed
+    # --modules "<list>". CLI flag still wins when present. This lets
+    # users drive the whole CLI from a config file without prompts.
+    if args.modules is None and not args.no_modules:
+        from llamagent.core import Config as _Config
+        config_modules = getattr(_Config(), "modules", None)
+        if config_modules is not None:
+            args.modules = ",".join(config_modules)
+
     # Direct mode: --modules or --no-modules skips interactive setup
     if args.no_modules or args.modules is not None:
         if args.no_modules:

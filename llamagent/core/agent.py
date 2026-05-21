@@ -718,6 +718,7 @@ class LlamAgent:
         self.llm = LLMClient(
             model=self.config.model,
             api_retry_count=self.config.api_retry_count,
+            disable_thinking=getattr(self.config, "disable_thinking", False),
         )
         self._llm_cache: dict[str, LLMClient] = {self.config.model: self.llm}
         self.modules: dict[str, Module] = {}
@@ -933,7 +934,11 @@ class LlamAgent:
     def _get_llm(self, model: str) -> LLMClient:
         """Get or create LLMClient for the given model."""
         if model not in self._llm_cache:
-            self._llm_cache[model] = LLMClient(model, self.config.api_retry_count)
+            self._llm_cache[model] = LLMClient(
+                model,
+                self.config.api_retry_count,
+                disable_thinking=getattr(self.config, "disable_thinking", False),
+            )
         return self._llm_cache[model]
 
     # ============================================================

@@ -114,6 +114,20 @@ MODULE_OPTIONS = [
 
 DEFAULT_MODULES = [m[0] for m in MODULE_OPTIONS]
 
+
+def _config_modules_default() -> list[str]:
+    """v3.9.0+: pre-populate the Web UI's module checkbox group from YAML.
+
+    Reads ``config.modules`` once at UI build time. When set in YAML, the
+    Web UI's 'Modules' checkbox group defaults to that list (user can
+    still adjust before clicking Build). When None, falls back to the
+    'all modules' default. Read once at create_web_ui time, NOT per
+    request — YAML config is process-lifetime configuration.
+    """
+    from llamagent.core import Config
+    cfg_modules = getattr(Config(), "modules", None)
+    return cfg_modules if cfg_modules is not None else DEFAULT_MODULES
+
 PRESET_CONFIGS = {
     "Full (all modules)": DEFAULT_MODULES,
     "Minimal (safety + tools)": ["safety", "tools"],
@@ -626,7 +640,7 @@ def create_web_ui() -> "gr.Blocks":
                     )
                     module_checkboxes = gr.CheckboxGroup(
                         choices=[f"{m[0]}" for m in MODULE_OPTIONS],
-                        value=DEFAULT_MODULES,
+                        value=_config_modules_default(),
                         label="Modules (check to enable)",
                     )
                     preset_dropdown.change(

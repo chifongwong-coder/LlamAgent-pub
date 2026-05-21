@@ -59,6 +59,7 @@ _YAML_MAP = [
     (("model", "api_retry_count"), "api_retry_count", int),
     (("llm", "fallback_model"), "fallback_model", str),
     (("llm", "resilience_max_retries"), "resilience_max_retries", int),
+    (("llm", "disable_thinking"), "disable_thinking", bool),
     (("llm", "routing_simple_model"), "routing_simple_model", str),
     (("agent", "system_prompt"), "system_prompt", str),
     (("agent", "context_window_size"), "context_window_size", int),
@@ -122,6 +123,7 @@ _YAML_MAP = [
     (("authorization", "auto_approve"), "auto_approve", bool),
     (("authorization", "scopes"), "authorization_scopes", list),
     (("module_models",), "module_models", dict),
+    (("modules",), "modules", list),
     (("retrieval_backend",), "retrieval_backend", str),
     (("memory_backend",), "memory_backend", str),
     (("fs_data_dir",), "fs_data_dir", str),
@@ -210,6 +212,9 @@ class Config:
         self.api_retry_count: int = 1
         self.fallback_model: str | None = None
         self.resilience_max_retries: int = 3
+        # v3.9.0+: route to LLMClient's Ollama think=False injection.
+        # Effective only for Ollama models; other providers ignore it.
+        self.disable_thinking: bool = False
         self.routing_simple_model: str | None = None
 
         # Agent
@@ -363,6 +368,11 @@ class Config:
 
         # Per-module model overrides (module_name -> model_name)
         self.module_models: dict[str, str] = {}
+        # v3.9.0+: optional module preload list. When set in YAML, CLI/Web
+        # use it as the default module set (CLI --modules flag and Web UI
+        # checkboxes still take precedence at runtime). None means "no
+        # preference — fall back to interactive setup or all-modules default".
+        self.modules: list[str] | None = None
 
         # v3.9.0: per-module / per-agent prompt slot overrides.
         # See docs/llamagent-v3.9-plan.md §2.3 for slot semantics. The
