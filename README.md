@@ -205,13 +205,15 @@ authorization:
 ## Customizing System Prompts
 
 Each agent and module exposes prompt slots you can override per target model.
-Use `Config(agent_prompts={...}, module_prompts={...})` for fine-grained tuning,
-or run `/prompts` in the CLI to list available slots and their status.
+Set `config.agent_prompts` / `config.module_prompts` on a `Config` instance for
+fine-grained tuning, or run `/prompts` in the CLI to list available slots and
+their status.
 
 Example: customize the behavioral guidelines for a weak local model:
 
 ```python
-Config(agent_prompts={"behavioral_guidelines": "- Always restate the user's request first\n- Tool errors mean stop and ask"})
+config = Config()
+config.agent_prompts = {"behavioral_guidelines": "- Always restate the user's request first\n- Tool errors mean stop and ask"}
 ```
 
 ## Examples
