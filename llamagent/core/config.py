@@ -124,6 +124,11 @@ _YAML_MAP = [
     (("authorization", "scopes"), "authorization_scopes", list),
     (("module_models",), "module_models", dict),
     (("modules",), "modules", list),
+    # v3.9.0+: prompt slot overrides via YAML (plan §2.3 example shape).
+    # agent_prompts: dict[slot_name -> str]
+    # module_prompts: dict[module_name -> dict[slot_name -> str]]
+    (("agent_prompts",), "agent_prompts", dict),
+    (("module_prompts",), "module_prompts", dict),
     (("retrieval_backend",), "retrieval_backend", str),
     (("memory_backend",), "memory_backend", str),
     (("fs_data_dir",), "fs_data_dir", str),
@@ -572,6 +577,16 @@ class Config:
 
     def _check_unknown_keys(self, data: dict, prefix: tuple = ()):
         """Warn about YAML keys not in the mapping table."""
+        # v3.9.0+: dict-typed leaves whose contents are user-supplied keys
+        # (slot names, module names, etc.) — do not recurse into them, the
+        # framework intentionally accepts arbitrary inner keys.
+        OPEN_DICT_LEAVES = {
+            ("agent_prompts",),
+            ("module_prompts",),
+            ("module_models",),
+            ("child_agent", "role_models"),
+            ("job", "profiles"),
+        }
         for key, value in data.items():
             current_path = prefix + (key,)
             # Special sections with their own parsing, skip validation
@@ -582,7 +597,7 @@ class Config:
                     "Unknown YAML config key: '%s' (ignored)",
                     ".".join(current_path),
                 )
-            elif isinstance(value, dict):
+            elif isinstance(value, dict) and current_path not in OPEN_DICT_LEAVES:
                 self._check_unknown_keys(value, current_path)
 
     # ==================================================================
