@@ -1165,15 +1165,32 @@ def main():
     parser = _create_parser()
     args = parser.parse_args()
 
-    # v3.9.0+: if neither --modules nor --no-modules was passed but the
-    # YAML config sets ``modules``, use it as if the user had typed
-    # --modules "<list>". CLI flag still wins when present. This lets
-    # users drive the whole CLI from a config file without prompts.
-    if args.modules is None and not args.no_modules:
+    # v3.9.0+: if YAML config sets ``modules`` and the user is launching
+    # without an explicit module flag, show a config summary and ask
+    # whether to use it as-is or customize it interactively. The 'ask'
+    # subcommand bypasses the prompt — it's the scripted one-shot path
+    # and prompting there would break automation.
+    if (args.modules is None and not args.no_modules
+            and args.command != "ask"):
         from llamagent.core import Config as _Config
-        config_modules = getattr(_Config(), "modules", None)
-        if config_modules is not None:
-            args.modules = ",".join(config_modules)
+        _cfg = _Config()
+        _cfg_modules = getattr(_cfg, "modules", None)
+        if _cfg_modules is not None:
+            console.print("\n[bold]Loaded YAML config:[/bold]")
+            console.print(f"  Model:            [cyan]{_cfg.model}[/cyan]")
+            console.print(f"  Modules:          [cyan]{', '.join(_cfg_modules)}[/cyan]")
+            if getattr(_cfg, "disable_thinking", False):
+                console.print("  Disable thinking: [cyan]yes[/cyan]")
+            if getattr(_cfg, "agent_prompts", None):
+                console.print(f"  Agent prompts:    [cyan]{list(_cfg.agent_prompts.keys())}[/cyan]")
+            if _ask_confirm("\nModify settings?", default=False):
+                # Fall through to the interactive setup loop below; the
+                # interactive flow already starts from sensible defaults
+                # and the YAML-loaded Config drives Config-level fields.
+                pass
+            else:
+                # Quick mode: use YAML modules + agent defaults straight to chat
+                args.modules = ",".join(_cfg_modules)
 
     # Direct mode: --modules or --no-modules skips interactive setup
     if args.no_modules or args.modules is not None:
