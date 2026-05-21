@@ -337,7 +337,7 @@ class PromptSlot:
 # implementation had this logic inlined in 6 places, which led to two
 # symmetric bug classes (MRO walk inconsistent between Module/Agent
 # sides; isinstance defense inconsistent between validators/runtime
-# readers). See plan §"DRY for slot access" and CLAUDE.md.
+# readers). See plan §"DRY for slot access" and project conventions P7.
 
 
 def _walk_mro_prompt_slots(cls) -> dict[str, PromptSlot]:
@@ -661,7 +661,7 @@ class LlamAgent:
 
     # --- Prompt Slot API (v3.9.0) ---
     # LlamAgent is not a Module subclass; the Module API is duplicated here
-    # by design (CLAUDE.md P6 — 3 short methods cost less than introducing
+    # by design (project P6 — 3 short methods cost less than introducing
     # a shared base class for two call sites). Agent has no PROMPT_SLOTS
     # parent hierarchy, so get_prompt_slot does not walk the MRO.
 
