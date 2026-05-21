@@ -594,7 +594,7 @@ Usage:
     reply = agent.chat("Hello")
 """
 
-__version__ = "3.8.8"
+__version__ = "3.9.0"
 
 # Export commonly used classes from the core layer for external convenience
 from llamagent.core import LlamAgent, Module, Config, LLMClient, Persona, PersonaManager

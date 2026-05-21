@@ -496,6 +496,7 @@ class LlamAgentCLI:
             "/skills": self._cmd_skills,
             "/memory": self._cmd_memory,
             "/history": self._cmd_history,
+            "/prompts": self._cmd_prompts,
         }
 
         # Tab completion for slash commands (C4)
@@ -667,6 +668,7 @@ class LlamAgentCLI:
             ("/status", "View Agent runtime status"),
             ("/modules", "View loaded modules"),
             ("/skills", "List loaded skills"),
+            ("/prompts", "List customizable system prompt slots"),
             ("/memory", "Show stored facts and memory usage"),
             ("/history", "Browse saved conversation sessions"),
             ("/clear", "Start a fresh conversation"),
@@ -934,6 +936,98 @@ class LlamAgentCLI:
                 print(f"  - {name}")
             print()
 
+    def _cmd_prompts(self):
+        """List customizable system prompt slots (v3.9.0)."""
+        view = self.agent.list_prompt_slots()
+        agent_slots = view.get("_agent", {})
+        agent_overrides = getattr(self.agent.config, "agent_prompts", None) or {}
+        module_prompts_cfg = getattr(self.agent.config, "module_prompts", None) or {}
+
+        def status_for(slot, override_value):
+            if slot.locked:
+                # Rich treats '[...]' as markup; escape so the brackets
+                # render literally in tables. _cmd_help and acceptance #6
+                # both expect the literal "[locked]" string.
+                return "\\[locked]" if HAS_RICH else "[locked]"
+            return "overridden" if override_value is not None else "default"
+
+        def truncate(text, limit=60):
+            text = text.replace("\n", " ").strip()
+            return text if len(text) <= limit else text[: limit - 1] + "…"
+
+        if HAS_RICH:
+            agent_table = Table(
+                title="Agent prompts",
+                show_header=True,
+                header_style="bold cyan",
+            )
+            agent_table.add_column("Slot", style="cyan")
+            agent_table.add_column("Status", style="white", width=12)
+            agent_table.add_column("Description", style="white")
+            for slot_name, slot in sorted(agent_slots.items()):
+                override = agent_overrides.get(slot_name)
+                agent_table.add_row(
+                    slot_name,
+                    status_for(slot, override),
+                    truncate(slot.description),
+                )
+            console.print()
+            console.print(agent_table)
+        else:
+            print("\nAgent prompts:")
+            for slot_name, slot in sorted(agent_slots.items()):
+                override = agent_overrides.get(slot_name)
+                print(f"  {slot_name:<28} {status_for(slot, override):<12} "
+                      f"{truncate(slot.description)}")
+
+        # v3.9.0: no modules expose slots yet; v3.9.1+ will populate this.
+        module_targets = [k for k in view.keys() if k != "_agent"]
+        any_module_slots = any(view.get(m) for m in module_targets)
+        if not any_module_slots:
+            console.print("\n[dim]Module slots: not yet customizable[/dim]"
+                          if HAS_RICH else "\nModule slots: not yet customizable")
+        else:
+            if HAS_RICH:
+                mod_table = Table(
+                    title="Module prompts",
+                    show_header=True,
+                    header_style="bold cyan",
+                )
+                mod_table.add_column("Module", style="cyan")
+                mod_table.add_column("Slot", style="cyan")
+                mod_table.add_column("Status", style="white", width=12)
+                mod_table.add_column("Description", style="white")
+                for mod_name in sorted(module_targets):
+                    slots = view.get(mod_name, {})
+                    mod_overrides = module_prompts_cfg.get(mod_name, {})
+                    for slot_name, slot in sorted(slots.items()):
+                        override = mod_overrides.get(slot_name)
+                        mod_table.add_row(
+                            mod_name,
+                            slot_name,
+                            status_for(slot, override),
+                            truncate(slot.description),
+                        )
+                console.print()
+                console.print(mod_table)
+            else:
+                print("\nModule prompts:")
+                for mod_name in sorted(module_targets):
+                    slots = view.get(mod_name, {})
+                    mod_overrides = module_prompts_cfg.get(mod_name, {})
+                    for slot_name, slot in sorted(slots.items()):
+                        override = mod_overrides.get(slot_name)
+                        print(f"  {mod_name}/{slot_name:<24} "
+                              f"{status_for(slot, override):<12} "
+                              f"{truncate(slot.description)}")
+
+        hint = ("\n[dim]Hint: Slot defaults are not shown here. "
+                "Use agent.list_prompt_slots() in Python to inspect default content.[/dim]"
+                if HAS_RICH else
+                "\nHint: Slot defaults are not shown here. "
+                "Use agent.list_prompt_slots() in Python to inspect default content.")
+        console.print(hint) if HAS_RICH else print(hint)
+
     def _cmd_memory(self):
         """Show memory statistics."""
         if not self.agent.has_module("memory"):
@@ -1070,6 +1164,16 @@ def main():
 
     parser = _create_parser()
     args = parser.parse_args()
+
+    # v3.9.0+: if neither --modules nor --no-modules was passed but the
+    # YAML config sets ``modules``, use it as if the user had typed
+    # --modules "<list>". CLI flag still wins when present. This lets
+    # users drive the whole CLI from a config file without prompts.
+    if args.modules is None and not args.no_modules:
+        from llamagent.core import Config as _Config
+        config_modules = getattr(_Config(), "modules", None)
+        if config_modules is not None:
+            args.modules = ",".join(config_modules)
 
     # Direct mode: --modules or --no-modules skips interactive setup
     if args.no_modules or args.modules is not None:

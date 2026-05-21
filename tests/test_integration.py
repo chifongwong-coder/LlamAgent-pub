@@ -35,6 +35,9 @@ def _create_test_agent(mock_llm_client):
     config.agent_tools_dir = "/tmp/llamagent_test_tools"
     config.hooks_config = None
     config.module_models = {}
+    # v3.9.0: bypass-__init__ Config build must set these manually
+    config.module_prompts = {}
+    config.agent_prompts = {}
 
     agent = LlamAgent.__new__(LlamAgent)
     agent.config = config

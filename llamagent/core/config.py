@@ -59,6 +59,7 @@ _YAML_MAP = [
     (("model", "api_retry_count"), "api_retry_count", int),
     (("llm", "fallback_model"), "fallback_model", str),
     (("llm", "resilience_max_retries"), "resilience_max_retries", int),
+    (("llm", "disable_thinking"), "disable_thinking", bool),
     (("llm", "routing_simple_model"), "routing_simple_model", str),
     (("agent", "system_prompt"), "system_prompt", str),
     (("agent", "context_window_size"), "context_window_size", int),
@@ -122,6 +123,12 @@ _YAML_MAP = [
     (("authorization", "auto_approve"), "auto_approve", bool),
     (("authorization", "scopes"), "authorization_scopes", list),
     (("module_models",), "module_models", dict),
+    (("modules",), "modules", list),
+    # v3.9.0+: prompt slot overrides via YAML (plan §2.3 example shape).
+    # agent_prompts: dict[slot_name -> str]
+    # module_prompts: dict[module_name -> dict[slot_name -> str]]
+    (("agent_prompts",), "agent_prompts", dict),
+    (("module_prompts",), "module_prompts", dict),
     (("retrieval_backend",), "retrieval_backend", str),
     (("memory_backend",), "memory_backend", str),
     (("fs_data_dir",), "fs_data_dir", str),
@@ -162,6 +169,16 @@ for _path, _attr, _type in _YAML_MAP:
         _VALID_YAML_PATHS.add(_path[:i + 1])
 
 
+class ConfigError(ValueError):
+    """Raised when Config contents are inconsistent.
+
+    v3.9.0: used by prompt slot validation (unknown slot, locked slot
+    override, non-string value, unregistered module target). Subclasses
+    ``ValueError`` so existing ``except ValueError`` handlers still catch
+    it without code churn.
+    """
+
+
 class Config:
     """
     Global configuration, each instance holds its own state independently.
@@ -200,6 +217,9 @@ class Config:
         self.api_retry_count: int = 1
         self.fallback_model: str | None = None
         self.resilience_max_retries: int = 3
+        # v3.9.0+: route to LLMClient's Ollama think=False injection.
+        # Effective only for Ollama models; other providers ignore it.
+        self.disable_thinking: bool = False
         self.routing_simple_model: str | None = None
 
         # Agent
@@ -353,6 +373,21 @@ class Config:
 
         # Per-module model overrides (module_name -> model_name)
         self.module_models: dict[str, str] = {}
+        # v3.9.0+: optional module preload list. When set in YAML, CLI/Web
+        # use it as the default module set (CLI --modules flag and Web UI
+        # checkboxes still take precedence at runtime). None means "no
+        # preference — fall back to interactive setup or all-modules default".
+        self.modules: list[str] | None = None
+
+        # v3.9.0: per-module / per-agent prompt slot overrides.
+        # See docs/llamagent-v3.9-plan.md §2.3 for slot semantics. The
+        # framework validates these against each module's declared
+        # PROMPT_SLOTS at register_module time and raises ConfigError
+        # on locked-slot writes, unknown slot names, or unregistered
+        # module targets (the last is detected lazily at first
+        # _build_system_prompt to allow late module registration).
+        self.module_prompts: dict[str, dict[str, str]] = {}
+        self.agent_prompts: dict[str, str] = {}
 
         # Backend selection (FS vs RAG)
         self.retrieval_backend: str = "rag"
@@ -542,6 +577,16 @@ class Config:
 
     def _check_unknown_keys(self, data: dict, prefix: tuple = ()):
         """Warn about YAML keys not in the mapping table."""
+        # v3.9.0+: dict-typed leaves whose contents are user-supplied keys
+        # (slot names, module names, etc.) — do not recurse into them, the
+        # framework intentionally accepts arbitrary inner keys.
+        OPEN_DICT_LEAVES = {
+            ("agent_prompts",),
+            ("module_prompts",),
+            ("module_models",),
+            ("child_agent", "role_models"),
+            ("job", "profiles"),
+        }
         for key, value in data.items():
             current_path = prefix + (key,)
             # Special sections with their own parsing, skip validation
@@ -552,7 +597,7 @@ class Config:
                     "Unknown YAML config key: '%s' (ignored)",
                     ".".join(current_path),
                 )
-            elif isinstance(value, dict):
+            elif isinstance(value, dict) and current_path not in OPEN_DICT_LEAVES:
                 self._check_unknown_keys(value, current_path)
 
     # ==================================================================

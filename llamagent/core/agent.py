@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Generator, Literal
 
 from llamagent.core.authorization import ApprovalScope, AuthorizationEngine
-from llamagent.core.config import Config
+from llamagent.core.config import Config, ConfigError
 from llamagent.core.contract import PipelineOutcome
 from llamagent.core.zone import ConfirmRequest, ConfirmResponse
 from llamagent.core.controller import ModeAction, TaskModeController
@@ -300,6 +300,122 @@ def _infer_parameters_helper(func: Callable, skip_first_arg: bool = False) -> di
 
 
 # ======================================================================
+# PromptSlot (v3.9.0): declarative slot for customizable system prompts
+# ======================================================================
+
+
+@dataclass
+class PromptSlot:
+    """Declarative slot for a customizable system prompt fragment.
+
+    A slot represents a single overridable string in an Agent's or Module's
+    system prompt. Locked slots are framework-related (parsing contract,
+    safety guard, or position-sensitive); non-locked slots are pure
+    guidance the framework does not parse.
+
+    Subclasses declare slots via the class attribute ``PROMPT_SLOTS``.
+    Subclasses that extend a parent's slots MUST explicitly merge:
+    ``PROMPT_SLOTS = {**super().PROMPT_SLOTS, "new_slot": PromptSlot(...)}``.
+    The framework does not use metaclass magic; ``list_prompt_slots`` walks
+    the MRO so an unmerged subclass still exposes parent slots (parents
+    remain readable via ``get_prompt_slot``).
+    """
+
+    default: str
+    description: str
+    locked: bool = False
+
+
+# ----------------------------------------------------------------------
+# Internal slot-access helpers (single source of truth)
+# ----------------------------------------------------------------------
+#
+# These two helpers exist so every PROMPT_SLOTS / override-dict access in
+# the v3.9.0 infrastructure flows through one funnel. Adding a new call
+# site in the future means routing it through these helpers — there is
+# no second code path for slot lookup or override reading. The previous
+# implementation had this logic inlined in 6 places, which led to two
+# symmetric bug classes (MRO walk inconsistent between Module/Agent
+# sides; isinstance defense inconsistent between validators/runtime
+# readers). See plan §"DRY for slot access" and project conventions P7.
+
+
+def _walk_mro_prompt_slots(cls) -> dict[str, PromptSlot]:
+    """Single source of truth for MRO-walked PROMPT_SLOTS access.
+
+    Walks ``cls.__mro__`` top-of-hierarchy first, merging each class's
+    declared ``PROMPT_SLOTS`` dict; later (deeper subclass) entries
+    override earlier ones with the same key. Used by both Module and
+    LlamAgent slot APIs so subclasses that fail to explicitly merge
+    ``{**super().PROMPT_SLOTS, ...}`` still expose parent slots.
+    """
+    merged: dict[str, PromptSlot] = {}
+    for klass in reversed(cls.__mro__):
+        merged.update(getattr(klass, "PROMPT_SLOTS", {}))
+    return merged
+
+
+def _read_override_dict(value, target_label: str) -> dict:
+    """Single source of truth for reading an override dict from Config.
+
+    Behavior:
+    - ``None`` (missing field on legacy __new__-built Config) -> ``{}``
+    - non-dict (type contract violation) -> raise friendly ConfigError
+    - dict (the normal case) -> return as-is
+
+    Loud failure on type violation matches plan §2.4 — catch malformed
+    config at the first read point rather than letting cryptic
+    ``AttributeError`` surface mid-chat.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError(
+            f"{target_label}: expected a dict, got {type(value).__name__}."
+        )
+    return value
+
+
+def _validate_prompt_overrides(
+    declared_slots: dict[str, PromptSlot],
+    overrides: dict[str, str],
+    target_label: str,
+) -> None:
+    """Validate prompt slot overrides against the declared slot set.
+
+    Raises ConfigError on:
+    - unknown slot name (includes a difflib "Did you mean" hint when close)
+    - override targeting a locked slot
+    - non-string override value
+
+    Used by register_module (per-module overrides) and LlamAgent.__init__
+    (agent-level overrides). Orphan-target detection (override targeting an
+    unregistered module name) is a separate concern handled lazily at first
+    _build_system_prompt — see LlamAgent._validate_prompt_orphans.
+    """
+    import difflib
+
+    for slot_name, value in overrides.items():
+        if slot_name not in declared_slots:
+            declared_keys = sorted(declared_slots.keys())
+            hint = difflib.get_close_matches(slot_name, declared_keys, n=1, cutoff=0.6)
+            hint_str = f" Did you mean {hint[0]!r}?" if hint else ""
+            raise ConfigError(
+                f"{target_label}[{slot_name!r}]: slot not declared. "
+                f"Declared slots: {declared_keys}.{hint_str}"
+            )
+        if declared_slots[slot_name].locked:
+            raise ConfigError(
+                f"{target_label}[{slot_name!r}]: slot is locked and cannot be overridden."
+            )
+        if not isinstance(value, str):
+            raise ConfigError(
+                f"{target_label}[{slot_name!r}]: value must be str, "
+                f"got {type(value).__name__}."
+            )
+
+
+# ======================================================================
 # Module base class
 # ======================================================================
 
@@ -335,6 +451,46 @@ class Module:
     # because most modules hold per-agent state that must NOT be
     # shared (e.g., LLM-bound helpers, per-session caches).
     shareable: bool = False
+
+    # v3.9.0: declarative customizable prompt slots. Empty on the base
+    # class; subclasses extend via {**super().PROMPT_SLOTS, "new": ...}.
+    PROMPT_SLOTS: dict[str, PromptSlot] = {}
+
+    # --- Prompt Slot API (v3.9.0) ---
+
+    def get_prompt_slot(self, name: str) -> str:
+        """Return the effective value of a slot (override if set, else default).
+
+        Raises RuntimeError if called before on_attach (self.agent unset).
+        Raises KeyError if the slot name is not declared (fail fast on typos).
+        """
+        if not hasattr(self, "agent") or self.agent is None:
+            raise RuntimeError(
+                f"{type(self).__name__}.get_prompt_slot({name!r}) called "
+                "before on_attach. Slot access requires self.agent."
+            )
+        all_slots = _walk_mro_prompt_slots(type(self))
+        slot = all_slots[name]
+        if slot.locked:
+            return slot.default
+        # Two-level dict read: top-level module_prompts must be a dict,
+        # per-module entry must also be a dict. Both go through the same
+        # guarded reader so any future config layout change is caught
+        # consistently at every entry point.
+        module_prompts = _read_override_dict(
+            getattr(self.agent.config, "module_prompts", None),
+            "config.module_prompts",
+        )
+        overrides = _read_override_dict(
+            module_prompts.get(self.name, {}),
+            f"config.module_prompts[{self.name!r}]",
+        )
+        return overrides.get(name, slot.default)
+
+    @classmethod
+    def list_prompt_slots(cls) -> dict[str, PromptSlot]:
+        """Merged slot view walking the MRO (subclass slots override parents)."""
+        return _walk_mro_prompt_slots(cls)
 
     # --- Lifecycle Callbacks ---
 
@@ -454,6 +610,18 @@ class Module:
 # ======================================================================
 
 
+# v3.9.0: default value for the agent-level `behavioral_guidelines` prompt
+# slot. Bullets only — the framework wraps with "\n[Behavioral Guidelines]\n"
+# in _build_system_prompt (fixed template wrapping; see plan §2.1 example).
+# Users overriding this slot write only the bullet body, never the header.
+DEFAULT_BEHAVIORAL_GUIDELINES = (
+    "- Results returned by tools are real data; do not fabricate or modify them\n"
+    "- When a tool call fails, try an alternative approach instead of repeating the same call\n"
+    "- When uncertain, proactively ask the user rather than guessing\n"
+    "- Respect permission boundaries; do not exceed authorized operations"
+)
+
+
 class LlamAgent:
     """
     LlamAgent: modular AI Agent core engine.
@@ -475,6 +643,63 @@ class LlamAgent:
     - safety:       Safety guardrails
     """
 
+    # v3.9.0: declarative customizable prompt slots for agent-level prompts.
+    # The framework wraps the slot value in "\n[Behavioral Guidelines]\n"
+    # in _build_system_prompt — users override only the bullet body.
+    PROMPT_SLOTS: dict[str, PromptSlot] = {
+        "behavioral_guidelines": PromptSlot(
+            default=DEFAULT_BEHAVIORAL_GUIDELINES,
+            description=(
+                "Behavioral guidance bullets shown to the LLM under the "
+                "'[Behavioral Guidelines]' header. The framework owns the "
+                "header line; do NOT include it in your override — write "
+                "only the bullet lines."
+            ),
+            locked=False,
+        ),
+    }
+
+    # --- Prompt Slot API (v3.9.0) ---
+    # LlamAgent is not a Module subclass; the Module API is duplicated here
+    # by design (project P6 — 3 short methods cost less than introducing
+    # a shared base class for two call sites). Agent has no PROMPT_SLOTS
+    # parent hierarchy, so get_prompt_slot does not walk the MRO.
+
+    def get_prompt_slot(self, name: str) -> str:
+        """Return the effective value of an agent-level slot.
+
+        Uses the MRO-walked slot set so subclasses of LlamAgent that
+        declare their own ``PROMPT_SLOTS`` (with or without explicit
+        super-merge) can still read inherited slots.
+        """
+        all_slots = _walk_mro_prompt_slots(type(self))
+        slot = all_slots[name]  # KeyError on typo
+        if slot.locked:
+            return slot.default
+        agent_prompts = _read_override_dict(
+            getattr(self.config, "agent_prompts", None),
+            "config.agent_prompts",
+        )
+        return agent_prompts.get(name, slot.default)
+
+    def list_prompt_slots(self) -> dict[str, dict[str, PromptSlot]]:
+        """Combined slot view for this agent.
+
+        Returns a two-level dict keyed by target:
+          - ``"_agent"`` -> the agent's own MRO-merged slots
+          - each registered module name -> that module's MRO-merged slots
+
+        ``_agent`` is purely a grouping label in the return value; it is
+        NOT a Config field name (Config has the separate ``agent_prompts``
+        field for agent-level overrides).
+        """
+        view: dict[str, dict[str, PromptSlot]] = {
+            "_agent": _walk_mro_prompt_slots(type(self)),
+        }
+        for mod_name, mod in self.modules.items():
+            view[mod_name] = _walk_mro_prompt_slots(type(mod))
+        return view
+
     def __init__(
         self,
         config: Config | None = None,
@@ -493,6 +718,7 @@ class LlamAgent:
         self.llm = LLMClient(
             model=self.config.model,
             api_retry_count=self.config.api_retry_count,
+            disable_thinking=getattr(self.config, "disable_thinking", False),
         )
         self._llm_cache: dict[str, LLMClient] = {self.config.model: self.llm}
         self.modules: dict[str, Module] = {}
@@ -656,6 +882,25 @@ class LlamAgent:
         # First-time agents have an empty list — no-op. Children built
         # via _create_child_agent get this list seeded by step 4a.
         self._invoke_pending_factories()
+
+        # v3.9.0: validate agent-level prompt overrides at __init__ end.
+        # Module-targeted overrides are validated lazily at register_module
+        # time; orphan checks (unknown module target) deferred to first
+        # _build_system_prompt to allow late module registration.
+        # Both reads route through _read_override_dict / _walk_mro_prompt_slots
+        # for single-source-of-truth defense (see helpers near PromptSlot).
+        agent_overrides = _read_override_dict(
+            getattr(self.config, "agent_prompts", None),
+            "config.agent_prompts",
+        )
+        if agent_overrides:
+            _validate_prompt_overrides(
+                _walk_mro_prompt_slots(type(self)),
+                agent_overrides,
+                "agent_prompts",
+            )
+        self._prompt_overrides_validated = False
+
         # v3.8.3 sentinel: __init__ is done. register_hook_factory uses
         # this to decide whether to invoke the factory immediately
         # (post-init) or just append (during init — _invoke_pending
@@ -689,7 +934,11 @@ class LlamAgent:
     def _get_llm(self, model: str) -> LLMClient:
         """Get or create LLMClient for the given model."""
         if model not in self._llm_cache:
-            self._llm_cache[model] = LLMClient(model, self.config.api_retry_count)
+            self._llm_cache[model] = LLMClient(
+                model,
+                self.config.api_retry_count,
+                disable_thinking=getattr(self.config, "disable_thinking", False),
+            )
         return self._llm_cache[model]
 
     # ============================================================
@@ -785,6 +1034,48 @@ class LlamAgent:
             )
         return self._snapshot_service.ensure_taken()
 
+    def _validate_prompt_orphans(self) -> None:
+        """v3.9.0: detect module_prompts targets that don't match a registered module.
+
+        Called lazily from _build_system_prompt the first time after each
+        register_module call (the sentinel ``_prompt_overrides_validated`` is
+        reset to False there). Raises ConfigError on any unrecognized target
+        with a difflib "Did you mean" hint when a close match exists. See
+        plan §2.4.
+        """
+        import difflib
+
+        # Top-level module_prompts read goes through the same guarded
+        # helper used by register_module / Module.get_prompt_slot — a
+        # non-dict top-level surfaces a friendly ConfigError here rather
+        # than crashing the .items() iteration below.
+        module_prompts = _read_override_dict(
+            getattr(self.config, "module_prompts", None),
+            "config.module_prompts",
+        )
+        if not module_prompts:
+            return
+        registered = sorted(self.modules.keys())
+        for target, overrides in module_prompts.items():
+            if target in self.modules:
+                continue
+            hint = difflib.get_close_matches(target, registered, n=1, cutoff=0.6)
+            hint_str = f" Did you mean {hint[0]!r}?" if hint else ""
+            # Build the error path: include a concrete slot name when one
+            # exists (peek at the override dict if it's well-formed),
+            # otherwise just the target. Per-target overrides are NOT
+            # eagerly read through _read_override_dict here because a
+            # non-dict per-target value is moot when the target itself is
+            # orphaned — the loud failure focuses on the typo'd target.
+            if isinstance(overrides, dict) and overrides:
+                path = f"module_prompts[{target!r}][{next(iter(overrides))!r}]"
+            else:
+                path = f"module_prompts[{target!r}]"
+            raise ConfigError(
+                f"{path}: no module named {target!r} is registered. "
+                f"Registered modules: {registered}.{hint_str}"
+            )
+
     def _compute_snapshot_session_id(self) -> str:
         """v3.8.2 A1: pluck a short session-id hint for snapshot naming.
         Mirrors the pre-fix ``_session_id_hint`` logic, called once at
@@ -815,6 +1106,29 @@ class LlamAgent:
         Args:
             module: The module instance to register
         """
+        # v3.9.0: validate prompt slot overrides for this module BEFORE the
+        # try block. The validator does not depend on module.llm or on_attach
+        # state, so it can run first. Placing it outside the try keeps
+        # ConfigError from being re-wrapped by the except logger.error and
+        # surfaces a clean error to the caller. Both reads (top-level
+        # module_prompts and per-module override dict) route through
+        # _read_override_dict so a non-dict at either level surfaces a
+        # friendly ConfigError instead of a cryptic AttributeError.
+        module_prompts = _read_override_dict(
+            getattr(self.config, "module_prompts", None),
+            "config.module_prompts",
+        )
+        mod_overrides = _read_override_dict(
+            module_prompts.get(module.name, {}),
+            f"config.module_prompts[{module.name!r}]",
+        )
+        if mod_overrides:
+            _validate_prompt_overrides(
+                _walk_mro_prompt_slots(type(module)),
+                mod_overrides,
+                f"module_prompts[{module.name!r}]",
+            )
+
         try:
             # Set module-specific LLM before on_attach (module.name is a class attribute, available here)
             model_name = getattr(self.config, 'module_models', {}).get(module.name)
@@ -835,6 +1149,13 @@ class LlamAgent:
 
             self.modules[module.name] = module
             logger.info("Module registered: %s (%s)", module.name, module.description)
+            # v3.9.0: rearm the orphan-check sentinel. A user that does
+            # chat("a") → register_module(new_mod) → chat("b") must have
+            # any typo in new_mod's name re-evaluated against the now-
+            # updated registered-modules set. Placed inside the try
+            # success path (after the modules[...] = module assignment
+            # so the new module is visible to the next orphan scan).
+            self._prompt_overrides_validated = False
         except Exception as e:
             logger.error("Module '%s' registration failed: %s", module.name, e)
             raise
@@ -2736,6 +3057,16 @@ class LlamAgent:
 
         Uses the persona's system_prompt when a Persona is set; otherwise uses the config default prompt.
         """
+        # v3.9.0: on first call, scan module_prompts for orphan target keys
+        # (keys that do not match any registered module). Deferred to first
+        # use because module registration happens after __init__ — see
+        # docs/llamagent-v3.9-plan.md §2.4. Flag is re-armed by
+        # register_module on every successful registration so chat ->
+        # register typo'd module -> chat still catches the typo.
+        if not getattr(self, "_prompt_overrides_validated", True):
+            self._validate_prompt_orphans()
+            self._prompt_overrides_validated = True
+
         # Persona identity
         base_prompt = (
             self.persona.to_system_prompt()
@@ -2744,13 +3075,10 @@ class LlamAgent:
         )
         parts = [base_prompt]
 
-        # Behavioral guidelines
+        # Behavioral guidelines (v3.9.0: slot-based; framework owns the header,
+        # slot value is bullets only — see DEFAULT_BEHAVIORAL_GUIDELINES).
         parts.append(
-            "\n[Behavioral Guidelines]\n"
-            "- Results returned by tools are real data; do not fabricate or modify them\n"
-            "- When a tool call fails, try an alternative approach instead of repeating the same call\n"
-            "- When uncertain, proactively ask the user rather than guessing\n"
-            "- Respect permission boundaries; do not exceed authorized operations"
+            f"\n[Behavioral Guidelines]\n{self.get_prompt_slot('behavioral_guidelines')}"
         )
 
         # Module capability descriptions

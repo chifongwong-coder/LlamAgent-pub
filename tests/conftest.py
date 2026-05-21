@@ -250,6 +250,10 @@ def bare_agent(mock_llm_client):
     config.scratch_id = None
     config.hooks_config = None
     config.module_models = {}
+    # v3.9.0: bare_agent uses Config.__new__ which bypasses default_factory,
+    # so these dict fields must be set manually here.
+    config.module_prompts = {}
+    config.agent_prompts = {}
     config.persistence_enabled = False
     config.persistence_auto_restore = True
     config.persistence_dir = None
@@ -311,6 +315,8 @@ def bare_agent(mock_llm_client):
     agent.mode = "interactive"
     agent._controller = None
     agent._current_task_id = None
+    # v3.9.0: bypass-__init__ fixture must manually set prompt-overrides sentinel
+    agent._prompt_overrides_validated = False
     agent._abort = False
     agent._tool_timeout_pool = None
     agent._open_questions_buffer = []
