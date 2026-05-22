@@ -197,6 +197,56 @@ def install_hooks(agent, app: "App") -> None:
     agent.register_hook(HookEvent.POST_TOOL_USE, _on_post)
     agent.register_hook(HookEvent.TOOL_ERROR, _on_error)
 
+    # Store handler refs so uninstall_hooks can find + remove them on
+    # agent rebuild (round-8 Rev A M1 / plan v13 §12 defer entry).
+    agent._bridge_hook_handlers = {
+        HookEvent.PRE_TOOL_USE: _on_pre,
+        HookEvent.POST_TOOL_USE: _on_post,
+        HookEvent.TOOL_ERROR: _on_error,
+    }
+
+
+def uninstall_hooks(agent) -> None:
+    """Remove bridge-registered hooks from ``agent``.
+
+    Called by the App before rebinding to a new agent (or when the
+    same agent is rebuilt via SetupScreen) so dead closures don't
+    keep firing into a stale App reference. Matching round-8 Rev A M1
+    + plan v13 §12 defer entry.
+
+    No-op if ``agent`` was never installed.
+    """
+    handlers = getattr(agent, "_bridge_hook_handlers", None)
+    if not handlers:
+        return
+    # agent._hooks is a per-instance dict[HookEvent, list[HookRegistration]]
+    # (agent.py:826). Each HookRegistration has .handler → CallableHandler,
+    # and CallableHandler.func is the original callback we registered
+    # (core/hooks.py:158). Identity-match through both layers.
+    hooks_dict = getattr(agent, "_hooks", None)
+    if hooks_dict is not None:
+        for event, fn in handlers.items():
+            bucket = hooks_dict.get(event, [])
+            try:
+                kept = []
+                for reg in bucket:
+                    inner = getattr(reg, "handler", None)
+                    inner_fn = getattr(inner, "func", None) if inner is not None else None
+                    if inner_fn is fn:
+                        continue
+                    kept.append(reg)
+                hooks_dict[event] = kept
+            except Exception as e:
+                logger.debug("uninstall_hooks event %s: %s", event, e)
+    try:
+        delattr(agent, "_bridge_hook_handlers")
+    except AttributeError:
+        pass
+    try:
+        delattr(agent, "_bridge_hooks_installed")
+    except AttributeError:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Worker function — body of App's @work(thread=True, exclusive=True)

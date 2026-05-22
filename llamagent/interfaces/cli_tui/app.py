@@ -81,20 +81,7 @@ class LlamAgentTUI(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        # StatusHeader initial values
-        header = self.query_one(StatusHeader)
-        if self.agent is not None:
-            header.model = str(self.agent.config.model)
-            header.persona = (
-                self.agent.persona.name if getattr(self.agent, "persona", None) else "default"
-            )
-            header.mode = self.agent.mode
-            header.modules_count = len(self.agent.modules) if hasattr(self.agent, "modules") else 0
-        else:
-            header.model = "mock (C0 Spike)"
-            header.persona = "default"
-            header.mode = "interactive"
-            header.modules_count = 0
+        self.refresh_status_header()
 
         self.title = (
             f"LlamAgent TUI — turns: 0 / {self.n_mock_turns or '∞'}"
@@ -113,6 +100,83 @@ class LlamAgentTUI(App):
 
         if self.n_mock_turns > 0:
             self.set_timer(0.05, self._run_mock_turn)
+            return
+
+        # C3: launch the SetupScreen when no agent was pre-constructed
+        # (mock-turn smoke mode bypasses this). SetupScreen returns a
+        # dict that _on_setup_done feeds into _build_agent_from_setup.
+        if self.agent is None:
+            from llamagent.interfaces.cli_tui.screens import SetupScreen
+            self.push_screen(SetupScreen(), self._on_setup_done)
+
+    # ------------------------------------------------------------------
+    # C3 — SetupScreen integration
+    # ------------------------------------------------------------------
+
+    def _on_setup_done(self, result: dict | None) -> None:
+        """Callback after SetupScreen dismisses.
+
+        ``None`` means the user cancelled — quit the App. Otherwise
+        build the LlamAgent and bind it via ``set_agent``.
+        """
+        if result is None:
+            self.exit()
+            return
+        from llamagent.interfaces.cli_tui.__main__ import build_agent_from_setup
+        try:
+            agent = build_agent_from_setup(result)
+        except Exception as exc:
+            log = self.query_one("#chat-log", ChatLog)
+            log.append_error(f"setup failed: {type(exc).__name__}: {exc}")
+            return
+        self.set_agent(agent)
+
+    def set_agent(self, agent) -> None:
+        """Bind ``agent`` to the App, refresh StatusHeader, install
+        hooks. Handles agent-rebuild path by uninstalling the previous
+        agent's hooks first (round-8 Rev A M1 / plan v13 §12).
+        """
+        from llamagent.interfaces.cli_tui.bridge import (
+            install_hooks,
+            uninstall_hooks,
+        )
+
+        if self.agent is not None and self.agent is not agent:
+            uninstall_hooks(self.agent)
+
+        self.agent = agent
+        self.refresh_status_header()
+        install_hooks(agent, self)
+        # Re-focus the Input so user can immediately type after build.
+        self.call_after_refresh(lambda: self.query_one("#input", Input).focus())
+
+    def refresh_status_header(self) -> None:
+        """Re-read agent attributes into the StatusHeader reactives.
+
+        Called from set_agent and (eventually) from slash-command
+        handlers like ``/mode`` that mutate ``agent.mode`` after build
+        — round-8 Rev C H1 / plan v13 §12. Without this the StatusHeader
+        shows the stale value because reactive properties don't poll.
+        """
+        header = self.query_one(StatusHeader)
+        if self.agent is not None:
+            header.model = str(self.agent.config.model)
+            header.persona = (
+                self.agent.persona.name
+                if getattr(self.agent, "persona", None)
+                else "default"
+            )
+            header.mode = self.agent.mode
+            header.modules_count = (
+                len(self.agent.modules)
+                if hasattr(self.agent, "modules")
+                else 0
+            )
+        else:
+            header.model = "(setup pending)"
+            header.persona = "—"
+            header.mode = "interactive"
+            header.modules_count = 0
 
     # ------------------------------------------------------------------
     # Smoke mode — used by C0 Spike to validate alt-screen + Q6 KPIs
