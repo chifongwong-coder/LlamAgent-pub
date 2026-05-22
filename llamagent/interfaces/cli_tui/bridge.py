@@ -155,7 +155,14 @@ def install_hooks(agent, app: "App") -> None:
         data = getattr(ctx, "data", {}) or {}
         name = str(data.get("tool_name", "?"))
         matched = _pop_pending(name)
-        call_id = matched[1] if matched else f"orphan-{next(_call_id_counter)}"
+        if matched is not None:
+            call_id = matched[1]
+        else:
+            # Orphan id increment must be under the lock — free-threaded
+            # Python doesn't guarantee `next(itertools.count)` atomicity
+            # (round-8 LOW-1; matches the H-R3-1 invariant from round-3).
+            with _pending_lock:
+                call_id = f"orphan-{next(_call_id_counter)}"
         preview = data.get("result_preview") or data.get("result") or ""
         preview = markup_escape(str(preview))
         try:
@@ -173,7 +180,11 @@ def install_hooks(agent, app: "App") -> None:
         data = getattr(ctx, "data", {}) or {}
         name = str(data.get("tool_name", "?"))
         matched = _pop_pending(name)
-        call_id = matched[1] if matched else f"orphan-{next(_call_id_counter)}"
+        if matched is not None:
+            call_id = matched[1]
+        else:
+            with _pending_lock:
+                call_id = f"orphan-{next(_call_id_counter)}"
         err = markup_escape(str(data.get("error", "(unspecified)")))
         try:
             app.post_message(
@@ -201,11 +212,39 @@ def run_turn(app: "App", agent, user_input: str) -> None:
     inline (not via ``yield from`` on a separate generator function) so
     that ``_drain_pending_for_thread`` runs even when the worker is
     abandoned mid-stream (e.g. App quit during a turn).
+
+    Cancellation (round-8 HIGH-1): ``run_worker(exclusive=True)`` in
+    thread mode only sets ``worker.is_cancelled``; it does NOT kill the
+    OS thread (Textual ``worker.py`` source verified — Python can't
+    safely kill threads). Without an explicit cancel check, the old
+    worker keeps posting chunks into the App while the user's 2nd turn
+    is already streaming → ChatLog appends to the wrong bubble. We
+    poll ``worker.is_cancelled`` at the top of each chunk and call
+    ``agent.abort()`` to let the framework's inner loops bail at their
+    next checkpoint (agent.py reads ``self._abort`` at multiple sites
+    in chat_stream / ReAct).
     """
+    from textual.worker import get_current_worker
+
     tid = threading.get_ident()
     error: Optional[str] = None
     try:
+        worker = get_current_worker()
+    except Exception:
+        worker = None  # Called outside a worker (e.g. unit test)
+
+    try:
         for chunk in agent.chat_stream(user_input):
+            if worker is not None and worker.is_cancelled:
+                # Signal the framework to stop its inner loops. agent.abort()
+                # sets self._abort=True which chat_stream / ReAct check.
+                # If the user spammed Enter, this is what stops turn N-1
+                # so turn N's ChatLog isn't polluted with stale chunks.
+                try:
+                    agent.abort()
+                except Exception:
+                    pass
+                break
             try:
                 app.post_message(ChatChunkMessage(chunk))
             except Exception as e:
