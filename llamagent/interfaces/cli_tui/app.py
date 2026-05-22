@@ -98,6 +98,14 @@ class LlamAgentTUI(App):
 
     def _run_mock_turn(self) -> None:
         if self._turns_completed >= self.n_mock_turns:
+            # NOTE (round-7 HIGH-2): the crash variant fires AFTER all
+            # n_mock_turns complete, not mid-stream. This still validates
+            # the same _handle_exception path — Textual's internal catch
+            # + alt-screen exit + Rich Console traceback emission happens
+            # identically regardless of WHEN the exception is raised. The
+            # 85-byte KPI #12 result is therefore valid. If true mid-stream
+            # crash semantics are needed for a future test, add a separate
+            # --crash-at-turn N parameter rather than repurposing this one.
             if (
                 self._crash_after_turns is not None
                 and self._turns_completed >= self._crash_after_turns
