@@ -9,6 +9,7 @@ push wiring lands).
 """
 from textual.containers import VerticalScroll
 from textual.reactive import reactive
+from textual.suggester import SuggestFromList
 from textual.widgets import Static
 
 from llamagent.interfaces.cli_tui.messages import (
@@ -19,6 +20,49 @@ from llamagent.interfaces.cli_tui.messages import (
     ToolErrorMessage,
     ToolStartMessage,
 )
+
+
+# ---------------------------------------------------------------------------
+# Slash command list + Suggester (plan §4 C1 / §4 C6)
+# ---------------------------------------------------------------------------
+
+
+# Plan §4 C6 — 13 slash commands + /mode subcommands. Production C6 will
+# bind these to their handlers via commands.py; for C1 we only wire the
+# autocomplete surface so the Input widget is feature-complete.
+SLASH_COMMANDS: tuple[str, ...] = (
+    "/help",
+    "/modules",
+    "/skills",
+    "/memory",
+    "/history",
+    "/status",
+    "/clear",
+    "/abort",
+    "/stop",
+    "/prompts",
+    "/quit",
+    "/exit",
+    "/q",
+    "/mode",
+    "/mode interactive",
+    "/mode task",
+    "/mode continuous",
+)
+
+
+class SlashCommandSuggester(SuggestFromList):
+    """Slash command autocomplete Suggester for the Input widget.
+
+    Wraps Textual SuggestFromList with the project's static slash list.
+    Empty input shows nothing; partial input (e.g. "/m") suggests the
+    first match (e.g. "/modules"). Case-insensitive so typing /Q maps
+    to /quit. Production C6 will rebuild this list dynamically from the
+    command registry; the static list keeps the C1 surface stable.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(SLASH_COMMANDS, case_sensitive=False)
 
 
 # ---------------------------------------------------------------------------

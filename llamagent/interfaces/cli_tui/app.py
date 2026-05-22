@@ -23,7 +23,11 @@ from pathlib import Path
 from textual.app import App, ComposeResult
 from textual.widgets import Footer, Input
 
-from llamagent.interfaces.cli_tui.widgets import ChatLog, StatusHeader
+from llamagent.interfaces.cli_tui.widgets import (
+    ChatLog,
+    SlashCommandSuggester,
+    StatusHeader,
+)
 
 
 class LlamAgentTUI(App):
@@ -57,7 +61,11 @@ class LlamAgentTUI(App):
     def compose(self) -> ComposeResult:
         yield StatusHeader()
         yield ChatLog(id="chat-log")
-        yield Input(placeholder="Type a message and press Enter...", id="input")
+        yield Input(
+            placeholder="Type a message and press Enter (slash for commands)…",
+            suggester=SlashCommandSuggester(),
+            id="input",
+        )
         yield Footer()
 
     def on_mount(self) -> None:
