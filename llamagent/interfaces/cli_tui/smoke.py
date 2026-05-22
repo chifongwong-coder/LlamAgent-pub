@@ -29,8 +29,8 @@ def main() -> int:
     args = [a for a in args if a != "--crash"]
     n_turns = int(args[0]) if args else 10
 
-    from llamagent.interfaces.cli_tui.app import LlamAgentTUISpike
-    app = LlamAgentTUISpike(
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+    app = LlamAgentTUI(
         n_mock_turns=n_turns,
         crash_after_turns=n_turns if crash_mode else None,
     )

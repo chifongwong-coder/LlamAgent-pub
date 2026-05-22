@@ -23,6 +23,11 @@ from pathlib import Path
 from textual.app import App, ComposeResult
 from textual.widgets import Footer, Input
 
+from llamagent.interfaces.cli_tui.messages import (
+    ChatChunkMessage,
+    ToolEndMessage,
+    ToolStartMessage,
+)
 from llamagent.interfaces.cli_tui.widgets import (
     ChatLog,
     SlashCommandSuggester,
@@ -106,12 +111,29 @@ class LlamAgentTUI(App):
 
         log = self.query_one("#chat-log", ChatLog)
         n = self._turns_completed + 1
+
+        # User turn — direct call (display-only, no Message round-trip needed).
         log.append_user(f"turn {n}")
-        log.append_assistant_chunk(f"Response {n} ")
-        log.append_assistant_chunk("with **markdown** ")
-        log.append_assistant_chunk("and `code` ")
-        log.append_tool_card("read_files", "success")
-        log.append_assistant_chunk("plus tool follow-up.")
+
+        # Assistant chunks — go through ChatChunkMessage so the C1.b
+        # Message-driven rendering path is exercised by every smoke run.
+        # This is the end-to-end validation that messages.py + ChatLog
+        # handlers actually wire up correctly inside the event loop.
+        log.post_message(ChatChunkMessage(f"Response {n} "))
+        log.post_message(ChatChunkMessage("with **markdown** "))
+        log.post_message(ChatChunkMessage("and `code` "))
+
+        # Tool call — exercises ToolStartMessage + ToolEndMessage pairing
+        # via the call_id map in ChatLog.
+        call_id = f"mock-call-{n}"
+        log.post_message(
+            ToolStartMessage(name="read_files", args={"paths": ["mock.py"]}, call_id=call_id)
+        )
+        log.post_message(
+            ToolEndMessage(call_id=call_id, duration_ms=23.0, result_preview="(mock result)")
+        )
+
+        log.post_message(ChatChunkMessage("plus tool follow-up."))
         log.finalize_assistant_bubble()
 
         self._turns_completed = n
@@ -165,6 +187,3 @@ class LlamAgentTUI(App):
         self.exit()
 
 
-# Backwards-compat alias for C0 Spike smoke.py — will be removed in C2
-# when smoke.py renames its import to LlamAgentTUI.
-LlamAgentTUISpike = LlamAgentTUI
