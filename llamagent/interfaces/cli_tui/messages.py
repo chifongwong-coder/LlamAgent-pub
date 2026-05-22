@@ -113,3 +113,14 @@ class ChildCompleteMessage(Message):
         super().__init__()
         self.task_id = task_id
         self.status = status
+
+
+class TurnCompleteMessage(Message):
+    """C2 — posted by ``bridge.run_turn`` when ``agent.chat_stream``
+    finishes (success or exception). Triggers ChatLog finalize so the
+    accumulated body re-renders as Markdown (plan §2.6 stage 2)."""
+
+    def __init__(self, success: bool = True, error: Optional[str] = None) -> None:
+        super().__init__()
+        self.success = success
+        self.error = error

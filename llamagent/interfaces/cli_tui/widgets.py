@@ -9,6 +9,7 @@ push wiring lands).
 """
 from rich.console import Group
 from rich.markdown import Markdown
+from rich.markup import escape as markup_escape
 from rich.text import Text
 from textual.containers import VerticalScroll
 from textual.reactive import reactive
@@ -22,6 +23,7 @@ from llamagent.interfaces.cli_tui.messages import (
     ToolEndMessage,
     ToolErrorMessage,
     ToolStartMessage,
+    TurnCompleteMessage,
 )
 
 
@@ -172,27 +174,38 @@ class ChatLog(VerticalScroll):
     # ----- streaming primitives (used by both spike mock and Message handlers in C1.b) -----
 
     def append_user(self, text: str) -> None:
-        """Mount a user-turn bubble. Resets streaming target."""
+        """Mount a user-turn bubble. Resets streaming target.
+
+        ``text`` is escaped via rich.markup.escape so any ``[bold]``-style
+        markup chars the user types render as literal text instead of
+        Rich styling (plan §12 / round-7 NIT A-1).
+        """
         self._current_assistant = None
-        self._mount_capped(Static(f"[bold]You:[/bold] {text}"))
+        self._accum.clear()
+        self._mount_capped(Static(f"[bold]You:[/bold] {markup_escape(text)}"))
 
     def append_assistant_chunk(self, text: str) -> None:
         """Streaming: accumulate chunk as plain text into the current
         assistant bubble (plan §2.6 stage 1).
 
-        Stored in self._accum so finalize_assistant_bubble can re-render
-        the full body as Markdown without losing the source text (which
-        is what made the spike's renderable-concatenation pattern wrong
-        — once finalize swapped the Static.renderable to a Markdown
-        object, the plain source was unrecoverable).
+        - ``self._accum`` stores RAW chunks (for the Markdown reflow at
+          finalize — so ``**bold**`` / `` `code` `` still parse).
+        - The DISPLAYED body during streaming is markup-escaped so any
+          Rich-style ``[bold]`` literal the LLM emits doesn't accidentally
+          re-style our prefix or the rest of the bubble (round-7 NIT A-1).
         """
         self._accum.append(text)
-        body = "".join(self._accum)
+        raw_body = "".join(self._accum)
+        display_body = markup_escape(raw_body)
         if self._current_assistant is None:
-            self._current_assistant = Static(f"[bold cyan]Assistant:[/bold cyan] {body}")
+            self._current_assistant = Static(
+                f"[bold cyan]Assistant:[/bold cyan] {display_body}"
+            )
             self._mount_capped(self._current_assistant)
         else:
-            self._current_assistant.update(f"[bold cyan]Assistant:[/bold cyan] {body}")
+            self._current_assistant.update(
+                f"[bold cyan]Assistant:[/bold cyan] {display_body}"
+            )
 
     def finalize_assistant_bubble(self) -> None:
         """End of streaming: one-shot Markdown reflow (plan §2.6 stage 2).
@@ -308,3 +321,11 @@ class ChatLog(VerticalScroll):
 
     def on_error_message(self, message: ErrorMessage) -> None:
         self.append_error(message.message)
+
+    def on_turn_complete_message(self, message: TurnCompleteMessage) -> None:
+        """C2 — turn ended. Finalize the assistant bubble (triggers the
+        Markdown reflow per plan §2.6 stage 2) and surface any error
+        from agent.chat_stream as an error bubble."""
+        self.finalize_assistant_bubble()
+        if not message.success and message.error:
+            self.append_error(f"agent error: {message.error}")

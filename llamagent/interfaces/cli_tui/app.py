@@ -55,10 +55,17 @@ class LlamAgentTUI(App):
 
     def __init__(
         self,
+        agent=None,
         n_mock_turns: int = 0,
         crash_after_turns: int | None = None,
     ) -> None:
         super().__init__()
+        # C2: when ``agent`` is set, on_input_submitted dispatches into a
+        # worker thread that iterates agent.chat_stream. When None, the
+        # interactive path falls back to the spike echo (used by smoke 0
+        # and IME tests). Smoke mode (n_mock_turns > 0) ignores ``agent``
+        # entirely and runs the deterministic mock turn loop.
+        self.agent = agent
         self.n_mock_turns = n_mock_turns
         self._turns_completed = 0
         self._crash_after_turns = crash_after_turns
@@ -76,10 +83,18 @@ class LlamAgentTUI(App):
     def on_mount(self) -> None:
         # StatusHeader initial values
         header = self.query_one(StatusHeader)
-        header.model = "mock (C0 Spike)"
-        header.persona = "default"
-        header.mode = "interactive"
-        header.modules_count = 0
+        if self.agent is not None:
+            header.model = str(self.agent.config.model)
+            header.persona = (
+                self.agent.persona.name if getattr(self.agent, "persona", None) else "default"
+            )
+            header.mode = self.agent.mode
+            header.modules_count = len(self.agent.modules) if hasattr(self.agent, "modules") else 0
+        else:
+            header.model = "mock (C0 Spike)"
+            header.persona = "default"
+            header.mode = "interactive"
+            header.modules_count = 0
 
         self.title = (
             f"LlamAgent TUI — turns: 0 / {self.n_mock_turns or '∞'}"
@@ -88,6 +103,13 @@ class LlamAgentTUI(App):
         # Defer Input.focus() until all widget mount cycles complete
         # (plan v11 §2.11.5 — VerticalScroll race fix verified Step 3).
         self.call_after_refresh(lambda: self.query_one("#input", Input).focus())
+
+        # C2: register hooks on real agent so PRE/POST/TOOL_ERROR
+        # produce ToolStart/End/Error Messages. install_hooks is
+        # idempotent so multiple App rebuilds on same agent are safe.
+        if self.agent is not None:
+            from llamagent.interfaces.cli_tui.bridge import install_hooks
+            install_hooks(self.agent, self)
 
         if self.n_mock_turns > 0:
             self.set_timer(0.05, self._run_mock_turn)
@@ -161,9 +183,35 @@ class LlamAgentTUI(App):
             return
         log = self.query_one("#chat-log", ChatLog)
         log.append_user(text)
-        log.append_assistant_chunk(f"[Spike echo] {text}")
-        log.finalize_assistant_bubble()
         event.input.value = ""
+
+        if self.agent is not None:
+            # C2 — real agent path. Spawn worker thread that iterates
+            # agent.chat_stream + posts ChatChunkMessage / Tool*Message
+            # / TurnCompleteMessage. ``exclusive=True`` ensures only one
+            # turn runs at a time (avoids interleaved hook callbacks).
+            self._run_real_turn(text)
+        else:
+            # Spike/IME-test path — synchronous echo so smoke 0 still works.
+            log.append_assistant_chunk(f"[Spike echo] {text}")
+            log.finalize_assistant_bubble()
+
+    def _run_real_turn(self, user_input: str) -> None:
+        """Spawn a worker thread to iterate ``agent.chat_stream``.
+
+        Uses Textual's ``run_worker`` (thread mode) — @work decorator
+        would attach the worker as an instance method which requires
+        a class-level declaration. ``run_worker`` lets us pass a plain
+        callable, which is cleaner for the C2 bridge.
+        """
+        from llamagent.interfaces.cli_tui.bridge import run_turn
+        agent = self.agent
+        self.run_worker(
+            lambda: run_turn(self, agent, user_input),
+            thread=True,
+            exclusive=True,
+            group="agent-turn",
+        )
 
     # ------------------------------------------------------------------
     # Q6 crash-path mitigation (plan v11 §2.2)
