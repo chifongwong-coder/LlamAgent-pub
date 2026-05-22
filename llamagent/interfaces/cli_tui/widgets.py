@@ -1,0 +1,152 @@
+"""Production widgets for cli_tui (plan v11 §3.3).
+
+C1.a — initial extraction from spike app.py + new StatusHeader.
+C1.b will add Message handlers (on_chat_chunk_message etc.) to ChatLog.
+C5 will add VerbosePane (deferred until verbose.py + child counter
+push wiring lands).
+"""
+from textual.containers import VerticalScroll
+from textual.reactive import reactive
+from textual.widgets import Static
+
+
+# ---------------------------------------------------------------------------
+# StatusHeader — top status bar (plan §3.1 layout)
+# ---------------------------------------------------------------------------
+
+
+class StatusHeader(Static):
+    """Top status bar: model | persona | mode | modules | child counter.
+
+    Replaces Textual's default Header (which is decorative-only). Reactive
+    attributes update the rendered text via Textual's reactive system —
+    e.g., switching mode via ``status_header.mode = "task"``.
+
+    Fixed-width slot for child counter (right-justified) avoids the L2
+    Header-jitter risk flagged in round-6 review.
+    """
+
+    DEFAULT_CSS = """
+    StatusHeader {
+        dock: top;
+        height: 1;
+        background: $primary;
+        color: $text;
+        padding: 0 1;
+    }
+    """
+
+    model: reactive[str] = reactive("model: unknown")
+    persona: reactive[str] = reactive("default")
+    mode: reactive[str] = reactive("interactive")
+    modules_count: reactive[int] = reactive(0)
+    child_running: reactive[int] = reactive(0)
+    child_failed: reactive[int] = reactive(0)
+
+    def render(self) -> str:
+        left = (
+            f"model: {self.model}  |  "
+            f"persona: {self.persona}  |  "
+            f"mode: {self.mode}  |  "
+            f"modules: {self.modules_count}"
+        )
+        # Plan v11 §2.4.3 — three-state counter
+        if self.child_running == 0 and self.child_failed == 0:
+            child = "🤖 idle"
+        elif self.child_failed == 0:
+            child = f"🤖 {self.child_running} running"
+        else:
+            child = f"🤖 {self.child_running} running, {self.child_failed} failed"
+        # Fixed 18-char right slot (L2 Header-jitter mitigation)
+        return f"{left}  {child:>18}"
+
+
+# ---------------------------------------------------------------------------
+# ChatLog — scrollable message column (plan §2.6)
+# ---------------------------------------------------------------------------
+
+
+class ChatLog(VerticalScroll):
+    """Scrollable column of message bubbles. Each message is one Static.
+
+    Ring buffer cap (plan v11 §2.6 round-6 H3) — evict oldest message
+    when count exceeds MAX_MESSAGES (200). Streaming bubbles use plain-
+    text accumulation during stream + final Markdown reflow only at
+    finalize_assistant_bubble — avoids the per-chunk reparse O(N²) CPU
+    cliff identified in round-6 H1 / Q1.
+
+    ``can_focus = False``: VerticalScroll defaults to focusable (so users
+    can scroll with arrow keys when it has focus). For chat UX the Input
+    should always own focus; scroll via Page Up/Down / mouse wheel
+    instead. Real-terminal C0 Spike Step-3 verified this is necessary —
+    without it Input never receives keystrokes. (plan v11 §2.11.5 / Q10)
+    """
+
+    can_focus = False
+
+    DEFAULT_CSS = """
+    ChatLog {
+        height: 1fr;
+        border: solid $accent;
+        padding: 0 1;
+    }
+    """
+
+    MAX_MESSAGES = 200
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._current_assistant: Static | None = None
+
+    # ----- streaming primitives (used by both spike mock and Message handlers in C1.b) -----
+
+    def append_user(self, text: str) -> None:
+        """Mount a user-turn bubble. Resets streaming target."""
+        self._current_assistant = None
+        self._mount_capped(Static(f"[bold]You:[/bold] {text}"))
+
+    def append_assistant_chunk(self, text: str) -> None:
+        """Streaming: accumulate into the current assistant bubble.
+
+        Stays plain-text during stream (plan §2.6 two-stage rendering).
+        finalize_assistant_bubble re-parses as Markdown once turn ends.
+        """
+        if self._current_assistant is None:
+            self._current_assistant = Static(f"[bold cyan]Assistant:[/bold cyan] {text}")
+            self._mount_capped(self._current_assistant)
+        else:
+            existing = self._current_assistant.renderable
+            self._current_assistant.update(f"{existing}{text}")
+
+    def finalize_assistant_bubble(self) -> None:
+        """Mark current assistant bubble complete (Markdown reflow point)."""
+        # C1.a leaves this as just a state reset; C1.b / production may
+        # rerender the accumulated text as Markdown here.
+        self._current_assistant = None
+
+    def append_tool_card(self, name: str, status: str = "running") -> None:
+        """Append a tool-call card (collapsible to be wired in C1.b)."""
+        marker = {
+            "running": "[yellow]⏳[/]",
+            "success": "[green]✓[/]",
+            "error": "[red]✗[/]",
+        }.get(status, "")
+        self._mount_capped(Static(f"{marker} tool: [cyan]{name}[/cyan]"))
+
+    def append_status(self, message: str) -> None:
+        self._mount_capped(Static(f"[dim]{message}[/dim]"))
+
+    def append_error(self, message: str) -> None:
+        self._mount_capped(Static(f"[bold red]Error:[/bold red] {message}"))
+
+    # ----- ring buffer eviction -----
+
+    def _mount_capped(self, widget: Static) -> None:
+        self.mount(widget)
+        if len(self.children) > self.MAX_MESSAGES:
+            evicted = self.children[0]
+            evicted.remove()
+            # Guard against dangling streaming-target reference
+            # (plan v11 round-6 L-R3-2)
+            if self._current_assistant is evicted:
+                self._current_assistant = None
