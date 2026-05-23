@@ -30,7 +30,6 @@ log stream. v3.7.7 cleanup pass categorized library code separately
 from CLI entry points.
 """
 
-import argparse
 import os
 import sys
 

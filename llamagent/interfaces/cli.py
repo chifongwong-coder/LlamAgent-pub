@@ -8,9 +8,14 @@ Selection rules (in order):
 2. ``ask`` subcommand → ``_legacy_cli.legacy_main(args)`` (the legacy
    path owns one-shot question handling, JSON output, etc.; the TUI
    doesn't support a question subcommand).
-3. ``_terminal_supports_tui()`` returns False (non-TTY stdout, dumb
-   terminal, etc.) → ``_legacy_cli.legacy_main(args)``.
-4. Otherwise → ``cli_tui.run(args)`` (Textual TUI).
+3. ``--modules`` / ``--no-modules`` (legacy "direct mode" flags) →
+   ``_legacy_cli.legacy_main(args)``.
+4. ``_terminal_supports_tui()`` returns False (non-TTY stdin/stdout,
+   dumb terminal, etc.) → ``_legacy_cli.legacy_main(args)``.
+5. Otherwise → ``cli_tui.run(args)`` (Textual TUI). This is also the
+   path taken by the ``chat`` subcommand — pre-C8 ``chat`` meant
+   "enter the legacy interactive loop", post-C8 it means "enter the
+   TUI" (the user-facing semantic is the same: open a chat surface).
 
 Re-exports ``run_cli`` and ``LlamAgentCLI`` from ``_legacy_cli`` so
 ``llamagent.main`` (``python -m llamagent --mode cli``) keeps importing
@@ -40,16 +45,18 @@ from llamagent.interfaces._legacy_cli import (  # noqa: F401
 
 
 def _terminal_supports_tui() -> bool:
-    """Return True when stdout is a TTY and the terminal claims more
-    than dumb capability.
+    """Return True when both stdin and stdout are TTYs and the terminal
+    claims more than dumb capability.
 
     Used by ``main()`` to auto-fall-back to the legacy CLI when the
-    process is being piped, redirected, or run under a "dumb"
-    ``TERM`` (e.g. some CI runners, some IDE consoles). The TUI
-    depends on an alt-screen + cursor positioning, neither of which
-    works without a real terminal.
+    process is being piped, redirected, or run under a "dumb" ``TERM``
+    (e.g. some CI runners, some IDE consoles). The TUI depends on an
+    alt-screen + cursor positioning *and* on keyboard events, so both
+    stdin and stdout must be a real terminal — round-16 Rev A M1
+    caught that ``echo q | python -m ...`` would otherwise launch the
+    TUI with a piped stdin, leaving it frozen with no way to type.
     """
-    if not sys.stdout.isatty():
+    if not sys.stdout.isatty() or not sys.stdin.isatty():
         return False
     term = os.environ.get("TERM", "").lower()
     if not term or term == "dumb":
@@ -69,13 +76,14 @@ def _create_parser() -> argparse.ArgumentParser:
         epilog="""
 Examples:
   python -m llamagent.interfaces.cli                     Default: Textual TUI
+  python -m llamagent.interfaces.cli chat                Same as default (TUI)
   python -m llamagent.interfaces.cli --legacy            Force legacy CLI
   python -m llamagent.interfaces.cli --modules tools     Skip setup; legacy path
   python -m llamagent.interfaces.cli --no-modules        Pure chat; legacy path
   python -m llamagent.interfaces.cli ask "How's the weather"   One-shot question (legacy)
   python -m llamagent.interfaces.cli ask "..." --format json   One-shot JSON output
 
-  python -c "import sys; sys.stdout.isatty()" piped/redirected → auto-falls back to legacy.
+  Piped or non-TTY (echo q | python -m ...) auto-falls back to legacy.
         """,
     )
 
@@ -83,11 +91,15 @@ Examples:
         "--legacy", action="store_true",
         help="Force the legacy input()-based CLI instead of the Textual TUI",
     )
-    parser.add_argument(
+    # Round-16 Rev C L1 — mutex group keeps this parser symmetric with
+    # ``cli_tui._self_parse``; argparse emits its own clean error when
+    # both are passed instead of silently letting --no-modules win.
+    scripted_group = parser.add_mutually_exclusive_group()
+    scripted_group.add_argument(
         "--modules", type=str, default=None,
         help="Comma-separated list of modules (skips interactive setup; legacy path)",
     )
-    parser.add_argument(
+    scripted_group.add_argument(
         "--no-modules", action="store_true",
         help="Load no modules, pure chat mode (skips interactive setup; legacy path)",
     )
