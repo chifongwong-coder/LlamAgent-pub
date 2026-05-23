@@ -225,13 +225,14 @@ Examples:
 
     # Launch the corresponding interface based on mode
     if args.mode == "cli":
-        from llamagent.interfaces.cli import LlamAgentCLI
+        # main.py is a launcher — it shouldn't know that the CLI is
+        # implemented as a ``LlamAgentCLI`` class or that ``chat_mode()``
+        # is its loop entry. Use the ``run_cli`` function the same way
+        # we use ``launch_web_ui`` / ``launch_api_server`` below; the
+        # CLI module owns chat-loop + shutdown.
+        from llamagent.interfaces.cli import run_cli
         agent = create_agent(module_names, persona_name=args.persona)
-        cli = LlamAgentCLI(agent)
-        try:
-            cli.chat_mode()
-        finally:
-            agent.shutdown()
+        run_cli(agent)
 
     elif args.mode == "web":
         from llamagent.interfaces.web_ui import create_web_ui, launch_web_ui

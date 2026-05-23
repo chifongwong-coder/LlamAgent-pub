@@ -1117,6 +1117,32 @@ class LlamAgentCLI:
 # Main entry loop
 # ============================================================
 
+def run_cli(agent) -> None:
+    """Run the legacy CLI chat loop on a prebuilt agent.
+
+    Symmetric with ``web_ui.launch_web_ui`` and ``api_server.launch_api_server``:
+    callers (``llamagent.main`` in particular) shouldn't need to know that the
+    CLI is implemented as a ``LlamAgentCLI`` class or that ``chat_mode()`` is
+    its loop entry. Owning the try/finally also makes shutdown a single
+    promise this function honours, regardless of whether the chat loop
+    exits cleanly, by user quit, or by exception.
+
+    Caller is still responsible for building the agent (the v3.7.7 split
+    keeps ``create_agent`` shared across cli / web / api).
+    """
+    cli = LlamAgentCLI(agent)
+    try:
+        cli.chat_mode()
+    finally:
+        try:
+            agent.shutdown()
+        except Exception as exc:
+            # Mirror main.py's prior behaviour — surface but don't mask the
+            # original exit. v3.8.6 cli main reported shutdown failures via
+            # rich.console; the same channel is used here.
+            console.print(f"[yellow]Warning: shutdown error: {exc}[/yellow]")
+
+
 def _create_parser() -> argparse.ArgumentParser:
     """Create the command-line argument parser."""
     parser = argparse.ArgumentParser(
