@@ -77,6 +77,12 @@ class SetupScreen(ModalScreen[dict | None]):
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
+    # Textual's AUTO_FOCUS selector tells the framework which widget
+    # should receive initial focus when the screen mounts. Without it
+    # the screen attaches but no child widget owns focus, so keyboard
+    # events go nowhere (test B 5/23 — "打字 / Esc / Tab 全无反应").
+    AUTO_FOCUS = "#name"
+
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Static("[bold cyan]LlamAgent — Setup[/bold cyan]")
@@ -115,9 +121,10 @@ class SetupScreen(ModalScreen[dict | None]):
                 yield Button("Cancel", id="cancel")
 
     def on_mount(self) -> None:
-        # Focus the first interactive widget so keyboard nav works
-        # without a mouse click.
-        self.query_one("#name", Input).focus()
+        # AUTO_FOCUS handles the initial focus declaratively; this
+        # explicit focus() is a belt-and-suspenders fallback for
+        # Textual versions where AUTO_FOCUS resolves after on_mount.
+        self.call_after_refresh(lambda: self.query_one("#name", Input).focus())
 
     def action_cancel(self) -> None:
         self.dismiss(None)

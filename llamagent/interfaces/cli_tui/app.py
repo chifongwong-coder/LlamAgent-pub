@@ -107,8 +107,17 @@ class LlamAgentTUI(App):
             # then SetupScreen is the active screen and App.query_one
             # routes through it, raising NoMatches for "#input" which
             # lives in the App's default screen (test B crash 5/23).
-            from llamagent.interfaces.cli_tui.screens import SetupScreen
-            self.push_screen(SetupScreen(), self._on_setup_done)
+            #
+            # Deferring push_screen via call_after_refresh: pushing
+            # during on_mount can race with the default screen's
+            # mount cycle, leaving the modal mounted but without a
+            # focused child — keystrokes go nowhere (test B 5/23
+            # re-run: "打字 / Esc / Tab 全无反应"). Deferring to the
+            # next refresh tick lets the default screen settle first.
+            def _push_setup() -> None:
+                from llamagent.interfaces.cli_tui.screens import SetupScreen
+                self.push_screen(SetupScreen(), self._on_setup_done)
+            self.call_after_refresh(_push_setup)
             return
 
         # Scripted path — agent pre-built, no SetupScreen, focus Input.
