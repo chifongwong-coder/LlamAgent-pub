@@ -193,6 +193,8 @@ class ChatLog(VerticalScroll):
         - The DISPLAYED body during streaming is markup-escaped so any
           Rich-style ``[bold]`` literal the LLM emits doesn't accidentally
           re-style our prefix or the rest of the bubble (round-7 NIT A-1).
+        - After every chunk, scroll to bottom so the user follows the
+          stream — chat UIs auto-follow by convention.
         """
         self._accum.append(text)
         raw_body = "".join(self._accum)
@@ -206,6 +208,7 @@ class ChatLog(VerticalScroll):
             self._current_assistant.update(
                 f"[bold cyan]Assistant:[/bold cyan] {display_body}"
             )
+            self.scroll_end(animate=False)
 
     def finalize_assistant_bubble(self) -> None:
         """End of streaming: one-shot Markdown reflow (plan §2.6 stage 2).
@@ -246,6 +249,10 @@ class ChatLog(VerticalScroll):
 
     def _mount_capped(self, widget: Static) -> None:
         self.mount(widget)
+        # Auto-follow newest message so user sees streamed output
+        # without manual scrolling. animate=False avoids the ease
+        # delay that would lag behind fast token streams.
+        self.scroll_end(animate=False)
         if len(self.children) > self.MAX_MESSAGES:
             evicted = self.children[0]
             evicted.remove()
