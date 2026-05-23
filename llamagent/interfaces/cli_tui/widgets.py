@@ -20,6 +20,7 @@ from llamagent.interfaces.cli_tui.messages import (
     ChatChunkMessage,
     ErrorMessage,
     StatusMessage,
+    ThinkingMessage,
     ToolEndMessage,
     ToolErrorMessage,
     ToolStartMessage,
@@ -336,3 +337,92 @@ class ChatLog(VerticalScroll):
         self.finalize_assistant_bubble()
         if not message.success and message.error:
             self.append_error(f"agent error: {message.error}")
+
+
+# ---------------------------------------------------------------------------
+# VerbosePane — diagnostic side panel for thinking / tool detail (plan §4 C5)
+# ---------------------------------------------------------------------------
+
+
+class VerbosePane(VerticalScroll):
+    """Right-side diagnostic pane: thinking content + tool args/result.
+
+    Hidden by default (App toggles ``display`` with Ctrl+V per plan §2.3
+    / §11 Q10). Subscribes to ThinkingMessage / ToolStart / ToolEnd /
+    ToolError so the user sees the same events that flow to ChatLog
+    but presented as collapsible diagnostic cards.
+
+    ``can_focus = False`` — same rationale as ChatLog (the Input must
+    own focus for chat; pane scrolls via mouse / Page Up/Down).
+    """
+
+    can_focus = False
+
+    DEFAULT_CSS = """
+    VerbosePane {
+        width: 40;
+        height: 1fr;
+        border: solid $primary-darken-1;
+        padding: 0 1;
+        display: none;
+    }
+    """
+
+    MAX_EVENTS = 200
+
+    def on_thinking_message(self, message: ThinkingMessage) -> None:
+        """ThinkingMessage from verbose.py LLM-chat wrapper — render as
+        a labelled, indented block. Dedup is the caller's responsibility
+        (verbose.py applies SHA-256 per-turn before posting)."""
+        # Truncate per plan §11 Q1: long thinking dumps degrade
+        # perf if rendered as Markdown each turn. Plain text only.
+        content = message.content or ""
+        if len(content) > 800:
+            content = content[:799] + "…"
+        self._mount_capped(
+            Static(
+                f"[dim italic]thinking[/dim italic] [dim]({markup_escape(message.source)})[/dim]\n"
+                f"  {markup_escape(content)}"
+            )
+        )
+
+    def on_tool_start_message(self, message: ToolStartMessage) -> None:
+        # Re-render in the verbose pane with the full args dict (the
+        # ChatLog card abbreviates to just the tool name).
+        args_repr = repr(message.args)
+        if len(args_repr) > 400:
+            args_repr = args_repr[:399] + "…"
+        self._mount_capped(
+            Static(
+                f"[yellow]⏳ tool:[/yellow] [cyan]{markup_escape(message.name)}[/cyan] "
+                f"[dim]({message.call_id})[/dim]\n"
+                f"  args: {markup_escape(args_repr)}"
+            )
+        )
+
+    def on_tool_end_message(self, message: ToolEndMessage) -> None:
+        preview = (message.result_preview or "").rstrip()
+        if len(preview) > 400:
+            preview = preview[:399] + "…"
+        self._mount_capped(
+            Static(
+                f"[green]✓ tool end[/green] [dim]({message.call_id})  "
+                f"{message.duration_ms:.0f}ms[/dim]\n"
+                f"  result: {markup_escape(preview) if preview else '[dim](empty)[/dim]'}"
+            )
+        )
+
+    def on_tool_error_message(self, message: ToolErrorMessage) -> None:
+        self._mount_capped(
+            Static(
+                f"[red]✗ tool error[/red] [cyan]{markup_escape(message.name)}[/cyan] "
+                f"[dim]({message.call_id})[/dim]\n"
+                f"  [red]{markup_escape(message.error)}[/red]"
+            )
+        )
+
+    def _mount_capped(self, widget: Static) -> None:
+        self.mount(widget)
+        self.scroll_end(animate=False)
+        if len(self.children) > self.MAX_EVENTS:
+            self.children[0].remove()

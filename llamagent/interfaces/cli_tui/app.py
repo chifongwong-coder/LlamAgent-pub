@@ -22,6 +22,7 @@ from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.containers import Horizontal
 from textual.widgets import Footer, Input
 
 from llamagent.interfaces.cli_tui.messages import (
@@ -33,6 +34,7 @@ from llamagent.interfaces.cli_tui.widgets import (
     ChatLog,
     SlashCommandSuggester,
     StatusHeader,
+    VerbosePane,
 )
 
 
@@ -61,6 +63,10 @@ class LlamAgentTUI(App):
         # When no modal is on the stack, Esc bubbles up to the App
         # and quits — matches the C3.f intent for the chat surface.
         Binding("escape", "quit", "Quit"),
+        # C5 — Ctrl+V toggles the VerbosePane (thinking / tool detail
+        # right column). Hidden by default per plan §2.3 — verbose
+        # adds visual weight; opt-in keeps the chat surface clean.
+        Binding("ctrl+v", "toggle_verbose", "Toggle verbose"),
     ]
 
     def __init__(
@@ -82,13 +88,31 @@ class LlamAgentTUI(App):
 
     def compose(self) -> ComposeResult:
         yield StatusHeader()
-        yield ChatLog(id="chat-log")
+        # C5 — split chat row into Horizontal so VerbosePane can sit
+        # on the right column. ChatLog gets 1fr (flex), VerbosePane
+        # default-hidden width 40. Together they fill the row.
+        with Horizontal(id="chat-row"):
+            yield ChatLog(id="chat-log")
+            yield VerbosePane(id="verbose-pane")
         yield Input(
             placeholder="Type a message and press Enter (slash for commands)…",
             suggester=SlashCommandSuggester(),
             id="input",
         )
         yield Footer()
+
+    def action_toggle_verbose(self) -> None:
+        """Ctrl+V toggle for VerbosePane (plan §2.3 / §C5).
+
+        Toggles ``.display`` rather than mounting/unmounting so the
+        widget retains its message history across hide/show cycles.
+        Default is hidden (DEFAULT_CSS sets display:none).
+        """
+        try:
+            pane = self.query_one("#verbose-pane", VerbosePane)
+        except Exception:
+            return
+        pane.display = not pane.display
 
     def on_mount(self) -> None:
         self.refresh_status_header()
@@ -109,8 +133,10 @@ class LlamAgentTUI(App):
                 install_handlers,
                 install_hooks,
             )
+            from llamagent.interfaces.cli_tui.verbose import install_verbose
             install_hooks(self.agent, self.query_one("#chat-log", ChatLog))
             install_handlers(self.agent, self)
+            install_verbose(self.agent, self.query_one("#verbose-pane", VerbosePane))
 
         if self.n_mock_turns > 0:
             # Mock smoke — no SetupScreen, focus Input directly.
@@ -182,10 +208,15 @@ class LlamAgentTUI(App):
             uninstall_handlers,
             uninstall_hooks,
         )
+        from llamagent.interfaces.cli_tui.verbose import (
+            install_verbose,
+            uninstall_verbose,
+        )
 
         if self.agent is not None and self.agent is not agent:
             uninstall_hooks(self.agent)
             uninstall_handlers(self.agent)
+            uninstall_verbose(self.agent)
 
         self.agent = agent
         self.refresh_status_header()
@@ -193,6 +224,9 @@ class LlamAgentTUI(App):
         install_hooks(agent, self.query_one("#chat-log", ChatLog))
         # Confirm / ask handlers push modal screens via the App.
         install_handlers(agent, self)
+        # C5 — thinking capture posts to the VerbosePane widget (which
+        # is hidden by default; user toggles via Ctrl+V to see).
+        install_verbose(agent, self.query_one("#verbose-pane", VerbosePane))
         # Re-focus the Input so user can immediately type after build.
         self.call_after_refresh(lambda: self.query_one("#input", Input).focus())
 
