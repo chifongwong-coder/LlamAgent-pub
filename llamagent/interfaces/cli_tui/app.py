@@ -32,6 +32,7 @@ from llamagent.interfaces.cli_tui.messages import (
 )
 from llamagent.interfaces.cli_tui.widgets import (
     ChatLog,
+    LlamAgentInput,
     SlashCommandSuggester,
     StatusHeader,
     VerbosePane,
@@ -121,8 +122,8 @@ class LlamAgentTUI(App):
         with Horizontal(id="chat-row"):
             yield ChatLog(id="chat-log")
             yield VerbosePane(id="verbose-pane")
-        yield Input(
-            placeholder="Type a message and press Enter (slash for commands)…",
+        yield LlamAgentInput(
+            placeholder="Type a message and press Enter (slash for commands; Tab to accept; Up/Down history)…",
             suggester=SlashCommandSuggester(),
             id="input",
         )
@@ -382,6 +383,13 @@ class LlamAgentTUI(App):
         text = event.value.strip()
         if not text:
             return
+        # C6.1: record the submission in the LlamAgentInput history ring
+        # BEFORE clearing — append_history resets navigation state too so
+        # the next Up starts fresh after a submit. Guard with isinstance
+        # because Input.Submitted is also fired by any plain Textual Input
+        # in tests / future spike paths.
+        if isinstance(event.input, LlamAgentInput):
+            event.input.append_history(text)
         event.input.value = ""
 
         # C6 — slash command path. dispatch_slash returns True for any

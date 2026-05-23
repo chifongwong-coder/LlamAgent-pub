@@ -11,10 +11,11 @@ from rich.console import Group
 from rich.markdown import Markdown
 from rich.markup import escape as markup_escape
 from rich.text import Text
+from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.reactive import reactive
 from textual.suggester import SuggestFromList
-from textual.widgets import Static
+from textual.widgets import Input, Static
 
 from llamagent.interfaces.cli_tui.messages import (
     ChatChunkMessage,
@@ -62,6 +63,117 @@ SLASH_COMMANDS: tuple[str, ...] = (
     "/mode task",
     "/mode continuous",
 )
+
+
+class LlamAgentInput(Input):
+    """Input subclass with Tab accept + Up/Down history (plan §2.10 v16 K10).
+
+    Three extra keystrokes on top of the stock Textual ``Input`` BINDINGS:
+
+    - **Tab**: if the Suggester has a current suggestion that extends the
+      typed prefix, accept it (replace value with the full suggestion +
+      move cursor to end). No suggestion → no-op (Tab does not move focus
+      because ChatLog / VerbosePane have ``can_focus = False``).
+    - **Up**: navigate to the previous history entry. First press saves
+      the current input value as scratch so the user can Down back to it.
+    - **Down**: navigate to the next history entry; past the newest, restore
+      scratch and exit history mode.
+
+    History semantics mirror GNU readline / bash:
+    - Submitted values (slash commands AND chat) are appended via
+      :meth:`append_history` (caller wires this from ``on_input_submitted``).
+    - Consecutive duplicates are deduplicated (Up Up does not waste a slot
+      repeating the last command).
+    - Editing a recalled history entry does NOT re-snapshot scratch — Up
+      from an edited history entry just walks to the next-older entry,
+      losing the in-place edits, same as bash. Submit (Enter) is the only
+      way to keep an edited value.
+    - Capacity 200 ring buffer (matches ChatLog.MAX_MESSAGES). When full,
+      oldest entry is evicted. Not persisted across sessions (V1) —
+      plan §2.10 V2 defers persistence to C9 polish.
+    """
+
+    MAX_HISTORY = 200
+
+    BINDINGS = [
+        Binding("up", "history_prev", "History prev", show=False),
+        Binding("down", "history_next", "History next", show=False),
+        Binding("tab", "accept_suggestion", "Accept suggestion", show=False),
+    ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._history: list[str] = []
+        self._history_cursor: int | None = None
+        self._scratch: str = ""
+
+    def append_history(self, value: str) -> None:
+        """Record a submitted value (called by App on submit before clear).
+
+        - Empty / whitespace-only values are not recorded.
+        - Consecutive duplicates are dropped.
+        - Capacity 200: oldest entry is evicted FIFO.
+        - Resets cursor / scratch so the next Up starts fresh.
+        """
+        value = value.strip()
+        # Always reset navigation state after a submit, even if we don't
+        # actually record (empty / dup) — the previous Up/Down navigation
+        # is no longer relevant once the user has submitted something.
+        self._history_cursor = None
+        self._scratch = ""
+        if not value:
+            return
+        if self._history and self._history[-1] == value:
+            return
+        self._history.append(value)
+        if len(self._history) > self.MAX_HISTORY:
+            self._history.pop(0)
+
+    def action_history_prev(self) -> None:
+        """Up — move to an older history entry (or enter history mode)."""
+        if not self._history:
+            return
+        if self._history_cursor is None:
+            # First Up: snapshot the in-progress edit so Down can restore it
+            self._scratch = self.value
+            self._history_cursor = len(self._history) - 1
+        elif self._history_cursor > 0:
+            self._history_cursor -= 1
+        else:
+            return  # already at the oldest entry
+        self.value = self._history[self._history_cursor]
+        self.cursor_position = len(self.value)
+
+    def action_history_next(self) -> None:
+        """Down — move to a newer history entry, or restore scratch and exit."""
+        if self._history_cursor is None:
+            return
+        if self._history_cursor < len(self._history) - 1:
+            self._history_cursor += 1
+            self.value = self._history[self._history_cursor]
+        else:
+            # Past the newest entry: leave history mode, restore the
+            # snapshot the user was typing when they first pressed Up.
+            self._history_cursor = None
+            self.value = self._scratch
+            self._scratch = ""
+        self.cursor_position = len(self.value)
+
+    def action_accept_suggestion(self) -> None:
+        """Tab — accept the current Suggester suggestion if it extends value.
+
+        Textual stores the active suggestion (full text including the
+        typed prefix) on ``self._suggestion``. When the suggestion is
+        longer than the current value it means the Suggester offered a
+        completion the user hasn't accepted yet — replacing value with
+        the suggestion is the accept gesture (mirrors what
+        ``action_cursor_right`` does at the end of the value at
+        textual/widgets/_input.py:688).
+        """
+        suggestion = self._suggestion or ""
+        if suggestion and suggestion != self.value:
+            self.value = suggestion
+            self.cursor_position = len(self.value)
 
 
 class SlashCommandSuggester(SuggestFromList):
