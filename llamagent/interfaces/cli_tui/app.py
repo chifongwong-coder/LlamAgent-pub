@@ -21,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.widgets import Footer, Input
 
 from llamagent.interfaces.cli_tui.messages import (
@@ -51,7 +52,12 @@ class LlamAgentTUI(App):
     #input { dock: bottom; }
     """
 
-    BINDINGS = [("ctrl+c", "quit", "Quit")]
+    BINDINGS = [
+        Binding("ctrl+c", "quit", "Quit"),
+        # priority=True so Esc reaches the App even when Input has
+        # focus (default Input swallows Esc to clear its buffer).
+        Binding("escape", "quit", "Quit", priority=True),
+    ]
 
     def __init__(
         self,
