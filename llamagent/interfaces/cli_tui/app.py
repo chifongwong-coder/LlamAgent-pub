@@ -54,9 +54,13 @@ class LlamAgentTUI(App):
 
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit"),
-        # priority=True so Esc reaches the App even when Input has
-        # focus (default Input swallows Esc to clear its buffer).
-        Binding("escape", "quit", "Quit", priority=True),
+        # Esc is NOT priority — modal screens (ConfirmModal /
+        # AskUserModal / SetupScreen) install their own escape
+        # bindings to dismiss-with-sentinel. priority=True on the
+        # App's escape would shadow those (round-11 BLOCKER B1).
+        # When no modal is on the stack, Esc bubbles up to the App
+        # and quits — matches the C3.f intent for the chat surface.
+        Binding("escape", "quit", "Quit"),
     ]
 
     def __init__(

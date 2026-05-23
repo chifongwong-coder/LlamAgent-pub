@@ -308,15 +308,14 @@ def install_handlers(agent, app) -> None:
 
         result_holder: list = []
         event = threading.Event()
+        modal = ConfirmModal(req)
 
         def _on_dismiss(value):
             result_holder.append(value)
             event.set()
 
         try:
-            app.call_from_thread(
-                app.push_screen, ConfirmModal(req), _on_dismiss
-            )
+            app.call_from_thread(app.push_screen, modal, _on_dismiss)
         except Exception as e:
             logger.debug("confirm modal push_screen failed: %s", e)
             return ConfirmResponse(allow=False, approved_scopes=None)
@@ -326,6 +325,14 @@ def install_handlers(agent, app) -> None:
                 "confirm modal 60s timeout — sentinel deny for tool=%s",
                 getattr(req, "tool_name", "?"),
             )
+            # Round-11 B3 — actively dismiss the modal so the user
+            # doesn't keep staring at a dead dialog. dismiss(None)
+            # re-fires _on_dismiss(None) (harmless — event already
+            # used, result_holder no longer read).
+            try:
+                app.call_from_thread(modal.dismiss, None)
+            except Exception:
+                pass
             return ConfirmResponse(allow=False, approved_scopes=None)
 
         value = result_holder[0] if result_holder else None
@@ -339,30 +346,58 @@ def install_handlers(agent, app) -> None:
 
             result_holder: list = []
             event = threading.Event()
+            modal = AskUserModal(question, choices)
 
             def _on_dismiss(value):
                 result_holder.append(value)
                 event.set()
 
             try:
-                app.call_from_thread(
-                    app.push_screen,
-                    AskUserModal(question, choices),
-                    _on_dismiss,
-                )
+                app.call_from_thread(app.push_screen, modal, _on_dismiss)
             except Exception as e:
                 logger.debug("ask modal push_screen failed: %s", e)
                 return ""
 
             if not event.wait(timeout=MODAL_RESPONSE_TIMEOUT_S):
                 logger.warning("ask modal 60s timeout — sentinel empty")
+                # Round-11 B3 — same modal-dismiss pattern as confirm.
+                try:
+                    app.call_from_thread(modal.dismiss, None)
+                except Exception:
+                    pass
                 return ""
 
             value = result_holder[0] if result_holder else None
             return value if isinstance(value, str) else ""
 
-    agent.confirm_handler = _confirm_handler
-    agent.interaction_handler = _TUIInteractionHandler()
+    # Round-11 H-2 — atomic install. Mirror install_hooks pattern:
+    # build the handler closures first, swap onto the agent in one
+    # block, and only set the idempotency flag after both
+    # assignments succeed so a partial install can be cleaned up
+    # by a subsequent uninstall_handlers call.
+    interaction_handler_instance = _TUIInteractionHandler()
+    try:
+        agent.confirm_handler = _confirm_handler
+        agent.interaction_handler = interaction_handler_instance
+        # Round-11 BLOCKER B-1 — ToolsModule snapshots the handler
+        # into agent._tool_state["ask_user_handler"] at attach time
+        # (modules/tools/module.py:234); the builtin ask_user tool
+        # reads from that snapshot, not agent.interaction_handler.
+        # Without this rewrite the SetupScreen → set_agent path
+        # leaves the snapshot at None and ask_user always returns
+        # "no interaction handler configured" — primary user flow
+        # broken silently. Mirror tools/module.py snapshot key.
+        state = getattr(agent, "_tool_state", None)
+        if isinstance(state, dict):
+            state["ask_user_handler"] = interaction_handler_instance
+    except Exception:
+        # Rollback — leave nothing partially attached.
+        agent.confirm_handler = None
+        agent.interaction_handler = None
+        state = getattr(agent, "_tool_state", None)
+        if isinstance(state, dict):
+            state["ask_user_handler"] = None
+        raise
     agent._tui_handlers_installed = True
 
 
@@ -380,6 +415,12 @@ def uninstall_handlers(agent) -> None:
     # holding stale closures pointing at a dead app reference.
     agent.confirm_handler = None
     agent.interaction_handler = None
+    # Round-11 B-1 mirror — clear the ToolsModule snapshot so the
+    # built-in ask_user tool falls back to "no handler" instead of
+    # firing into a dead closure after agent rebuild.
+    state = getattr(agent, "_tool_state", None)
+    if isinstance(state, dict):
+        state["ask_user_handler"] = None
     try:
         delattr(agent, "_tui_handlers_installed")
     except AttributeError:

@@ -234,7 +234,15 @@ class ConfirmModal(ModalScreen[Optional[bool]]):
     def compose(self) -> ComposeResult:
         req = self.request
         with Vertical():
-            yield Static("Authorization required", classes="confirm-title")
+            # Round-11 H2 — kind / mode header so the user can tell a
+            # session_authorize from an operation_confirm at a glance.
+            kind = getattr(req, "kind", None) or "confirm"
+            mode = getattr(req, "mode", None) or "-"
+            yield Static(
+                f"Authorization required  "
+                f"[dim](kind={markup_escape(str(kind))} · mode={markup_escape(str(mode))})[/dim]",
+                classes="confirm-title",
+            )
             tool = getattr(req, "tool_name", "?")
             action = getattr(req, "action", None) or "-"
             zone = getattr(req, "zone", None) or "-"
@@ -250,6 +258,33 @@ class ConfirmModal(ModalScreen[Optional[bool]]):
                 more = f"\n  …(+{len(paths) - 8} more)" if len(paths) > 8 else ""
                 yield Static(
                     f"paths:\n  {paths_text}{more}",
+                    classes="confirm-field",
+                )
+            # Round-11 H1 — requested_scopes is the v1.9.1 contract
+            # scope grant payload (zone / actions / paths / tool_names).
+            # Without rendering it, session_authorize prompts ask the
+            # user to approve an opaque request — security UX regression
+            # vs legacy CLI. Defensive on shape because RequestedScope
+            # is a dataclass that may evolve.
+            scopes = getattr(req, "requested_scopes", None) or []
+            if scopes:
+                lines = []
+                for s in scopes[:4]:
+                    zn = getattr(s, "zone", "?")
+                    acts = getattr(s, "actions", None) or []
+                    paths_pref = getattr(s, "path_prefixes", None) or []
+                    tools = getattr(s, "tool_names", None) or []
+                    parts = [f"zone={markup_escape(str(zn))}"]
+                    if acts:
+                        parts.append(f"actions={markup_escape(','.join(map(str, acts)))}")
+                    if paths_pref:
+                        parts.append(f"paths={markup_escape(','.join(map(str, paths_pref[:3])))}")
+                    if tools:
+                        parts.append(f"tools={markup_escape(','.join(map(str, tools[:3])))}")
+                    lines.append("  · " + " · ".join(parts))
+                more = f"\n  · …(+{len(scopes) - 4} more)" if len(scopes) > 4 else ""
+                yield Static(
+                    "requested scopes:\n" + "\n".join(lines) + more,
                     classes="confirm-field",
                 )
             message = getattr(req, "message", None)
