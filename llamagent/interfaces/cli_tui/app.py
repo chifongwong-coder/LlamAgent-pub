@@ -107,7 +107,15 @@ class LlamAgentTUI(App):
         Toggles ``.display`` rather than mounting/unmounting so the
         widget retains its message history across hide/show cycles.
         Default is hidden (DEFAULT_CSS sets display:none).
+
+        Round-12 M3: guard against modal screens — when SetupScreen /
+        ConfirmModal / AskUserModal is active, Ctrl+V would still flip
+        the VerbosePane below the modal overlay, leaving the user with
+        a surprising visible-state change after dismiss. Only act on
+        the default screen.
         """
+        if len(self.screen_stack) > 1:
+            return
         try:
             pane = self.query_one("#verbose-pane", VerbosePane)
         except Exception:
@@ -126,6 +134,9 @@ class LlamAgentTUI(App):
         # Target the ChatLog widget directly — Textual on_<msg> handlers
         # only fire on the widget that received post_message; routing
         # via App leaves messages stranded in App's queue (5/23 bug).
+        # C5 round-12 B1: also pass VerbosePane as verbose_target so
+        # ToolStart/End/Error fan out to both widgets (full args /
+        # result preview render on the right pane per plan §4 C5).
         # C4 also wires confirm/ask handlers so authorization prompts +
         # ask_user tool calls route through the TUI modal screens.
         if self.agent is not None:
@@ -134,9 +145,11 @@ class LlamAgentTUI(App):
                 install_hooks,
             )
             from llamagent.interfaces.cli_tui.verbose import install_verbose
-            install_hooks(self.agent, self.query_one("#chat-log", ChatLog))
+            chat_target = self.query_one("#chat-log", ChatLog)
+            verbose_target = self.query_one("#verbose-pane", VerbosePane)
+            install_hooks(self.agent, chat_target, verbose_target=verbose_target)
             install_handlers(self.agent, self)
-            install_verbose(self.agent, self.query_one("#verbose-pane", VerbosePane))
+            install_verbose(self.agent, verbose_target)
 
         if self.n_mock_turns > 0:
             # Mock smoke — no SetupScreen, focus Input directly.
@@ -221,12 +234,16 @@ class LlamAgentTUI(App):
         self.agent = agent
         self.refresh_status_header()
         # Hooks target the ChatLog widget directly (handlers live there).
-        install_hooks(agent, self.query_one("#chat-log", ChatLog))
+        # C5 round-12 B1: verbose_target=VerbosePane so Tool*Message
+        # fans out to the right pane too (plan §4 C5).
+        chat_target = self.query_one("#chat-log", ChatLog)
+        verbose_target = self.query_one("#verbose-pane", VerbosePane)
+        install_hooks(agent, chat_target, verbose_target=verbose_target)
         # Confirm / ask handlers push modal screens via the App.
         install_handlers(agent, self)
         # C5 — thinking capture posts to the VerbosePane widget (which
         # is hidden by default; user toggles via Ctrl+V to see).
-        install_verbose(agent, self.query_one("#verbose-pane", VerbosePane))
+        install_verbose(agent, verbose_target)
         # Re-focus the Input so user can immediately type after build.
         self.call_after_refresh(lambda: self.query_one("#input", Input).focus())
 

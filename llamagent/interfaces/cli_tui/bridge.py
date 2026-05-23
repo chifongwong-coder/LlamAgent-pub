@@ -118,9 +118,21 @@ def _drain_pending_for_thread(target: "Widget", tid: Optional[int] = None) -> No
 # ---------------------------------------------------------------------------
 
 
-def install_hooks(agent, target: "Widget") -> None:
+def install_hooks(
+    agent,
+    target: "Widget",
+    verbose_target: "Optional[Widget]" = None,
+) -> None:
     """Register PRE/POST/TOOL_ERROR hooks on ``agent`` that post typed
-    Messages to ``app``.
+    Messages to ``target`` (chat surface) and optionally ``verbose_target``
+    (VerbosePane).
+
+    Round-12 B1: VerbosePane has its own Tool*Message handlers but
+    Textual on_<msg> only fires on the widget that received post_message
+    — messages don't fan out to siblings. So when verbose_target is set
+    we post each tool message to both widgets. ChatLog renders the
+    folded card; VerbosePane renders the full args / result_preview /
+    error (plan §4 C5 verification: "tool args / result 显示在右栏").
 
     Idempotent via the ``_bridge_hooks_installed`` attribute on the
     agent — calling twice is a no-op. Each hook callback escapes any
@@ -135,6 +147,25 @@ def install_hooks(agent, target: "Widget") -> None:
 
     from llamagent.core.hooks import HookEvent
 
+    def _post_both(msg) -> None:
+        """Post ``msg`` to chat target + verbose target (if set).
+
+        Each post is wrapped individually so a destroyed widget on one
+        side doesn't suppress the other side. post_message failures
+        downgrade to logger.debug (round-8 widget-gone tolerance).
+        """
+        try:
+            target.post_message(msg)
+        except Exception as e:
+            logger.debug("post %s to chat target failed: %s", type(msg).__name__, e)
+        if verbose_target is not None:
+            try:
+                verbose_target.post_message(msg)
+            except Exception as e:
+                logger.debug(
+                    "post %s to verbose target failed: %s", type(msg).__name__, e
+                )
+
     def _on_pre(ctx) -> None:
         data = getattr(ctx, "data", {}) or {}
         name = str(data.get("tool_name", "?"))
@@ -146,12 +177,9 @@ def install_hooks(agent, target: "Widget") -> None:
             _pending_by_thread.setdefault(tid, []).append((name, call_id, time.monotonic()))
         # Escape markup in name (args dict goes verbatim — widget handler
         # is responsible for repr() + escape if it embeds in markup)
-        try:
-            target.post_message(
-                ToolStartMessage(name=markup_escape(name), args=args, call_id=call_id)
-            )
-        except Exception as e:
-            logger.debug("post ToolStartMessage failed: %s", e)
+        _post_both(
+            ToolStartMessage(name=markup_escape(name), args=args, call_id=call_id)
+        )
 
     def _on_post(ctx) -> None:
         data = getattr(ctx, "data", {}) or {}
@@ -167,16 +195,13 @@ def install_hooks(agent, target: "Widget") -> None:
                 call_id = f"orphan-{next(_call_id_counter)}"
         preview = data.get("result_preview") or data.get("result") or ""
         preview = markup_escape(str(preview))
-        try:
-            target.post_message(
-                ToolEndMessage(
-                    call_id=call_id,
-                    duration_ms=float(data.get("duration_ms", 0.0)),
-                    result_preview=preview,
-                )
+        _post_both(
+            ToolEndMessage(
+                call_id=call_id,
+                duration_ms=float(data.get("duration_ms", 0.0)),
+                result_preview=preview,
             )
-        except Exception as e:
-            logger.debug("post ToolEndMessage failed: %s", e)
+        )
 
     def _on_error(ctx) -> None:
         data = getattr(ctx, "data", {}) or {}
@@ -188,12 +213,9 @@ def install_hooks(agent, target: "Widget") -> None:
             with _pending_lock:
                 call_id = f"orphan-{next(_call_id_counter)}"
         err = markup_escape(str(data.get("error", "(unspecified)")))
-        try:
-            target.post_message(
-                ToolErrorMessage(call_id=call_id, name=markup_escape(name), error=err)
-            )
-        except Exception as e:
-            logger.debug("post ToolErrorMessage failed: %s", e)
+        _post_both(
+            ToolErrorMessage(call_id=call_id, name=markup_escape(name), error=err)
+        )
 
     # Atomic install (round-10 HIGH B-H1): record the handlers map
     # BEFORE calling register_hook so uninstall_hooks can find any

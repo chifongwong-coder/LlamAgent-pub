@@ -11,21 +11,28 @@ VerbosePane widget:
 
 Per-turn SHA-256 dedup (16-char prefix) prevents duplicates from
 resilience retry / fallback paths (plan §2.4 — see _patch_all_llm_chains).
+The dedup set is cleared at every PRE_CHAT (turn boundary) — round-12
+H3 fix — so identical short reasoning ("Let me check…") from two turns
+both render instead of the second one being silently swallowed.
+
 The chain walker recurses through ``_wrapped`` (LoggingLLM) and
 ``_fallback_llm`` (ResilientLLMClient) so a model fallback still shows
 its thinking instead of dropping it on the floor (round-8 H2).
 
-Streaming detection: ``<think>…</think>`` is also extracted from
-chat_stream chunks by tracking the open/close tags across chunk
-boundaries. Non-streaming response scanning covers the remaining
-two sources.
+Streaming detection: ``<think>…</think>`` is extracted from chat_stream
+chunks while tracking open/close tags across chunk boundaries. A small
+rolling pre-buffer (round-12 H2) handles the rare case where LiteLLM
+splits the literal ``<think>`` characters across two chunks. A
+``while`` loop (round-12 H1) consumes every ``<think>…</think>`` pair
+in a single chunk so multi-block reasoning in one chunk isn't truncated.
+Non-streaming response scanning covers the remaining two sources.
 
 C5 first-iteration limitations (registered in plan §12):
 - ``uninstall_verbose`` only clears the idempotency flag; it does not
   restore the original ``chat`` / ``chat_stream`` methods. agent rebuild
   on a new agent works fine (new agent has untouched methods); rebuild
   on the *same* agent is idempotent via the flag. Restoring originals
-  for full uninstall is a polish task.
+  for full uninstall is a polish task (plan §12 K8.M2).
 - Streaming thinking via ``reasoning_content`` per-chunk isn't extracted
   because LiteLLM doesn't surface it during streaming; only the
   ``<think>`` tag path catches mid-stream thinking. ``thinking_blocks``
@@ -43,17 +50,29 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Tail size of the cross-chunk pre-tag rolling buffer. 16 chars is
+# enough to span "<think>" (7) plus a margin for whitespace around it.
+# Per-chunk cost is one string slice — negligible (round-12 H2).
+_PREBUF_TAIL = 16
+
+
 def install_verbose(agent, target: "Widget") -> None:
     """Patch ``agent.llm`` chain to emit ThinkingMessage to ``target``.
 
     Idempotent via ``agent._verbose_patched`` — same agent install runs
     just once. The walker tolerates cycles + depth > 4 defensively.
+
+    Round-12 H3: also registers a PRE_CHAT hook that clears the per-agent
+    dedup set on every new turn. Without this, identical short reasoning
+    output in two turns dedups the second one to silence.
     """
     if getattr(agent, "_verbose_patched", False):
         return
 
-    # Per-agent dedup set so retry paths don't double-emit. Module-level
-    # would leak across agent rebuilds. Per-instance keeps it scoped.
+    # Per-agent dedup set so retry paths don't double-emit within a turn.
+    # Module-level would leak across agent rebuilds. Per-instance keeps it
+    # scoped. PRE_CHAT hook (below) clears at turn boundaries so cross-turn
+    # repeats render instead of getting swallowed (round-12 H3).
     seen_hashes: set[str] = set()
 
     def _emit(source: str, content: str) -> None:
@@ -80,9 +99,15 @@ def install_verbose(agent, target: "Widget") -> None:
             _emit("reasoning_content", str(reasoning))
 
         content = getattr(msg, "content", "") or ""
-        if "<think>" in content and "</think>" in content:
-            inner = content.split("<think>", 1)[1].split("</think>", 1)[0]
+        # Multi-block: qwen can emit several <think>…</think> pairs in
+        # one response. Loop until exhausted instead of grabbing only
+        # the first pair (round-12 H1 mirror for the non-streaming path).
+        remaining = content
+        while "<think>" in remaining and "</think>" in remaining:
+            _, _, after_open = remaining.partition("<think>")
+            inner, _, after_close = after_open.partition("</think>")
             _emit("<think>", inner)
+            remaining = after_close
 
         blocks = getattr(msg, "thinking_blocks", None) or []
         for b in blocks:
@@ -93,8 +118,26 @@ def install_verbose(agent, target: "Widget") -> None:
             if text:
                 _emit("thinking_blocks", str(text))
 
+    def _has_real_method(client, name: str) -> bool:
+        """True if ``client.<name>`` is a real attribute (instance dict
+        or somewhere in the class MRO), not just a ``__getattr__`` proxy.
+
+        Round-12 M1: LoggingLLM defines ``chat`` directly but proxies
+        ``chat_stream`` via ``__getattr__`` — wrapping the proxy attribute
+        would create a duplicate scan layer over the real owner. MRO walk
+        (not just direct class dict) is required because ResilientLLM
+        inherits ``chat_stream`` from LLMClient — it's not in
+        ``ResilientLLM.__dict__`` but it IS in ``LLMClient.__dict__``.
+        """
+        if name in vars(client):
+            return True
+        for klass in type(client).__mro__:
+            if name in klass.__dict__:
+                return True
+        return False
+
     def _wrap_chat(client) -> None:
-        if not hasattr(client, "chat"):
+        if not _has_real_method(client, "chat"):
             return
         if getattr(client, "_verbose_chat_wrapped", False):
             return
@@ -113,7 +156,14 @@ def install_verbose(agent, target: "Widget") -> None:
         client._verbose_chat_wrapped = True
 
     def _wrap_chat_stream(client) -> None:
-        if not hasattr(client, "chat_stream"):
+        # M1 guard (round-12): only wrap chat_stream where it's a real
+        # attribute (instance __dict__ or class MRO), not a __getattr__
+        # proxy. Without the guard LoggingLLM (proxies to inner
+        # ResilientLLM.chat_stream) gets wrapped, then the walker
+        # descends to ResilientLLM and wraps again — two layers of
+        # <think> scan per chunk. Dedup hides the duplicate emit but
+        # wastes one substring pass.
+        if not _has_real_method(client, "chat_stream"):
             return
         if getattr(client, "_verbose_chat_stream_wrapped", False):
             return
@@ -121,7 +171,8 @@ def install_verbose(agent, target: "Widget") -> None:
 
         def _traced_chat_stream(messages, **kwargs):
             in_think = False
-            buf = ""
+            buf = ""          # body accumulator once <think> seen
+            prebuf = ""       # rolling tail before <think> (H2)
             for chunk in original_chat_stream(messages, **kwargs):
                 yield chunk
                 # Try to extract delta.content (LiteLLM ModelResponseStream shape)
@@ -129,22 +180,46 @@ def install_verbose(agent, target: "Widget") -> None:
                     delta_content = chunk.choices[0].delta.content or ""
                 except Exception:
                     continue
-                if not in_think:
-                    if "<think>" in delta_content:
-                        in_think = True
-                        buf = delta_content.split("<think>", 1)[1]
-                        if "</think>" in buf:
-                            inner = buf.split("</think>", 1)[0]
+                # Round-12 H1 + H2: consume open/close pairs in a loop
+                # so multiple <think>…</think> in one chunk all fire; use
+                # a rolling pre-buffer (last _PREBUF_TAIL chars) so the
+                # literal "<think>" string is detected even when LiteLLM
+                # splits its characters across two chunks.
+                while delta_content:
+                    if not in_think:
+                        prebuf += delta_content
+                        idx = prebuf.find("<think>")
+                        if idx < 0:
+                            # Keep only the tail (in case the next chunk
+                            # completes a tag like "<thi" + "nk>"). Reset
+                            # delta_content so the while loop exits.
+                            if len(prebuf) > _PREBUF_TAIL:
+                                prebuf = prebuf[-_PREBUF_TAIL:]
+                            delta_content = ""
+                        else:
+                            # Open tag found. Anything after it begins
+                            # the body. prebuf resets; delta_content
+                            # becomes the rest so a `</think>` in the
+                            # same chunk closes immediately.
+                            after = prebuf[idx + len("<think>"):]
+                            in_think = True
+                            buf = ""
+                            prebuf = ""
+                            delta_content = after
+                    else:
+                        buf += delta_content
+                        idx = buf.find("</think>")
+                        if idx < 0:
+                            delta_content = ""
+                        else:
+                            inner = buf[:idx]
                             _emit("<think>", inner)
+                            # Anything after </think> is post-think text
+                            # — may itself contain another <think>.
+                            after = buf[idx + len("</think>"):]
                             in_think = False
                             buf = ""
-                else:
-                    buf += delta_content
-                    if "</think>" in buf:
-                        inner = buf.split("</think>", 1)[0]
-                        _emit("<think>", inner)
-                        in_think = False
-                        buf = ""
+                            delta_content = after
 
         client.chat_stream = _traced_chat_stream
         client._verbose_chat_stream_wrapped = True
@@ -162,6 +237,23 @@ def install_verbose(agent, target: "Widget") -> None:
                 _walk(inner, visited, depth + 1)
 
     _walk(agent.llm, set(), 0)
+
+    # Round-12 H3: clear the dedup set at every turn boundary so a turn
+    # that repeats the same short reasoning as a previous turn isn't
+    # silently swallowed. PRE_CHAT fires once per chat() call (core/hooks.py).
+    from llamagent.core.hooks import HookEvent
+
+    def _on_pre_chat(_ctx) -> None:
+        seen_hashes.clear()
+
+    try:
+        agent.register_hook(HookEvent.PRE_CHAT, _on_pre_chat)
+        agent._verbose_pre_chat_handler = _on_pre_chat
+    except Exception as e:
+        # Hook system unavailable / register failed — non-fatal; dedup
+        # still works within a turn, just stays sticky across turns.
+        logger.debug("register PRE_CHAT for verbose dedup failed: %s", e)
+
     agent._verbose_patched = True
     agent._verbose_seen_hashes = seen_hashes
 
@@ -173,15 +265,39 @@ def uninstall_verbose(agent) -> None:
     C5 limitation: the chat / chat_stream methods themselves stay
     wrapped. For C5 this is acceptable because set_agent always rebinds
     to a NEW agent instance with untouched LLM methods. Restoring
-    originals for full cleanup is a follow-up polish item.
+    originals for full cleanup is a follow-up polish item (plan §12).
+
+    Round-12: also unregisters the PRE_CHAT dedup-clear hook via
+    identity-match through HookRegistration.handler.func (mirrors
+    bridge.uninstall_hooks pattern) so we don't leak stale handlers
+    if a future agent rebuild re-installs verbose on a new instance.
     """
     if not getattr(agent, "_verbose_patched", False):
         return
-    try:
-        delattr(agent, "_verbose_patched")
-    except AttributeError:
-        pass
-    try:
-        delattr(agent, "_verbose_seen_hashes")
-    except AttributeError:
-        pass
+
+    # Identity-match unregister of the PRE_CHAT dedup-clear hook (mirrors
+    # bridge.uninstall_hooks). Safe no-op if registration earlier failed.
+    handler_fn = getattr(agent, "_verbose_pre_chat_handler", None)
+    if handler_fn is not None:
+        from llamagent.core.hooks import HookEvent
+
+        hooks_dict = getattr(agent, "_hooks", None)
+        if hooks_dict is not None:
+            bucket = hooks_dict.get(HookEvent.PRE_CHAT, [])
+            try:
+                kept = []
+                for reg in bucket:
+                    inner = getattr(reg, "handler", None)
+                    inner_fn = getattr(inner, "func", None) if inner is not None else None
+                    if inner_fn is handler_fn:
+                        continue
+                    kept.append(reg)
+                hooks_dict[HookEvent.PRE_CHAT] = kept
+            except Exception as e:
+                logger.debug("uninstall_verbose PRE_CHAT unregister: %s", e)
+
+    for attr in ("_verbose_patched", "_verbose_seen_hashes", "_verbose_pre_chat_handler"):
+        try:
+            delattr(agent, attr)
+        except AttributeError:
+            pass

@@ -151,6 +151,7 @@ class ChatLog(VerticalScroll):
 
     DEFAULT_CSS = """
     ChatLog {
+        width: 1fr;
         height: 1fr;
         border: solid $accent;
         padding: 0 1;
