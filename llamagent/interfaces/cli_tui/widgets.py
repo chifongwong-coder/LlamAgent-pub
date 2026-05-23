@@ -34,8 +34,11 @@ from llamagent.interfaces.cli_tui.messages import (
 
 
 # Plan §4 C6 — 13 legacy slash commands (11 handlers + 3 /quit alias) +
-# /mode (3 subcommands) + /tools (new in v16, non-legacy). Autocomplete
-# surface; actual dispatch lives in commands.py::dispatch_slash.
+# /mode (3 subcommands) + /tools + /verbose (both v16-new, non-legacy).
+# Autocomplete surface; actual dispatch lives in commands.py::dispatch_slash.
+# /verbose replaces the original Ctrl+V keyboard binding (round-14 user-test:
+# Ctrl+V exits Terminal.app via termios VLNEXT; F3 hits macOS Mission
+# Control; F-keys 1-12 are mostly multimedia/brightness by default).
 SLASH_COMMANDS: tuple[str, ...] = (
     "/help",
     "/modules",
@@ -48,6 +51,9 @@ SLASH_COMMANDS: tuple[str, ...] = (
     "/abort",
     "/stop",
     "/prompts",
+    "/verbose",
+    "/verbose on",
+    "/verbose off",
     "/quit",
     "/exit",
     "/q",

@@ -63,10 +63,18 @@ class LlamAgentTUI(App):
         # When no modal is on the stack, Esc bubbles up to the App
         # and quits — matches the C3.f intent for the chat surface.
         Binding("escape", "quit", "Quit"),
-        # C5 — Ctrl+V toggles the VerbosePane (thinking / tool detail
-        # right column). Hidden by default per plan §2.3 — verbose
-        # adds visual weight; opt-in keeps the chat surface clean.
-        Binding("ctrl+v", "toggle_verbose", "Toggle verbose"),
+        # C5 — VerbosePane toggle is exposed as the `/verbose` slash
+        # command (see commands.py::cmd_verbose), NOT a keyboard binding.
+        #
+        # Round-14 user-test history: Ctrl+V silently exited the App on
+        # macOS Terminal.app (termios VLNEXT collision); F3 was grabbed
+        # by macOS Mission Control's Window Overview before Textual saw
+        # it. Every other plausible binding — Ctrl+S/XOFF, Ctrl+A/
+        # beginning-of-line, F-keys 1-12 (multimedia / brightness /
+        # mission control by default) — has a similar reservation on at
+        # least one common macOS terminal. A slash command sidesteps the
+        # whole class: it travels through the Input widget as plain
+        # text, so no terminal can intercept it.
         # C6 — Footer shortcuts for the three most-used slash commands
         # (round-7 LOW A-1). Each routes through dispatch_slash so behaviour
         # stays identical to typing the command. Modal screen guard mirrors
@@ -118,25 +126,41 @@ class LlamAgentTUI(App):
         yield Footer()
 
     def action_toggle_verbose(self) -> None:
-        """Ctrl+V toggle for VerbosePane (plan §2.3 / §C5).
+        """F3 toggle for VerbosePane (plan §2.3 / §C5).
 
         Toggles ``.display`` rather than mounting/unmounting so the
         widget retains its message history across hide/show cycles.
         Default is hidden (DEFAULT_CSS sets display:none).
 
         Round-12 M3: guard against modal screens — when SetupScreen /
-        ConfirmModal / AskUserModal is active, Ctrl+V would still flip
-        the VerbosePane below the modal overlay, leaving the user with
-        a surprising visible-state change after dismiss. Only act on
-        the default screen.
+        ConfirmModal / AskUserModal is active, F3 would still flip the
+        VerbosePane below the modal overlay, leaving the user with a
+        surprising visible-state change after dismiss. Only act on the
+        default screen.
+
+        Round-14 user-test follow-up: wrap the body in try/except so any
+        unexpected error (Textual layout edge case, reactive surprise)
+        renders as a chat-log error bubble instead of crashing the App
+        through ``_handle_exception``. The original Ctrl+V crash report
+        turned out to be a terminal/key collision (Ctrl+V is termios
+        VLNEXT) — we changed the binding to F3 — but the defensive
+        try/except is still worth keeping for any future regression.
         """
-        if len(self.screen_stack) > 1:
-            return
         try:
-            pane = self.query_one("#verbose-pane", VerbosePane)
-        except Exception:
-            return
-        pane.display = not pane.display
+            if len(self.screen_stack) > 1:
+                return
+            try:
+                pane = self.query_one("#verbose-pane", VerbosePane)
+            except Exception:
+                return
+            pane.display = not pane.display
+        except Exception as e:
+            try:
+                self.query_one("#chat-log", ChatLog).append_error(
+                    f"toggle_verbose failed: {type(e).__name__}: {e}"
+                )
+            except Exception:
+                pass
 
     def on_mount(self) -> None:
         self.refresh_status_header()

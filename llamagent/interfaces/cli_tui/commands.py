@@ -70,8 +70,8 @@ def cmd_help(app: "LlamAgentTUI", arg: str) -> None:
     rows = [
         ("/help", "Show this help message"),
         ("/mode [name]", "Show / switch mode (interactive, task, continuous)"),
-        ("/abort", "Cancel the current task (Ctrl+A)"),
-        ("/stop", "Stop the background runner (Ctrl+S)"),
+        ("/abort", "Cancel the current task (Ctrl+G)"),
+        ("/stop", "Stop the background runner (F2)"),
         ("/status", "View agent runtime status"),
         ("/modules", "View loaded modules"),
         ("/tools", "List tools registered on the agent"),
@@ -80,9 +80,9 @@ def cmd_help(app: "LlamAgentTUI", arg: str) -> None:
         ("/memory", "Show stored facts and memory usage"),
         ("/history", "Browse saved conversation sessions"),
         ("/clear", "Start a fresh conversation (Ctrl+L)"),
+        ("/verbose [on|off]", "Toggle the right diagnostic pane"),
         ("/quit", "Exit the TUI (also: /exit, /q)"),
         ("Ctrl+C / Esc", "Quit"),
-        ("Ctrl+V", "Toggle verbose pane (thinking / tool detail)"),
     ]
     lines = ["[bold cyan]Available Commands[/bold cyan]"]
     for cmd, desc in rows:
@@ -208,6 +208,46 @@ def cmd_abort(app: "LlamAgentTUI", arg: str) -> None:
         _error(app, f"abort() failed: {type(e).__name__}: {e}")
         return
     _info(app, "Abort requested — current task will stop shortly")
+
+
+def cmd_verbose(app: "LlamAgentTUI", arg: str) -> None:
+    """Toggle / explicitly set the VerbosePane (round-14 user-test result).
+
+    Replaces the original Ctrl+V keyboard binding from plan §2.3, which
+    silently exited the App on macOS Terminal.app (termios VLNEXT collision).
+    F3 was the obvious fallback but macOS Mission Control's Window Overview
+    intercepts it. A slash command travels through the Input widget as plain
+    text, so no terminal-level mapping can intercept it.
+
+    Usage:
+        /verbose        — toggle (current behaviour mirrors the old Ctrl+V)
+        /verbose on     — force show
+        /verbose off    — force hide
+    """
+    from llamagent.interfaces.cli_tui.widgets import VerbosePane
+
+    try:
+        pane = app.query_one("#verbose-pane", VerbosePane)
+    except Exception as e:
+        _error(app, f"VerbosePane unavailable: {type(e).__name__}: {e}")
+        return
+
+    target = arg.strip().lower()
+    if target in ("on", "show", "open", "true", "1"):
+        new_state = True
+    elif target in ("off", "hide", "close", "false", "0"):
+        new_state = False
+    elif target == "":
+        new_state = not pane.display
+    else:
+        _error(app, f"Invalid /verbose arg: {markup_escape(target)}. Use: on, off, or no arg (toggle)")
+        return
+    try:
+        pane.display = new_state
+    except Exception as e:
+        _error(app, f"toggle failed: {type(e).__name__}: {e}")
+        return
+    _info(app, f"VerbosePane {'shown' if new_state else 'hidden'}")
 
 
 def cmd_stop(app: "LlamAgentTUI", arg: str) -> None:
@@ -432,6 +472,7 @@ _HANDLERS: dict[str, Callable] = {
     "/clear": cmd_clear,
     "/abort": cmd_abort,
     "/stop": cmd_stop,
+    "/verbose": cmd_verbose,
     "/quit": cmd_quit,
     "/exit": cmd_quit,
     "/q": cmd_quit,
