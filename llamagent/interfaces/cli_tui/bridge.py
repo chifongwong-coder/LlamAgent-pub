@@ -30,8 +30,11 @@ Key invariants:
 """
 import itertools
 import logging
+import os
 import threading
 import time
+from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from rich.markup import escape as markup_escape
@@ -45,7 +48,7 @@ from llamagent.interfaces.cli_tui.messages import (
 )
 
 if TYPE_CHECKING:
-    from textual.app import App
+    from textual.widget import Widget
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +88,7 @@ def _pop_pending(name: str) -> Optional[tuple[str, str, float]]:
         return None
 
 
-def _drain_pending_for_thread(app: "App", tid: Optional[int] = None) -> None:
+def _drain_pending_for_thread(target: "Widget", tid: Optional[int] = None) -> None:
     """Emit ToolErrorMessage for any PREs left unmatched at turn end.
 
     Plan v11 §2.5 H2 — without this, an aborted / killed tool leaves
@@ -99,7 +102,7 @@ def _drain_pending_for_thread(app: "App", tid: Optional[int] = None) -> None:
     now = time.monotonic()
     for name, call_id, started_at in orphans:
         try:
-            app.post_message(
+            target.post_message(
                 ToolErrorMessage(
                     call_id=call_id,
                     name=name,
@@ -115,7 +118,7 @@ def _drain_pending_for_thread(app: "App", tid: Optional[int] = None) -> None:
 # ---------------------------------------------------------------------------
 
 
-def install_hooks(agent, app: "App") -> None:
+def install_hooks(agent, target: "Widget") -> None:
     """Register PRE/POST/TOOL_ERROR hooks on ``agent`` that post typed
     Messages to ``app``.
 
@@ -144,7 +147,7 @@ def install_hooks(agent, app: "App") -> None:
         # Escape markup in name (args dict goes verbatim — widget handler
         # is responsible for repr() + escape if it embeds in markup)
         try:
-            app.post_message(
+            target.post_message(
                 ToolStartMessage(name=markup_escape(name), args=args, call_id=call_id)
             )
         except Exception as e:
@@ -165,7 +168,7 @@ def install_hooks(agent, app: "App") -> None:
         preview = data.get("result_preview") or data.get("result") or ""
         preview = markup_escape(str(preview))
         try:
-            app.post_message(
+            target.post_message(
                 ToolEndMessage(
                     call_id=call_id,
                     duration_ms=float(data.get("duration_ms", 0.0)),
@@ -186,7 +189,7 @@ def install_hooks(agent, app: "App") -> None:
                 call_id = f"orphan-{next(_call_id_counter)}"
         err = markup_escape(str(data.get("error", "(unspecified)")))
         try:
-            app.post_message(
+            target.post_message(
                 ToolErrorMessage(call_id=call_id, name=markup_escape(name), error=err)
             )
         except Exception as e:
@@ -263,7 +266,7 @@ def uninstall_hooks(agent) -> None:
 # ---------------------------------------------------------------------------
 
 
-def run_turn(app: "App", agent, user_input: str) -> None:
+def run_turn(target: "Widget", agent, user_input: str) -> None:
     """Iterate ``agent.chat_stream(user_input)`` and post ChatChunkMessage
     per chunk. Emits TurnCompleteMessage in finally so ChatLog can
     finalize / reflow Markdown even if the generator raises.
@@ -306,7 +309,7 @@ def run_turn(app: "App", agent, user_input: str) -> None:
                     pass
                 break
             try:
-                app.post_message(ChatChunkMessage(chunk))
+                target.post_message(ChatChunkMessage(chunk))
             except Exception as e:
                 # Worker shouldn't crash if the app went away mid-stream;
                 # log + bail. drain() in finally still cleans up.
@@ -318,6 +321,6 @@ def run_turn(app: "App", agent, user_input: str) -> None:
     finally:
         _drain_pending_for_thread(app, tid)
         try:
-            app.post_message(TurnCompleteMessage(success=error is None, error=error))
+            target.post_message(TurnCompleteMessage(success=error is None, error=error))
         except Exception:
             pass

@@ -89,9 +89,12 @@ class LlamAgentTUI(App):
 
         # Install hooks on the pre-built agent (scripted / smoke path).
         # Interactive (SetupScreen) path defers hook install to set_agent.
+        # Target the ChatLog widget directly — Textual on_<msg> handlers
+        # only fire on the widget that received post_message; routing
+        # via App leaves messages stranded in App's queue (5/23 bug).
         if self.agent is not None:
             from llamagent.interfaces.cli_tui.bridge import install_hooks
-            install_hooks(self.agent, self)
+            install_hooks(self.agent, self.query_one("#chat-log", ChatLog))
 
         if self.n_mock_turns > 0:
             # Mock smoke — no SetupScreen, focus Input directly.
@@ -166,7 +169,8 @@ class LlamAgentTUI(App):
 
         self.agent = agent
         self.refresh_status_header()
-        install_hooks(agent, self)
+        # Hooks target the ChatLog widget directly (handlers live there).
+        install_hooks(agent, self.query_one("#chat-log", ChatLog))
         # Re-focus the Input so user can immediately type after build.
         self.call_after_refresh(lambda: self.query_one("#input", Input).focus())
 
@@ -287,11 +291,17 @@ class LlamAgentTUI(App):
         would attach the worker as an instance method which requires
         a class-level declaration. ``run_worker`` lets us pass a plain
         callable, which is cleaner for the C2 bridge.
+
+        Targets the ChatLog widget for post_message so the
+        ChatChunk/ToolStart/ToolEnd/TurnComplete handlers actually
+        fire — App-level post_message doesn't dispatch to children
+        (5/23 bug found via layered LLM diagnostic).
         """
         from llamagent.interfaces.cli_tui.bridge import run_turn
         agent = self.agent
+        target = self.query_one("#chat-log", ChatLog)
         self.run_worker(
-            lambda: run_turn(self, agent, user_input),
+            lambda: run_turn(target, agent, user_input),
             thread=True,
             exclusive=True,
             group="agent-turn",
