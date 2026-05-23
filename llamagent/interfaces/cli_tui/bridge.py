@@ -319,7 +319,7 @@ def run_turn(target: "Widget", agent, user_input: str) -> None:
         error = f"{type(e).__name__}: {e}"
         logger.exception("agent.chat_stream raised in worker")
     finally:
-        _drain_pending_for_thread(app, tid)
+        _drain_pending_for_thread(target, tid)
         try:
             target.post_message(TurnCompleteMessage(success=error is None, error=error))
         except Exception:
