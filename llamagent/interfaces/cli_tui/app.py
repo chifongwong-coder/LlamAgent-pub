@@ -67,6 +67,13 @@ class LlamAgentTUI(App):
         # right column). Hidden by default per plan §2.3 — verbose
         # adds visual weight; opt-in keeps the chat surface clean.
         Binding("ctrl+v", "toggle_verbose", "Toggle verbose"),
+        # C6 — Footer shortcuts for the three most-used slash commands
+        # (round-7 LOW A-1). Each routes through dispatch_slash so behaviour
+        # stays identical to typing the command. Modal screen guard mirrors
+        # round-12 M3 — the actions short-circuit when a modal is on top.
+        Binding("ctrl+l", "slash_clear", "Clear"),
+        Binding("ctrl+a", "slash_abort", "Abort"),
+        Binding("ctrl+s", "slash_stop", "Stop"),
     ]
 
     def __init__(
@@ -339,12 +346,18 @@ class LlamAgentTUI(App):
         text = event.value.strip()
         if not text:
             return
-        if text in ("/quit", "/exit", "/q"):
-            self.exit()
+        event.input.value = ""
+
+        # C6 — slash command path. dispatch_slash returns True for any
+        # input that starts with "/" (handler ran or unknown-command error
+        # rendered); only non-slash text flows into the chat pipeline.
+        if text.startswith("/"):
+            from llamagent.interfaces.cli_tui.commands import dispatch_slash
+            dispatch_slash(self, text)
             return
+
         log = self.query_one("#chat-log", ChatLog)
         log.append_user(text)
-        event.input.value = ""
 
         if self.agent is not None:
             # C2 — real agent path. Spawn worker thread that iterates
@@ -356,6 +369,26 @@ class LlamAgentTUI(App):
             # Spike/IME-test path — synchronous echo so smoke 0 still works.
             log.append_assistant_chunk(f"[Spike echo] {text}")
             log.finalize_assistant_bubble()
+
+    # ------------------------------------------------------------------
+    # C6 — Footer keyboard shortcuts (route through dispatch_slash)
+    # ------------------------------------------------------------------
+
+    def _shortcut(self, slash: str) -> None:
+        """Helper for Ctrl+L/A/S — modal-screen guarded slash dispatch."""
+        if len(self.screen_stack) > 1:
+            return
+        from llamagent.interfaces.cli_tui.commands import dispatch_slash
+        dispatch_slash(self, slash)
+
+    def action_slash_clear(self) -> None:
+        self._shortcut("/clear")
+
+    def action_slash_abort(self) -> None:
+        self._shortcut("/abort")
+
+    def action_slash_stop(self) -> None:
+        self._shortcut("/stop")
 
     def _run_real_turn(self, user_input: str) -> None:
         """Spawn a worker thread to iterate ``agent.chat_stream``.

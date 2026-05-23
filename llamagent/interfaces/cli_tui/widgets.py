@@ -33,12 +33,13 @@ from llamagent.interfaces.cli_tui.messages import (
 # ---------------------------------------------------------------------------
 
 
-# Plan §4 C6 — 13 slash commands + /mode subcommands. Production C6 will
-# bind these to their handlers via commands.py; for C1 we only wire the
-# autocomplete surface so the Input widget is feature-complete.
+# Plan §4 C6 — 13 legacy slash commands (11 handlers + 3 /quit alias) +
+# /mode (3 subcommands) + /tools (new in v16, non-legacy). Autocomplete
+# surface; actual dispatch lives in commands.py::dispatch_slash.
 SLASH_COMMANDS: tuple[str, ...] = (
     "/help",
     "/modules",
+    "/tools",
     "/skills",
     "/memory",
     "/history",
