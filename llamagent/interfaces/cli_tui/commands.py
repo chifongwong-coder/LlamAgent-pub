@@ -175,21 +175,26 @@ def cmd_tools(app: "LlamAgentTUI", arg: str) -> None:
 
 
 def cmd_clear(app: "LlamAgentTUI", arg: str) -> None:
+    """Clear the conversation. Round-14 Rev A M1: clear the agent's
+    history first; only reset the visible widget state if the agent
+    clear succeeded. Reversed ordering (widget first) left the UI
+    looking empty while the agent's internal context was still alive,
+    causing the next turn to mysteriously see "deleted" messages."""
     log = _log(app)
-    # Drop every mounted bubble (ChatLog children are Static widgets) +
-    # reset the streaming target / accumulator so the next chunk opens a
-    # fresh Assistant bubble.
-    for child in list(log.children):
-        child.remove()
-    log._current_assistant = None
-    log._accum.clear()
-    log._pending_tool_cards.clear()
     if app.agent is not None:
         try:
             app.agent.clear_conversation()
         except Exception as e:
             _error(app, f"clear_conversation() failed: {type(e).__name__}: {e}")
             return
+    # Agent state is now clean (or there was no agent) — drop every
+    # mounted bubble and reset the streaming target / accumulator so
+    # the next chunk opens a fresh Assistant bubble.
+    for child in list(log.children):
+        child.remove()
+    log._current_assistant = None
+    log._accum.clear()
+    log._pending_tool_cards.clear()
     _info(app, "Conversation cleared")
 
 
@@ -207,7 +212,13 @@ def cmd_abort(app: "LlamAgentTUI", arg: str) -> None:
 
 def cmd_stop(app: "LlamAgentTUI", arg: str) -> None:
     """Stop continuous mode. C7 will wire ContinuousRunner; for C6 we
-    just flip mode back so the user sees a deterministic state change."""
+    just flip mode back so the user sees a deterministic state change.
+
+    TODO(C7): when ContinuousRunner is integrated into the TUI, replace
+    the ``agent.set_mode("interactive")`` call with the real runner stop
+    sequence (mirrors legacy ``LlamAgentCLI._cmd_stop`` calling
+    ``self._runner.stop()`` at cli.py:898).
+    """
     agent = app.agent
     if agent is None or agent.mode != "continuous":
         _info(app, "Not in continuous mode")

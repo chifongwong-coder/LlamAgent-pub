@@ -71,9 +71,18 @@ class LlamAgentTUI(App):
         # (round-7 LOW A-1). Each routes through dispatch_slash so behaviour
         # stays identical to typing the command. Modal screen guard mirrors
         # round-12 M3 — the actions short-circuit when a modal is on top.
+        #
+        # Round-14 binding choices (Rev B H1 + M1):
+        # - Ctrl+L → /clear: Textual captures Ctrl+L before the PTY, no collision.
+        # - Ctrl+G → /abort: GNU readline "abort current command"; zero collision
+        #   with Input widget conventions (Ctrl+A would clash with readline
+        #   "beginning-of-line" muscle memory).
+        # - F2     → /stop : Function keys have no terminal-level meaning, so
+        #   they side-step the Ctrl+S XOFF flow-control collision that would
+        #   freeze the PTY in tmux / mosh / certain macOS Terminal profiles.
         Binding("ctrl+l", "slash_clear", "Clear"),
-        Binding("ctrl+a", "slash_abort", "Abort"),
-        Binding("ctrl+s", "slash_stop", "Stop"),
+        Binding("ctrl+g", "slash_abort", "Abort"),
+        Binding("f2", "slash_stop", "Stop"),
     ]
 
     def __init__(
@@ -351,9 +360,21 @@ class LlamAgentTUI(App):
         # C6 — slash command path. dispatch_slash returns True for any
         # input that starts with "/" (handler ran or unknown-command error
         # rendered); only non-slash text flows into the chat pipeline.
+        # Round-14 Rev B M2: wrap the import + call so a top-level import
+        # error in commands.py (typo, missing dep, refactor regression)
+        # doesn't propagate to Textual's unhandled-exception path and kill
+        # the session — render a chat-log error instead.
         if text.startswith("/"):
-            from llamagent.interfaces.cli_tui.commands import dispatch_slash
-            dispatch_slash(self, text)
+            try:
+                from llamagent.interfaces.cli_tui.commands import dispatch_slash
+                dispatch_slash(self, text)
+            except Exception as e:
+                try:
+                    self.query_one("#chat-log", ChatLog).append_error(
+                        f"slash dispatch crashed: {type(e).__name__}: {e}"
+                    )
+                except Exception:
+                    pass
             return
 
         log = self.query_one("#chat-log", ChatLog)
@@ -375,11 +396,22 @@ class LlamAgentTUI(App):
     # ------------------------------------------------------------------
 
     def _shortcut(self, slash: str) -> None:
-        """Helper for Ctrl+L/A/S — modal-screen guarded slash dispatch."""
+        """Helper for Ctrl+L / Ctrl+G / F2 — modal-screen guarded slash
+        dispatch. Same import-error tolerance as ``on_input_submitted``
+        (round-14 Rev B M2) so a broken commands.py can't kill the App
+        from a keyboard shortcut either."""
         if len(self.screen_stack) > 1:
             return
-        from llamagent.interfaces.cli_tui.commands import dispatch_slash
-        dispatch_slash(self, slash)
+        try:
+            from llamagent.interfaces.cli_tui.commands import dispatch_slash
+            dispatch_slash(self, slash)
+        except Exception as e:
+            try:
+                self.query_one("#chat-log", ChatLog).append_error(
+                    f"shortcut dispatch crashed: {type(e).__name__}: {e}"
+                )
+            except Exception:
+                pass
 
     def action_slash_clear(self) -> None:
         self._shortcut("/clear")
