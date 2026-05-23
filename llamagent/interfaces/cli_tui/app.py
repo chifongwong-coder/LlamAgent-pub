@@ -33,6 +33,7 @@ from llamagent.interfaces.cli_tui.messages import (
 from llamagent.interfaces.cli_tui.widgets import (
     ChatLog,
     LlamAgentInput,
+    MonitorPane,
     SlashCommandSuggester,
     StatusHeader,
     VerbosePane,
@@ -113,6 +114,12 @@ class LlamAgentTUI(App):
         self.n_mock_turns = n_mock_turns
         self._turns_completed = 0
         self._crash_after_turns = crash_after_turns
+        # C7 — continuous mode runner + its thread. Live only between
+        # /mode continuous (build success) and /stop (or App quit). The
+        # MonitorPane polls ``self._runner`` every second; None means
+        # "interactive mode, no runner".
+        self._runner = None  # type: ignore[assignment]
+        self._runner_thread = None  # type: ignore[assignment]
 
     def compose(self) -> ComposeResult:
         yield StatusHeader()
@@ -122,6 +129,12 @@ class LlamAgentTUI(App):
         with Horizontal(id="chat-row"):
             yield ChatLog(id="chat-log")
             yield VerbosePane(id="verbose-pane")
+            # C7 — MonitorPane occupies the same layout slot as VerbosePane.
+            # Both are display:none by default; the /verbose and /monitor
+            # slash commands route through ``commands._set_right_pane`` so
+            # at most one is visible at any time. The hidden pane stays
+            # mounted so its message ring isn't wiped on toggle.
+            yield MonitorPane(id="monitor-pane")
         yield LlamAgentInput(
             placeholder="Type a message and press Enter (slash for commands; Tab to accept; Up/Down history)…",
             suggester=SlashCommandSuggester(),
@@ -291,6 +304,100 @@ class LlamAgentTUI(App):
         # Re-focus the Input so user can immediately type after build.
         self.call_after_refresh(lambda: self.query_one("#input", Input).focus())
 
+    # ------------------------------------------------------------------
+    # C7 — ContinuousSetupModal dismiss callback
+    # ------------------------------------------------------------------
+
+    def _on_continuous_setup_done(self, result: dict | None) -> None:
+        """Callback fired when ContinuousSetupModal dismisses.
+
+        Plan §4 C7 (d) / B1: cmd_mode("continuous") pushed the modal and
+        returned immediately. The real mode switch happens here so a
+        cancel doesn't leave agent.mode pointing at "continuous" without
+        a runner attached.
+
+        ``result`` is the dict the modal built, or ``None`` for cancel.
+        Build failures (invalid trigger args getting past the modal's
+        own validation, or ContinuousRunner.__init__ raising) re-push the
+        modal so the user can correct without restarting the mode
+        switch (round-2 MED-2 — mirrors ``_on_setup_done`` retry pattern).
+        """
+        if result is None:
+            return  # cancel — leave mode + runner state untouched
+
+        log = self.query_one("#chat-log", ChatLog)
+        if self.agent is None:
+            log.append_error("No agent available — cannot enter continuous mode.")
+            return
+
+        # Build trigger + runner. Validation done in the modal already; this
+        # try/except is for the framework-level surprises (interval cast,
+        # constructor invariants, thread.start raising).
+        try:
+            from llamagent.core.runner import (
+                ContinuousRunner,
+                FileTrigger,
+                TimerTrigger,
+            )
+            kind = result.get("type")
+            if kind == "timer":
+                trigger = TimerTrigger(
+                    interval=float(result["interval"]),
+                    message=str(result["message"]),
+                )
+            elif kind == "file":
+                template = result.get("message_template") or ""
+                kwargs = {"watch_dir": str(result["watch_dir"])}
+                if template.strip():
+                    kwargs["message_template"] = template
+                trigger = FileTrigger(**kwargs)
+            else:
+                raise ValueError(f"Unknown trigger type: {kind!r}")
+
+            runner = ContinuousRunner(self.agent, [trigger])
+
+            import threading
+            thread = threading.Thread(
+                target=runner.run,
+                name="llamagent-continuous-runner",
+                daemon=True,  # plan §4 C7 H2: process exit cleans up
+            )
+            thread.start()
+        except Exception as exc:
+            log.append_error(
+                f"continuous setup failed: {type(exc).__name__}: {exc}"
+            )
+            # Re-push so the user can fix the input instead of being
+            # bounced back to interactive mode (round-2 MED-2 retry).
+            from llamagent.interfaces.cli_tui.screens import ContinuousSetupModal
+            self.push_screen(ContinuousSetupModal(), self._on_continuous_setup_done)
+            return
+
+        # Success path — commit the new state.
+        self._runner = runner
+        self._runner_thread = thread
+        try:
+            self.agent.set_mode("continuous")
+        except Exception as exc:
+            # set_mode shouldn't fail at this point, but be defensive —
+            # if it does we tear down the runner we just started.
+            log.append_error(
+                f"set_mode(continuous) failed: {type(exc).__name__}: {exc}"
+            )
+            try:
+                runner.stop()
+            except Exception:
+                pass
+            self._runner = None
+            self._runner_thread = None
+            return
+
+        self.refresh_status_header()
+        # Auto-open MonitorPane so the user sees the new state.
+        from llamagent.interfaces.cli_tui.commands import _set_right_pane
+        _set_right_pane(self, "monitor")
+        log.append_status("Continuous mode active — MonitorPane shown.")
+
     def refresh_status_header(self) -> None:
         """Re-read agent attributes into the StatusHeader reactives.
 
@@ -413,6 +520,26 @@ class LlamAgentTUI(App):
             return
 
         log = self.query_one("#chat-log", ChatLog)
+
+        # C7 — continuous mode path. User text goes into the runner's
+        # normal queue (priority below trigger urgent / retry) so it
+        # serializes with the runner's own task loop. Worker uses a
+        # dedicated group so it doesn't collide with C2's
+        # group="agent-turn" exclusive turn worker.
+        if (
+            self.agent is not None
+            and getattr(self.agent, "mode", "") == "continuous"
+            and self._runner is not None
+        ):
+            # append_user escapes its argument; the queued status line is
+            # a separate ChatLog.append_status call so its [dim]…[/dim]
+            # markup wraps around the message inside the public helper
+            # (round-15 Rev A M1 — was calling private _mount_capped).
+            log.append_user(text)
+            log.append_status("  (queued, waiting for runner…)")
+            self._run_continuous_inject(text)
+            return
+
         log.append_user(text)
 
         if self.agent is not None:
@@ -454,6 +581,56 @@ class LlamAgentTUI(App):
     def action_slash_abort(self) -> None:
         self._shortcut("/abort")
 
+    def _run_continuous_inject(self, user_input: str) -> None:
+        """Spawn a worker that injects ``user_input`` into the runner's
+        normal queue and posts the agent's reply when it eventually comes.
+
+        Plan §4 C7 (f): `runner.inject(immediate=False)` blocks the calling
+        thread until the runner pops the item off its queue and processes
+        it, so we run it in a Textual worker. ``group="continuous-inject"``
+        keeps this separate from C2's `group="agent-turn"` so an injection
+        in-flight isn't cancelled when the user submits another message
+        (exclusive=False — the runner serializes queue items, no extra
+        coordination needed here).
+        """
+        agent = self.agent
+        runner = self._runner
+        target = self.query_one("#chat-log", ChatLog)
+        if runner is None or agent is None:
+            return
+
+        from llamagent.interfaces.cli_tui.messages import (
+            ErrorMessage,
+            TurnCompleteMessage,
+        )
+        # ChatChunkMessage is already imported at module top; reuse it.
+
+        def _do_inject() -> None:
+            try:
+                response = runner.inject(user_input, immediate=False)
+            except Exception as exc:
+                msg = f"inject failed: {type(exc).__name__}: {exc}"
+                try:
+                    target.post_message(ErrorMessage(message=msg))
+                except Exception:
+                    pass
+                return
+            # The runner returns a single completed assistant reply (not a
+            # stream), so post it as one chunk + TurnComplete to drive
+            # the same Markdown reflow path C2 uses for chat_stream.
+            try:
+                target.post_message(ChatChunkMessage(text=str(response or "")))
+                target.post_message(TurnCompleteMessage(success=True, error=None))
+            except Exception:
+                pass  # App might be gone — drop is acceptable.
+
+        self.run_worker(
+            _do_inject,
+            thread=True,
+            exclusive=False,
+            group="continuous-inject",
+        )
+
     def _run_real_turn(self, user_input: str) -> None:
         """Spawn a worker thread to iterate ``agent.chat_stream``.
 
@@ -481,6 +658,34 @@ class LlamAgentTUI(App):
     # Q6 crash-path mitigation (plan v11 §2.2)
     # ------------------------------------------------------------------
 
+    def _stop_continuous_runner(self) -> None:
+        """Best-effort runner cleanup, callable from on_unmount and
+        from _handle_exception. Idempotent. Never raises.
+
+        Plan §4 C7 (g): both quit paths (clean unmount + crash) should
+        attempt to stop the runner so logger output is flushed and the
+        agent.abort() in runner.stop() runs. We don't .join() here —
+        on_unmount is on the main event loop and any agent.chat in
+        progress can take seconds; better to set the stop flag and let
+        the daemon thread reap on process exit.
+        """
+        runner = getattr(self, "_runner", None)
+        if runner is None:
+            return
+        try:
+            runner.stop()
+        except Exception:
+            pass
+        self._runner = None
+        self._runner_thread = None
+
+    def on_unmount(self) -> None:
+        # plan §4 C7 (g) — ensure the continuous runner is signalled
+        # before the App tears down. daemon=True on the thread means
+        # the process exit reaps anything still running; this is just
+        # the polite stop signal.
+        self._stop_continuous_runner()
+
     def _handle_exception(self, error: Exception) -> None:
         """Override Textual's default unhandled-exception handler.
 
@@ -493,6 +698,10 @@ class LlamAgentTUI(App):
         for the launcher (smoke.py / production main) to emit after
         ``app.run()`` returns. Real-terminal verified: 85 bytes vs 2415
         baseline (28x reduction).
+
+        Plan §4 C7 (g) round-2 MED-2 — also attempt continuous runner
+        cleanup here because Textual doesn't guarantee on_unmount runs
+        on the unhandled-exception path.
         """
         log_path = Path.home() / ".llamagent" / "cli_tui.log"
         try:
@@ -502,6 +711,9 @@ class LlamAgentTUI(App):
                 traceback.print_exception(type(error), error, error.__traceback__, file=f)
         except Exception:
             pass
+        # Runner cleanup before exit so the stop signal reaches the thread
+        # even if on_unmount doesn't fire.
+        self._stop_continuous_runner()
         self._crash_notice = f"[llamagent TUI crash — full traceback in {log_path}]"
         self._return_code = 1
         self.exit()

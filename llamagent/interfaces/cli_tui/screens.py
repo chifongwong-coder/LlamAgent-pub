@@ -410,3 +410,188 @@ class AskUserModal(ModalScreen[Optional[str]]):
                     return
         # No text + no radio selected — treat as cancel.
         self.dismiss(None)
+
+
+# ---------------------------------------------------------------------------
+# ContinuousSetupModal — pick trigger type and configure for /mode continuous (plan §4 C7)
+# ---------------------------------------------------------------------------
+
+
+class ContinuousSetupModal(ModalScreen[dict | None]):
+    """Setup form for continuous mode (plan §4 C7).
+
+    Pushed by ``cmd_mode("continuous")`` (via ``app._on_continuous_setup_done``
+    callback in app.py). Captures the same fields as the legacy
+    ``LlamAgentCLI._start_continuous`` prompt flow, but without the
+    "select 1/2" interactive step — RadioSet picks the type and all four
+    parameter Inputs render at once.
+
+    Plan §4 C7 (a) consciously *does not* hide / show parameter Inputs
+    based on the RadioSet selection — Textual SetupScreen has no such
+    pattern, and V1 doesn't want to introduce a new toggle pattern just
+    for this screen. Build reads the two Inputs that match the selected
+    radio and ignores the other two.
+
+    Dismisses with:
+    - ``None`` — Cancel / Esc.
+    - ``{"type": "timer", "interval": float, "message": str}`` — Timer.
+    - ``{"type": "file", "watch_dir": str, "message_template": str}`` — File.
+
+    Validation (plan §4 C7 (a) round-2 MED-1) lives entirely in
+    :meth:`_do_build` and writes errors into the in-modal ``#cs-error``
+    Static so the user can correct and retry without dismissing.
+    """
+
+    DEFAULT_CSS = """
+    ContinuousSetupModal {
+        align: center middle;
+    }
+    ContinuousSetupModal > Vertical {
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+        width: 76;
+        height: auto;
+    }
+    ContinuousSetupModal Label {
+        margin-top: 1;
+    }
+    ContinuousSetupModal Label.section {
+        text-style: bold;
+    }
+    ContinuousSetupModal Static.cs-title {
+        text-style: bold;
+        color: $primary;
+    }
+    ContinuousSetupModal Static#cs-error {
+        color: $error;
+        margin-top: 1;
+    }
+    ContinuousSetupModal Horizontal#cs-buttons {
+        margin-top: 2;
+        align: center middle;
+        height: auto;
+    }
+    ContinuousSetupModal Button {
+        margin: 0 1;
+    }
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    AUTO_FOCUS = "#cs-interval"
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static("Continuous mode — trigger setup", classes="cs-title")
+            yield Static(
+                "[dim]Pick a trigger type, fill its parameters, press Build to start.[/dim]"
+            )
+
+            yield Label("Trigger type:", classes="section")
+            yield RadioSet(
+                RadioButton("Timer — periodic fire", value=True, id="cs-trigger-timer"),
+                RadioButton("File — watch directory for new files", id="cs-trigger-file"),
+                id="cs-trigger",
+            )
+
+            yield Label("Timer: interval (seconds)", classes="section")
+            yield Input(placeholder="60", id="cs-interval")
+
+            yield Label("Timer: message to send each fire", classes="section")
+            yield Input(placeholder="check status", id="cs-message")
+
+            yield Label("File: watch directory (absolute or relative)", classes="section")
+            yield Input(placeholder="/tmp/llamagent_inbox", id="cs-watch-dir")
+
+            yield Label("File: message template ({files} placeholder, blank = default)", classes="section")
+            yield Input(
+                placeholder="New files detected: {files}",
+                id="cs-message-template",
+            )
+
+            yield Static("", id="cs-error")
+
+            with Horizontal(id="cs-buttons"):
+                yield Button("Build", variant="primary", id="cs-build")
+                yield Button("Cancel", id="cs-cancel")
+
+    def on_mount(self) -> None:
+        # Belt-and-suspenders for older Textual versions where AUTO_FOCUS
+        # resolves after on_mount (mirrors SetupScreen pattern).
+        self.call_after_refresh(lambda: self.query_one("#cs-interval", Input).focus())
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cs-cancel":
+            self.dismiss(None)
+            return
+        if event.button.id == "cs-build":
+            self._do_build()
+
+    def on_input_submitted(self, event: "Input.Submitted") -> None:
+        """Enter inside any Input triggers Build (mirrors SetupScreen)."""
+        self._do_build()
+
+    def _set_error(self, msg: str) -> None:
+        try:
+            self.query_one("#cs-error", Static).update(markup_escape(msg))
+        except Exception:
+            pass
+
+    def _do_build(self) -> None:
+        # 0 = timer, 1 = file — fall back to timer if neither is selected
+        # so an empty-RadioSet bug never produces an opaque error.
+        trigger_idx = self._selected_radio("cs-trigger", default=0)
+
+        if trigger_idx == 0:
+            interval_raw = self.query_one("#cs-interval", Input).value.strip()
+            message_raw = self.query_one("#cs-message", Input).value.strip()
+            if not interval_raw:
+                self._set_error("Interval required (e.g. 60).")
+                return
+            try:
+                interval = float(interval_raw)
+            except ValueError:
+                self._set_error(f"Interval must be a number, got: {interval_raw!r}")
+                return
+            if not (interval > 0):
+                self._set_error(f"Interval must be > 0 seconds, got: {interval}")
+                return
+            if not message_raw:
+                self._set_error("Message required for timer trigger.")
+                return
+            self.dismiss({"type": "timer", "interval": interval, "message": message_raw})
+            return
+
+        # File trigger
+        from pathlib import Path
+
+        watch_dir_raw = self.query_one("#cs-watch-dir", Input).value.strip()
+        template_raw = self.query_one("#cs-message-template", Input).value.strip()
+        if not watch_dir_raw:
+            self._set_error("Watch directory required.")
+            return
+        watch_path = Path(watch_dir_raw).expanduser()
+        if not watch_path.is_dir():
+            self._set_error(f"Not a directory: {watch_dir_raw!r}")
+            return
+        # message_template empty → caller (cmd_mode) uses FileTrigger default
+        # rather than us hard-coding it here. Defaulting at the trigger boundary
+        # keeps the modal generic if the default ever changes.
+        self.dismiss(
+            {
+                "type": "file",
+                "watch_dir": str(watch_path),
+                "message_template": template_raw,  # "" means "use default"
+            }
+        )
+
+    def _selected_radio(self, radioset_id: str, default: int = 0) -> int:
+        rs = self.query_one(f"#{radioset_id}", RadioSet)
+        for i, btn in enumerate(rs.children):
+            if isinstance(btn, RadioButton) and btn.value:
+                return i
+        return default

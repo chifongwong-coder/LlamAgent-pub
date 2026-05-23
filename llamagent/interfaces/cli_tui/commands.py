@@ -80,7 +80,8 @@ def cmd_help(app: "LlamAgentTUI", arg: str) -> None:
         ("/memory", "Show stored facts and memory usage"),
         ("/history", "Browse saved conversation sessions"),
         ("/clear", "Start a fresh conversation (Ctrl+L)"),
-        ("/verbose [on|off]", "Toggle the right diagnostic pane"),
+        ("/verbose [on|off]", "Toggle the right diagnostic pane (thinking / tool detail)"),
+        ("/monitor [on|off]", "Toggle the right monitor pane (continuous mode status)"),
         ("/quit", "Exit the TUI (also: /exit, /q)"),
         ("Ctrl+C / Esc", "Quit"),
     ]
@@ -210,6 +211,68 @@ def cmd_abort(app: "LlamAgentTUI", arg: str) -> None:
     _info(app, "Abort requested — current task will stop shortly")
 
 
+# ---------------------------------------------------------------------------
+# Right-pane mutex helper (plan §4 C7 H4 fix)
+# ---------------------------------------------------------------------------
+
+
+# Mapping of right-pane key → (widget id, hide mapping). When set_right_pane
+# is asked to show a pane, every entry whose key differs from the target gets
+# its widget hidden. Adding a third pane is a one-line addition here, no
+# touching of every cmd_* call site (P7 single-source-of-truth fix vs the
+# round-1 H4 finding's earlier `(app, pane_id, hide_ids)` signature that
+# leaked hide knowledge to callers).
+_RIGHT_PANES = {
+    "verbose": "#verbose-pane",
+    "monitor": "#monitor-pane",
+}
+
+
+def _set_right_pane(app: "LlamAgentTUI", target: str | None) -> bool:
+    """Show one right pane (and hide the others), or hide all.
+
+    ``target`` is one of ``"verbose"``, ``"monitor"``, or ``None`` (hide
+    all). Returns True if the target pane is now visible after the call,
+    False if all panes are hidden (or the target lookup failed silently —
+    caller can still report it).
+    """
+    visible = False
+    for key, selector in _RIGHT_PANES.items():
+        try:
+            widget = app.query_one(selector)
+        except Exception:
+            continue  # pane not mounted yet — skip
+        if key == target:
+            try:
+                widget.display = True
+                visible = True
+            except Exception:
+                pass
+        else:
+            try:
+                widget.display = False
+            except Exception:
+                pass
+    return visible
+
+
+def _parse_pane_arg(arg: str, *, current: bool) -> "bool | None":
+    """Parse a `/verbose` / `/monitor` argument into a desired display state.
+
+    Returns True / False for explicit on/off, the *toggled* current state
+    for empty arg, or ``None`` when ``arg`` is unrecognised — caller renders
+    the error so the message can name the offending command.
+    """
+    token = arg.strip().lower()
+    if token in ("on", "show", "open", "true", "1"):
+        return True
+    if token in ("off", "hide", "close", "false", "0"):
+        return False
+    if token == "":
+        return not current
+    return None
+
+
 def cmd_verbose(app: "LlamAgentTUI", arg: str) -> None:
     """Toggle / explicitly set the VerbosePane (round-14 user-test result).
 
@@ -219,9 +282,13 @@ def cmd_verbose(app: "LlamAgentTUI", arg: str) -> None:
     intercepts it. A slash command travels through the Input widget as plain
     text, so no terminal-level mapping can intercept it.
 
+    Round-1 H4 refactor (plan §4 C7): the show/hide path goes through
+    :func:`_set_right_pane` so it stays consistent with /monitor (the two
+    panes occupy the same layout slot and are mutually exclusive).
+
     Usage:
-        /verbose        — toggle (current behaviour mirrors the old Ctrl+V)
-        /verbose on     — force show
+        /verbose        — toggle (mirrors the old Ctrl+V)
+        /verbose on     — force show (auto-hides MonitorPane)
         /verbose off    — force hide
     """
     from llamagent.interfaces.cli_tui.widgets import VerbosePane
@@ -232,43 +299,103 @@ def cmd_verbose(app: "LlamAgentTUI", arg: str) -> None:
         _error(app, f"VerbosePane unavailable: {type(e).__name__}: {e}")
         return
 
-    target = arg.strip().lower()
-    if target in ("on", "show", "open", "true", "1"):
-        new_state = True
-    elif target in ("off", "hide", "close", "false", "0"):
-        new_state = False
-    elif target == "":
-        new_state = not pane.display
-    else:
-        _error(app, f"Invalid /verbose arg: {markup_escape(target)}. Use: on, off, or no arg (toggle)")
+    new_state = _parse_pane_arg(arg, current=bool(pane.display))
+    if new_state is None:
+        _error(app, f"Invalid /verbose arg: {markup_escape(arg.strip())}. Use: on, off, or no arg (toggle)")
         return
     try:
-        pane.display = new_state
+        _set_right_pane(app, "verbose" if new_state else None)
     except Exception as e:
         _error(app, f"toggle failed: {type(e).__name__}: {e}")
         return
     _info(app, f"VerbosePane {'shown' if new_state else 'hidden'}")
 
 
-def cmd_stop(app: "LlamAgentTUI", arg: str) -> None:
-    """Stop continuous mode. C7 will wire ContinuousRunner; for C6 we
-    just flip mode back so the user sees a deterministic state change.
+def cmd_monitor(app: "LlamAgentTUI", arg: str) -> None:
+    """Toggle / explicitly set the MonitorPane (plan §4 C7).
 
-    TODO(C7): when ContinuousRunner is integrated into the TUI, replace
-    the ``agent.set_mode("interactive")`` call with the real runner stop
-    sequence (mirrors legacy ``LlamAgentCLI._cmd_stop`` calling
-    ``self._runner.stop()`` at cli.py:898).
+    Mutually exclusive with VerbosePane via :func:`_set_right_pane` — showing
+    one auto-hides the other. Both panes stay mounted (display:none only),
+    so the hidden one keeps accumulating ThinkingMessage / status-poll state
+    and the user can switch back and see backfill.
+
+    The MonitorPane is meaningful only while a ContinuousRunner is active,
+    but the pane itself handles ``runner is None`` gracefully — opening it
+    in interactive mode just shows "Continuous mode not active".
+
+    Usage:
+        /monitor        — toggle
+        /monitor on     — force show (auto-hides VerbosePane)
+        /monitor off    — force hide
+    """
+    from llamagent.interfaces.cli_tui.widgets import MonitorPane
+
+    try:
+        pane = app.query_one("#monitor-pane", MonitorPane)
+    except Exception as e:
+        _error(app, f"MonitorPane unavailable: {type(e).__name__}: {e}")
+        return
+
+    new_state = _parse_pane_arg(arg, current=bool(pane.display))
+    if new_state is None:
+        _error(app, f"Invalid /monitor arg: {markup_escape(arg.strip())}. Use: on, off, or no arg (toggle)")
+        return
+    try:
+        _set_right_pane(app, "monitor" if new_state else None)
+    except Exception as e:
+        _error(app, f"toggle failed: {type(e).__name__}: {e}")
+        return
+    _info(app, f"MonitorPane {'shown' if new_state else 'hidden'}")
+
+
+def cmd_stop(app: "LlamAgentTUI", arg: str) -> None:
+    """Stop the continuous runner (plan §4 C7 (e)).
+
+    Replaces the C6 placeholder that only flipped mode. Real path:
+    1. Signal the runner to stop (releases waiting inject callers).
+    2. ``thread.join(timeout=10)`` — 10s covers most agent.chat turns;
+       any runner thread still alive past the timeout gets a warning
+       logged and the reference dropped. ``daemon=True`` at thread
+       creation means the process-exit path will reap stragglers, so
+       we don't try to force-kill (Python can't safely kill threads).
+    3. Drop ``self._runner`` / ``self._runner_thread`` so the next
+       /mode continuous starts from a clean slate.
+    4. Flip agent.mode back to interactive + refresh StatusHeader.
+    5. Hide MonitorPane so the now-stale state board doesn't linger.
     """
     agent = app.agent
-    if agent is None or agent.mode != "continuous":
+    runner = getattr(app, "_runner", None)
+    if agent is None or agent.mode != "continuous" or runner is None:
         _info(app, "Not in continuous mode")
         return
+
+    try:
+        runner.stop()
+    except Exception as e:
+        _error(app, f"runner.stop() failed: {type(e).__name__}: {e}")
+        # Keep going — we still want to clear state so the user isn't
+        # stuck in a half-stopped mode.
+
+    thread = getattr(app, "_runner_thread", None)
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=10.0)
+        if thread.is_alive():
+            import logging
+            logging.getLogger(__name__).warning(
+                "continuous runner thread did not stop within 10s; "
+                "dropping reference and relying on daemon-thread reap"
+            )
+
+    app._runner = None
+    app._runner_thread = None
+
     try:
         agent.set_mode("interactive")
     except Exception as e:
         _error(app, f"set_mode(interactive) failed: {type(e).__name__}: {e}")
         return
     app.refresh_status_header()
+    _set_right_pane(app, None)  # hide MonitorPane
     _info(app, "Continuous runner stopped — switched back to interactive")
 
 
@@ -294,6 +421,25 @@ def cmd_mode(app: "LlamAgentTUI", arg: str) -> None:
     if target == agent.mode:
         _info(app, f"Already in {target} mode")
         return
+
+    # C7 — continuous mode goes through a setup modal. The modal is async
+    # / callback-based (push_screen pattern, plan §4 C7 (d) round-1 B1):
+    # cmd_mode returns immediately, and the real mode switch happens in
+    # ``app._on_continuous_setup_done`` once the user fills the form. If
+    # the user cancels, no state changes.
+    if target == "continuous":
+        # Round-15 Rev A M2 — pull the callback access OUT of the try so
+        # a missing attribute on a future App subclass / smoke FakeApp
+        # surfaces as a clean AttributeError instead of being silently
+        # rewrapped into "could not open continuous setup".
+        callback = app._on_continuous_setup_done
+        from llamagent.interfaces.cli_tui.screens import ContinuousSetupModal
+        try:
+            app.push_screen(ContinuousSetupModal(), callback)
+        except Exception as e:
+            _error(app, f"could not open continuous setup: {type(e).__name__}: {e}")
+        return
+
     try:
         agent.set_mode(target)
     except Exception as e:
@@ -473,6 +619,7 @@ _HANDLERS: dict[str, Callable] = {
     "/abort": cmd_abort,
     "/stop": cmd_stop,
     "/verbose": cmd_verbose,
+    "/monitor": cmd_monitor,
     "/quit": cmd_quit,
     "/exit": cmd_quit,
     "/q": cmd_quit,

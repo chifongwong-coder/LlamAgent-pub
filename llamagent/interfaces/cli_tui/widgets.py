@@ -55,6 +55,9 @@ SLASH_COMMANDS: tuple[str, ...] = (
     "/verbose",
     "/verbose on",
     "/verbose off",
+    "/monitor",
+    "/monitor on",
+    "/monitor off",
     "/quit",
     "/exit",
     "/q",
@@ -546,3 +549,168 @@ class VerbosePane(VerticalScroll):
         self.scroll_end(animate=False)
         if len(self.children) > self.MAX_EVENTS:
             self.children[0].remove()
+
+
+# ---------------------------------------------------------------------------
+# MonitorPane — Continuous mode status board (plan §4 C7)
+# ---------------------------------------------------------------------------
+
+
+class MonitorPane(VerticalScroll):
+    """Right-side status board for continuous mode (plan §4 C7 V1+).
+
+    Shares its layout slot with VerbosePane — at most one is visible at a
+    time, switched via :func:`commands._set_right_pane`. Both stay mounted
+    (display:none only) so each retains its history while hidden.
+
+    The pane is a *status board*, not an event stream — it polls a small
+    set of fields on the App's active ContinuousRunner every second and
+    re-renders the same single Static. plan v16 K-line consciously kept
+    the per-fire event stream (V2) out of scope:
+    surfacing every fire requires either a framework callback in Runner
+    or a monkey-patch on Runner.run — both larger commitments. V1+ does
+    show ``fired Xs ago`` per ``TimerTrigger`` because that instance
+    already stores ``_last_fire`` (`runner.py:309`), so the math is local.
+
+    P5 local violation note: reads several ``_``-prefixed fields off
+    ContinuousRunner and TimerTrigger. plan §4 C7 (b) registers this as
+    deferred to v3.10+ — Runner should expose ``get_status() -> dict``
+    and Trigger should expose ``last_fired_at``. Until then we keep all
+    private-attr reads inside :func:`_runner_snapshot` so a future
+    framework refactor only needs to touch one place.
+
+    ``can_focus = False`` — same rationale as ChatLog / VerbosePane: the
+    Input must own focus for chat; pane scrolls via mouse / Page Up/Down.
+    """
+
+    can_focus = False
+
+    DEFAULT_CSS = """
+    MonitorPane {
+        width: 40;
+        height: 1fr;
+        border: solid $primary-darken-1;
+        padding: 0 1;
+        display: none;
+    }
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._body: Static | None = None
+
+    def on_mount(self) -> None:
+        # Single Static that we re-render each tick; cheaper than mounting
+        # and unmounting children, and the status board doesn't need
+        # incremental update semantics.
+        self._body = Static(self._render_idle())
+        self.mount(self._body)
+        # 1-second poll cadence matches plan §4 C7 (b). Cheap field reads
+        # on a single thread; no Worker / async needed.
+        self.set_interval(1.0, self._refresh)
+
+    def _refresh(self) -> None:
+        if self._body is None:
+            return
+        # ``self.app`` may not be ready during very early mount or after
+        # quit; guard defensively. ``self.app.agent`` and ``self.app._runner``
+        # are App-level fields, missing on smoke / pilot stubs.
+        try:
+            runner = getattr(self.app, "_runner", None)
+        except Exception:
+            runner = None
+        try:
+            self._body.update(self._render_idle() if runner is None else self._render_running(runner))
+        except Exception:
+            # Never let a redraw exception kill the pane — log only if needed.
+            pass
+
+    @staticmethod
+    def _render_idle() -> str:
+        return (
+            "[bold]Continuous mode not active[/bold]\n\n"
+            "[dim]Use /mode continuous to start a runner.[/dim]"
+        )
+
+    @staticmethod
+    def _render_running(runner) -> str:
+        snap = _runner_snapshot(runner)
+        lines = ["[bold cyan]Continuous Runner[/bold cyan]"]
+        lines.append(
+            f"  state:    [bold]{'running' if snap['running'] else 'stopped'}[/bold]"
+            f"  task: [{('yes' if snap['task_running'] else 'idle')}]"
+        )
+        q = snap["queue"]
+        lines.append(
+            f"  queue:    urgent={q['urgent']}  normal={q['normal']}  retry={q['retry']}"
+        )
+        if snap["triggers"]:
+            lines.append("")
+            lines.append(f"[bold cyan]Triggers ({len(snap['triggers'])})[/bold cyan]")
+            for trig in snap["triggers"]:
+                head = f"  [cyan]{trig['kind']}[/cyan]  {trig['summary']}"
+                if trig["last_fire_ago"] is not None:
+                    head += f"  [dim](fired {trig['last_fire_ago']:.0f}s ago)[/dim]"
+                lines.append(head)
+        else:
+            lines.append("")
+            lines.append("[dim]No triggers configured[/dim]")
+        return "\n".join(lines)
+
+
+def _runner_snapshot(runner) -> dict:
+    """Read a small status dict off a ContinuousRunner, isolating every
+    private-attr read in one place (plan §4 C7 H3 P5-note).
+
+    Returned shape::
+
+        {
+            "running":      bool,
+            "task_running": bool,
+            "queue": {"urgent": int, "normal": int, "retry": int},
+            "triggers": [
+                {"kind": "Timer", "summary": "60s -- 'check'", "last_fire_ago": 12.3},
+                {"kind": "File",  "summary": "/tmp watch",      "last_fire_ago": None},
+                ...
+            ],
+        }
+
+    Missing / changed fields degrade gracefully (best-effort getattr).
+    """
+    import time
+
+    triggers_info: list[dict] = []
+    for t in getattr(runner, "triggers", []) or []:
+        kind = type(t).__name__.replace("Trigger", "")
+        if kind == "Timer":
+            interval = getattr(t, "interval", "?")
+            message = getattr(t, "message", "")
+            summary = f"every {interval}s -- {message!r}"
+            lf = getattr(t, "_last_fire", None)
+            ago: float | None = (time.time() - lf) if lf is not None else None
+        elif kind == "File":
+            watch = getattr(t, "watch_dir", "?")
+            summary = f"watch {watch}"
+            ago = None
+        else:
+            summary = repr(t)
+            ago = None
+        triggers_info.append({"kind": kind, "summary": summary, "last_fire_ago": ago})
+
+    def _qsize(name: str) -> int:
+        q = getattr(runner, name, None)
+        try:
+            return q.qsize() if q is not None else 0
+        except Exception:
+            return 0
+
+    return {
+        "running":      bool(getattr(runner, "_running", False)),
+        "task_running": bool(getattr(runner, "_task_running", False)),
+        "queue": {
+            "urgent": _qsize("_urgent_queue"),
+            "normal": _qsize("_normal_queue"),
+            "retry":  _qsize("_retry_queue"),
+        },
+        "triggers": triggers_info,
+    }
