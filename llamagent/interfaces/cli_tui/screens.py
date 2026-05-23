@@ -12,6 +12,9 @@ them via the input() flow. This screen is the bare 95% path that the
 plan §4 C3 verification line wants:
 "interactive_setup 流程完全 TUI 化；选完点 Build 进 chat".
 """
+from typing import Optional
+
+from rich.markup import escape as markup_escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
@@ -172,3 +175,203 @@ class SetupScreen(ModalScreen[dict | None]):
             if isinstance(btn, RadioButton) and btn.value:
                 return i
         return default
+
+
+# ---------------------------------------------------------------------------
+# ConfirmModal — authorization prompts (plan §4 C4)
+# ---------------------------------------------------------------------------
+
+
+class ConfirmModal(ModalScreen[Optional[bool]]):
+    """Authorization confirm dialog. ``dismiss(True)`` = allow,
+    ``dismiss(False)`` = deny, ``dismiss(None)`` = sentinel (Esc/abort).
+
+    The bridge maps the dismiss value to a ``ConfirmResponse``:
+    True → allow=True, False/None → allow=False (no separate "abort"
+    state, matching plan §1.4 ConfirmResponse schema which has no
+    reason field).
+    """
+
+    DEFAULT_CSS = """
+    ConfirmModal {
+        align: center middle;
+    }
+    ConfirmModal > Vertical {
+        background: $surface;
+        border: thick $warning;
+        padding: 1 2;
+        width: 70;
+        height: auto;
+    }
+    ConfirmModal Static.confirm-title {
+        text-style: bold;
+        color: $warning;
+    }
+    ConfirmModal Static.confirm-field {
+        margin-top: 1;
+    }
+    ConfirmModal Horizontal#confirm-buttons {
+        margin-top: 2;
+        align: center middle;
+        height: auto;
+    }
+    """
+
+    BINDINGS = [
+        ("escape", "dismiss_sentinel", "Cancel"),
+        ("y", "approve", "Allow"),
+        ("n", "deny", "Deny"),
+    ]
+
+    AUTO_FOCUS = "#confirm-allow"
+
+    def __init__(self, request) -> None:
+        super().__init__()
+        # ConfirmRequest fields per core/zone.py:73-90 — accessed
+        # defensively in case framework adds new optional fields later.
+        self.request = request
+
+    def compose(self) -> ComposeResult:
+        req = self.request
+        with Vertical():
+            yield Static("Authorization required", classes="confirm-title")
+            tool = getattr(req, "tool_name", "?")
+            action = getattr(req, "action", None) or "-"
+            zone = getattr(req, "zone", None) or "-"
+            yield Static(
+                f"tool: [cyan]{markup_escape(str(tool))}[/cyan]  "
+                f"action: [yellow]{markup_escape(str(action))}[/yellow]  "
+                f"zone: [magenta]{markup_escape(str(zone))}[/magenta]",
+                classes="confirm-field",
+            )
+            paths = getattr(req, "target_paths", None) or []
+            if paths:
+                paths_text = "\n  ".join(markup_escape(str(p)) for p in paths[:8])
+                more = f"\n  …(+{len(paths) - 8} more)" if len(paths) > 8 else ""
+                yield Static(
+                    f"paths:\n  {paths_text}{more}",
+                    classes="confirm-field",
+                )
+            message = getattr(req, "message", None)
+            if message:
+                yield Static(
+                    f"[dim]{markup_escape(str(message))}[/dim]",
+                    classes="confirm-field",
+                )
+            yield Static(
+                "[dim]y / Enter = allow · n / Esc = deny[/dim]",
+                classes="confirm-field",
+            )
+            with Horizontal(id="confirm-buttons"):
+                yield Button("Allow", variant="success", id="confirm-allow")
+                yield Button("Deny", variant="error", id="confirm-deny")
+
+    def action_dismiss_sentinel(self) -> None:
+        self.dismiss(None)
+
+    def action_approve(self) -> None:
+        self.dismiss(True)
+
+    def action_deny(self) -> None:
+        self.dismiss(False)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "confirm-allow":
+            self.dismiss(True)
+        elif event.button.id == "confirm-deny":
+            self.dismiss(False)
+
+
+# ---------------------------------------------------------------------------
+# AskUserModal — UserInteractionHandler.ask backing (plan §4 C4)
+# ---------------------------------------------------------------------------
+
+
+class AskUserModal(ModalScreen[Optional[str]]):
+    """Free-form or multiple-choice prompt from the ``ask_user`` tool.
+
+    ``dismiss(str)`` = user answer (free-form text or selected choice).
+    ``dismiss(None)`` = sentinel (Esc/abort) — bridge returns empty
+    string to the tool so it can short-circuit instead of hanging.
+    """
+
+    DEFAULT_CSS = """
+    AskUserModal {
+        align: center middle;
+    }
+    AskUserModal > Vertical {
+        background: $surface;
+        border: thick $accent;
+        padding: 1 2;
+        width: 70;
+        height: auto;
+    }
+    AskUserModal Static.ask-title {
+        text-style: bold;
+        color: $accent;
+    }
+    AskUserModal Label.section {
+        margin-top: 1;
+        text-style: bold;
+    }
+    AskUserModal Horizontal#ask-buttons {
+        margin-top: 2;
+        align: center middle;
+        height: auto;
+    }
+    """
+
+    BINDINGS = [("escape", "dismiss_sentinel", "Cancel")]
+
+    AUTO_FOCUS = "#ask-input"
+
+    def __init__(self, question: str, choices: Optional[list] = None) -> None:
+        super().__init__()
+        self.question = question or "(no prompt)"
+        self.choices = list(choices) if choices else []
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static("Agent asks:", classes="ask-title")
+            yield Static(markup_escape(self.question))
+            if self.choices:
+                yield Label("Pick one (or type your own below):", classes="section")
+                yield RadioSet(
+                    *[
+                        RadioButton(markup_escape(str(c)), id=f"ask-choice-{i}")
+                        for i, c in enumerate(self.choices)
+                    ],
+                    id="ask-choices",
+                )
+            yield Label("Free-form answer:", classes="section")
+            yield Input(placeholder="type and press Enter", id="ask-input")
+            with Horizontal(id="ask-buttons"):
+                yield Button("Submit", variant="primary", id="ask-submit")
+                yield Button("Cancel", id="ask-cancel")
+
+    def action_dismiss_sentinel(self) -> None:
+        self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._do_submit()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "ask-submit":
+            self._do_submit()
+        elif event.button.id == "ask-cancel":
+            self.dismiss(None)
+
+    def _do_submit(self) -> None:
+        text = self.query_one("#ask-input", Input).value.strip()
+        if text:
+            self.dismiss(text)
+            return
+        # Empty text — fall back to selected radio choice if any
+        if self.choices:
+            rs = self.query_one("#ask-choices", RadioSet)
+            for i, btn in enumerate(rs.children):
+                if isinstance(btn, RadioButton) and btn.value:
+                    self.dismiss(str(self.choices[i]))
+                    return
+        # No text + no radio selected — treat as cancel.
+        self.dismiss(None)

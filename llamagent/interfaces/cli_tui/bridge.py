@@ -266,6 +266,126 @@ def uninstall_hooks(agent) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Confirm / Ask handler adapters (plan §4 C4)
+# ---------------------------------------------------------------------------
+
+
+# Modal response wait timeout — plan §2.4 / §4 C4 (60s sentinel-dismiss).
+MODAL_RESPONSE_TIMEOUT_S = 60.0
+
+
+def install_handlers(agent, app) -> None:
+    """Wire ``agent.confirm_handler`` + ``agent.interaction_handler`` so
+    framework authorization prompts and ``ask_user`` calls route through
+    the TUI's ConfirmModal / AskUserModal (plan §4 C4).
+
+    Both handlers are called synchronously from the agent worker thread.
+    Each one:
+      1. Pushes its modal via ``app.call_from_thread(app.push_screen,
+         ...)`` — push_screen is NOT thread-safe (Textual docs), only
+         post_message is; call_from_thread is the documented bridge.
+      2. Blocks on a ``threading.Event`` until the modal dismisses
+         (UI thread runs the modal, sets the event in the dismiss
+         callback) OR ``MODAL_RESPONSE_TIMEOUT_S`` elapses → sentinel
+         response (deny / empty), matching plan §4 C4 "modal 60s
+         无应答自动 sentinel-dismiss".
+
+    Sentinel semantics:
+      - confirm_handler timeout / Esc / cancel → ConfirmResponse(
+        allow=False, approved_scopes=None)
+      - interaction_handler timeout / Esc / cancel → empty string
+        (the ``ask_user`` tool treats empty answer as cancel)
+
+    Setting these attributes is idempotent — last installer wins, which
+    is the right semantics for set_agent rebuild.
+    """
+    from llamagent.core.zone import ConfirmResponse
+    from llamagent.modules.tools.interaction import UserInteractionHandler
+
+    def _confirm_handler(req):
+        from llamagent.interfaces.cli_tui.screens import ConfirmModal
+
+        result_holder: list = []
+        event = threading.Event()
+
+        def _on_dismiss(value):
+            result_holder.append(value)
+            event.set()
+
+        try:
+            app.call_from_thread(
+                app.push_screen, ConfirmModal(req), _on_dismiss
+            )
+        except Exception as e:
+            logger.debug("confirm modal push_screen failed: %s", e)
+            return ConfirmResponse(allow=False, approved_scopes=None)
+
+        if not event.wait(timeout=MODAL_RESPONSE_TIMEOUT_S):
+            logger.warning(
+                "confirm modal 60s timeout — sentinel deny for tool=%s",
+                getattr(req, "tool_name", "?"),
+            )
+            return ConfirmResponse(allow=False, approved_scopes=None)
+
+        value = result_holder[0] if result_holder else None
+        if value is True:
+            return ConfirmResponse(allow=True, approved_scopes=None)
+        return ConfirmResponse(allow=False, approved_scopes=None)
+
+    class _TUIInteractionHandler(UserInteractionHandler):
+        def ask(self, question, choices=None):
+            from llamagent.interfaces.cli_tui.screens import AskUserModal
+
+            result_holder: list = []
+            event = threading.Event()
+
+            def _on_dismiss(value):
+                result_holder.append(value)
+                event.set()
+
+            try:
+                app.call_from_thread(
+                    app.push_screen,
+                    AskUserModal(question, choices),
+                    _on_dismiss,
+                )
+            except Exception as e:
+                logger.debug("ask modal push_screen failed: %s", e)
+                return ""
+
+            if not event.wait(timeout=MODAL_RESPONSE_TIMEOUT_S):
+                logger.warning("ask modal 60s timeout — sentinel empty")
+                return ""
+
+            value = result_holder[0] if result_holder else None
+            return value if isinstance(value, str) else ""
+
+    agent.confirm_handler = _confirm_handler
+    agent.interaction_handler = _TUIInteractionHandler()
+    agent._tui_handlers_installed = True
+
+
+def uninstall_handlers(agent) -> None:
+    """Remove TUI confirm / interaction handlers from ``agent``.
+
+    Idempotent. Mirrors uninstall_hooks contract so set_agent can swap
+    cleanly between agents.
+    """
+    if not getattr(agent, "_tui_handlers_installed", False):
+        return
+    # Restore framework defaults — agent.py assigns ``None`` by default
+    # in __init__ (chat falls back to permissive defaults when these
+    # are None). Setting back to None lets the agent decide instead of
+    # holding stale closures pointing at a dead app reference.
+    agent.confirm_handler = None
+    agent.interaction_handler = None
+    try:
+        delattr(agent, "_tui_handlers_installed")
+    except AttributeError:
+        pass
+
+
 def run_turn(target: "Widget", agent, user_input: str) -> None:
     """Iterate ``agent.chat_stream(user_input)`` and post ChatChunkMessage
     per chunk. Emits TurnCompleteMessage in finally so ChatLog can

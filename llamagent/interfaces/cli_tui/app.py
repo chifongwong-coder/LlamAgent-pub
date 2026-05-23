@@ -98,9 +98,15 @@ class LlamAgentTUI(App):
         # Target the ChatLog widget directly — Textual on_<msg> handlers
         # only fire on the widget that received post_message; routing
         # via App leaves messages stranded in App's queue (5/23 bug).
+        # C4 also wires confirm/ask handlers so authorization prompts +
+        # ask_user tool calls route through the TUI modal screens.
         if self.agent is not None:
-            from llamagent.interfaces.cli_tui.bridge import install_hooks
+            from llamagent.interfaces.cli_tui.bridge import (
+                install_handlers,
+                install_hooks,
+            )
             install_hooks(self.agent, self.query_one("#chat-log", ChatLog))
+            install_handlers(self.agent, self)
 
         if self.n_mock_turns > 0:
             # Mock smoke — no SetupScreen, focus Input directly.
@@ -162,21 +168,27 @@ class LlamAgentTUI(App):
 
     def set_agent(self, agent) -> None:
         """Bind ``agent`` to the App, refresh StatusHeader, install
-        hooks. Handles agent-rebuild path by uninstalling the previous
-        agent's hooks first (round-8 Rev A M1 / plan v13 §12).
+        hooks + confirm/ask handlers. Handles agent-rebuild path by
+        uninstalling the previous agent's hooks + handlers first
+        (round-8 Rev A M1 / plan v13 §12 + C4 §4 verification).
         """
         from llamagent.interfaces.cli_tui.bridge import (
+            install_handlers,
             install_hooks,
+            uninstall_handlers,
             uninstall_hooks,
         )
 
         if self.agent is not None and self.agent is not agent:
             uninstall_hooks(self.agent)
+            uninstall_handlers(self.agent)
 
         self.agent = agent
         self.refresh_status_header()
         # Hooks target the ChatLog widget directly (handlers live there).
         install_hooks(agent, self.query_one("#chat-log", ChatLog))
+        # Confirm / ask handlers push modal screens via the App.
+        install_handlers(agent, self)
         # Re-focus the Input so user can immediately type after build.
         self.call_after_refresh(lambda: self.query_one("#input", Input).focus())
 
