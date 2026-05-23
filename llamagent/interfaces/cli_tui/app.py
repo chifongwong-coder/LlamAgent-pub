@@ -87,27 +87,32 @@ class LlamAgentTUI(App):
             f"LlamAgent TUI — turns: 0 / {self.n_mock_turns or '∞'}"
         )
 
-        # Defer Input.focus() until all widget mount cycles complete
-        # (plan v11 §2.11.5 — VerticalScroll race fix verified Step 3).
-        self.call_after_refresh(lambda: self.query_one("#input", Input).focus())
-
-        # C2: register hooks on real agent so PRE/POST/TOOL_ERROR
-        # produce ToolStart/End/Error Messages. install_hooks is
-        # idempotent so multiple App rebuilds on same agent are safe.
+        # Install hooks on the pre-built agent (scripted / smoke path).
+        # Interactive (SetupScreen) path defers hook install to set_agent.
         if self.agent is not None:
             from llamagent.interfaces.cli_tui.bridge import install_hooks
             install_hooks(self.agent, self)
 
         if self.n_mock_turns > 0:
+            # Mock smoke — no SetupScreen, focus Input directly.
+            self.call_after_refresh(lambda: self.query_one("#input", Input).focus())
             self.set_timer(0.05, self._run_mock_turn)
             return
 
-        # C3: launch the SetupScreen when no agent was pre-constructed
-        # (mock-turn smoke mode bypasses this). SetupScreen returns a
-        # dict that _on_setup_done feeds into _build_agent_from_setup.
         if self.agent is None:
+            # Interactive: SetupScreen pushed below owns focus while
+            # mounted. After it dismisses, set_agent() re-focuses
+            # App's Input. We MUST NOT schedule an Input.focus() here:
+            # call_after_refresh runs after the next render tick — by
+            # then SetupScreen is the active screen and App.query_one
+            # routes through it, raising NoMatches for "#input" which
+            # lives in the App's default screen (test B crash 5/23).
             from llamagent.interfaces.cli_tui.screens import SetupScreen
             self.push_screen(SetupScreen(), self._on_setup_done)
+            return
+
+        # Scripted path — agent pre-built, no SetupScreen, focus Input.
+        self.call_after_refresh(lambda: self.query_one("#input", Input).focus())
 
     # ------------------------------------------------------------------
     # C3 — SetupScreen integration
