@@ -255,7 +255,7 @@ class LlamAgentTUI(App):
         if result is None:
             self.exit()
             return
-        from llamagent.interfaces.cli_tui.__main__ import build_agent_from_setup
+        from llamagent.interfaces.cli_tui import build_agent_from_setup
         try:
             agent = build_agent_from_setup(result)
         except Exception as exc:
