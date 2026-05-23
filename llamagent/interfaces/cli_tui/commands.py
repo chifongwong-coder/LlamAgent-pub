@@ -71,7 +71,7 @@ def cmd_help(app: "LlamAgentTUI", arg: str) -> None:
         ("/help", "Show this help message"),
         ("/mode [name]", "Show / switch mode (interactive, task, continuous)"),
         ("/abort", "Cancel the current task (Ctrl+G)"),
-        ("/stop", "Stop the background runner (F2)"),
+        ("/stop", "Stop the background runner (continuous mode)"),
         ("/status", "View agent runtime status"),
         ("/modules", "View loaded modules"),
         ("/tools", "List tools registered on the agent"),

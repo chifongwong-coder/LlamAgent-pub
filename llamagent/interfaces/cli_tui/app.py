@@ -75,22 +75,25 @@ class LlamAgentTUI(App):
         # least one common macOS terminal. A slash command sidesteps the
         # whole class: it travels through the Input widget as plain
         # text, so no terminal can intercept it.
-        # C6 — Footer shortcuts for the three most-used slash commands
-        # (round-7 LOW A-1). Each routes through dispatch_slash so behaviour
-        # stays identical to typing the command. Modal screen guard mirrors
-        # round-12 M3 — the actions short-circuit when a modal is on top.
+        # C6 — Footer shortcuts for the two most-used slash commands
+        # (round-7 LOW A-1, narrowed after round-14 user testing). Each
+        # routes through dispatch_slash so behaviour stays identical to
+        # typing the command. Modal screen guard mirrors round-12 M3 —
+        # the actions short-circuit when a modal is on top.
         #
-        # Round-14 binding choices (Rev B H1 + M1):
-        # - Ctrl+L → /clear: Textual captures Ctrl+L before the PTY, no collision.
-        # - Ctrl+G → /abort: GNU readline "abort current command"; zero collision
-        #   with Input widget conventions (Ctrl+A would clash with readline
-        #   "beginning-of-line" muscle memory).
-        # - F2     → /stop : Function keys have no terminal-level meaning, so
-        #   they side-step the Ctrl+S XOFF flow-control collision that would
-        #   freeze the PTY in tmux / mosh / certain macOS Terminal profiles.
+        # Surviving binding choices (round-14 user-test verified clean):
+        # - Ctrl+L → /clear: Textual captures Ctrl+L before the PTY.
+        # - Ctrl+G → /abort: GNU readline "abort current command"; zero
+        #   collision with Input widget conventions.
+        #
+        # Why no /stop shortcut: F2 is the macOS brightness-up key by
+        # default (multimedia function key); the keystroke is intercepted
+        # by the OS before Textual sees it. The previous Ctrl+S choice
+        # collides with terminal XOFF flow control. Users invoke /stop
+        # via the slash command (typing it is fast enough; /stop is a
+        # continuous-mode-only operation, not a per-turn shortcut).
         Binding("ctrl+l", "slash_clear", "Clear"),
         Binding("ctrl+g", "slash_abort", "Abort"),
-        Binding("f2", "slash_stop", "Stop"),
     ]
 
     def __init__(
@@ -442,9 +445,6 @@ class LlamAgentTUI(App):
 
     def action_slash_abort(self) -> None:
         self._shortcut("/abort")
-
-    def action_slash_stop(self) -> None:
-        self._shortcut("/stop")
 
     def _run_real_turn(self, user_input: str) -> None:
         """Spawn a worker thread to iterate ``agent.chat_stream``.
