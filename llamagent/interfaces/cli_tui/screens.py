@@ -101,11 +101,14 @@ class SetupScreen(ModalScreen[dict | None]):
                 id="role",
             )
 
+            # Round-10 MED A-MED-2: placeholder rather than prefilled value
+            # so the user doesn't have to select-all-delete to type a real
+            # name. The empty-submit fallback below restores the default.
             yield Label("Agent name:", classes="section")
-            yield Input(value="LlamAgent", id="name")
+            yield Input(placeholder="LlamAgent", id="name")
 
             yield Label("Role description:", classes="section")
-            yield Input(value="A helpful AI assistant", id="desc")
+            yield Input(placeholder="A helpful AI assistant", id="desc")
 
             with Horizontal(id="buttons"):
                 yield Button("Build", variant="primary", id="build")
@@ -123,9 +126,17 @@ class SetupScreen(ModalScreen[dict | None]):
         if event.button.id == "cancel":
             self.dismiss(None)
             return
-        if event.button.id != "build":
-            return
+        if event.button.id == "build":
+            self._do_build()
 
+    def on_input_submitted(self, event: "Input.Submitted") -> None:
+        """Round-10 HIGH A-MED-1: Enter inside an Input triggers Build
+        instead of dying as an unhandled event. RadioSet doesn't emit
+        Input.Submitted, so the radios stay keyboard-toggleable without
+        accidentally submitting the form."""
+        self._do_build()
+
+    def _do_build(self) -> None:
         preset_idx = self._selected_radio("preset", default=0)
         preset_name = PRESET_ORDER[preset_idx]
         modules = PRESET_MODULES[preset_name]

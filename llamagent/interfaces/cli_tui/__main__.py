@@ -46,6 +46,15 @@ DEFAULT_PERSONA = {
 def build_agent_from_setup(setup: dict):
     """Construct a LlamAgent from a SetupScreen result dict.
 
+    Mirrors legacy ``cli.build_agent`` ordering exactly so the two entry
+    points produce equivalent agents for the same setup dict:
+      1. Resolve module list  (None → all available)
+      2. apply_presets(config, modules)  — flips persistence_enabled
+         etc. based on which modules will be loaded; MUST run before
+         LlamAgent(__init__) reads the config (round-10 BLOCKER C-B1).
+      3. LlamAgent(config, persona)
+      4. register_module for each name
+
     ``setup`` keys (all optional, defaults applied):
     - ``persona_name``: str
     - ``persona_role``: "user" | "admin"
@@ -53,6 +62,7 @@ def build_agent_from_setup(setup: dict):
     - ``modules``: list[str] | None  (None means "load all available")
     """
     from llamagent.core import Config, LlamAgent, Persona
+    from llamagent.interfaces.presets import apply_presets
     from llamagent.main import AVAILABLE_MODULES, load_module
 
     config = Config()
@@ -61,11 +71,17 @@ def build_agent_from_setup(setup: dict):
         role_description=setup.get("persona_desc", DEFAULT_PERSONA["persona_desc"]),
         role=setup.get("persona_role", DEFAULT_PERSONA["persona_role"]),
     )
-    agent = LlamAgent(config, persona=persona)
 
     module_names = setup.get("modules", None)
     if module_names is None:
         module_names = list(AVAILABLE_MODULES.keys())
+
+    # Round-10 BLOCKER C-B1 + HIGH C-H1: apply_presets BEFORE LlamAgent
+    # so config.persistence_enabled / memory_backend / etc. land
+    # before agent init reads them. Same ordering as cli.build_agent.
+    apply_presets(config, module_names)
+
+    agent = LlamAgent(config, persona=persona)
     for name in module_names:
         mod = load_module(name)
         if mod is not None:
@@ -95,13 +111,17 @@ def main() -> int:
         prog="llamagent.interfaces.cli_tui",
         description="LlamAgent Textual TUI (C3 entry — SetupScreen unless --modules/--no-modules)",
     )
-    parser.add_argument(
+    # Round-10 HIGH C-H2: --modules and --no-modules are mutually exclusive.
+    # Without the group argparse silently lets --no-modules win when both
+    # are passed; the group surfaces a clear error instead.
+    scripted_group = parser.add_mutually_exclusive_group()
+    scripted_group.add_argument(
         "--modules",
         type=str,
         default=None,
         help=f"Comma-separated modules; skips SetupScreen (default scripted: {','.join(DEFAULT_MODULES)})",
     )
-    parser.add_argument(
+    scripted_group.add_argument(
         "--no-modules",
         action="store_true",
         help="Pure chat mode (no modules); skips SetupScreen",

@@ -129,7 +129,6 @@ def install_hooks(agent, app: "App") -> None:
     """
     if getattr(agent, "_bridge_hooks_installed", False):
         return
-    agent._bridge_hooks_installed = True
 
     from llamagent.core.hooks import HookEvent
 
@@ -193,17 +192,28 @@ def install_hooks(agent, app: "App") -> None:
         except Exception as e:
             logger.debug("post ToolErrorMessage failed: %s", e)
 
-    agent.register_hook(HookEvent.PRE_TOOL_USE, _on_pre)
-    agent.register_hook(HookEvent.POST_TOOL_USE, _on_post)
-    agent.register_hook(HookEvent.TOOL_ERROR, _on_error)
-
-    # Store handler refs so uninstall_hooks can find + remove them on
-    # agent rebuild (round-8 Rev A M1 / plan v13 §12 defer entry).
+    # Atomic install (round-10 HIGH B-H1): record the handlers map
+    # BEFORE calling register_hook so uninstall_hooks can find any
+    # partially-registered handlers if a register_hook call raises.
+    # Only flip the idempotency flag after all three registrations
+    # succeed — otherwise a future install_hooks would skip while
+    # half-registered, leaking dead closures.
     agent._bridge_hook_handlers = {
         HookEvent.PRE_TOOL_USE: _on_pre,
         HookEvent.POST_TOOL_USE: _on_post,
         HookEvent.TOOL_ERROR: _on_error,
     }
+    try:
+        agent.register_hook(HookEvent.PRE_TOOL_USE, _on_pre)
+        agent.register_hook(HookEvent.POST_TOOL_USE, _on_post)
+        agent.register_hook(HookEvent.TOOL_ERROR, _on_error)
+    except Exception:
+        # Roll back any partial registration via uninstall_hooks
+        # (identity-matches by CallableHandler.func, so only the
+        # handlers we actually registered get removed).
+        uninstall_hooks(agent)
+        raise
+    agent._bridge_hooks_installed = True
 
 
 def uninstall_hooks(agent) -> None:

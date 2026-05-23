@@ -117,7 +117,11 @@ class LlamAgentTUI(App):
         """Callback after SetupScreen dismisses.
 
         ``None`` means the user cancelled — quit the App. Otherwise
-        build the LlamAgent and bind it via ``set_agent``.
+        build the LlamAgent and bind it via ``set_agent``. If build
+        raises, surface the error in ChatLog AND re-push SetupScreen
+        so the user can fix their selection and retry (round-10
+        HIGH A-H2). Without the re-push the user is dead-ended in an
+        empty ChatLog with no way to retry except killing the App.
         """
         if result is None:
             self.exit()
@@ -128,6 +132,8 @@ class LlamAgentTUI(App):
         except Exception as exc:
             log = self.query_one("#chat-log", ChatLog)
             log.append_error(f"setup failed: {type(exc).__name__}: {exc}")
+            from llamagent.interfaces.cli_tui.screens import SetupScreen
+            self.push_screen(SetupScreen(), self._on_setup_done)
             return
         self.set_agent(agent)
 
