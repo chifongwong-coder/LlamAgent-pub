@@ -58,6 +58,13 @@ memory:
 # safety:
 #   permission_level: 1
 
+# ==================== Tools ====================
+# tools:
+#   disabled:                         # Tool names to skip at agent.register_tool.
+#     - ask_user                      # Useful for suppressing tools that flood
+#     - web_search                    # weak local models with low-quality calls.
+#                                     # Applies to default + module-registered tools.
+
 # ==================== Skill ====================
 # skill:
 #   dirs: []                          # Additional skill directory paths
