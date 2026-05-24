@@ -75,6 +75,12 @@ def system_info() -> str:
     All fields come from stdlib (datetime / os / platform / socket) so this
     tool has no external dependencies and no side effects. Safe for
     every mode including continuous (no confirm modal, no user prompt).
+
+    Round-18 B-6: keep total output under ~1 KB. This tool bypasses the
+    framework's observation truncator (max_observation_tokens) — it's
+    sized to fit any budget today (~500 bytes for 12 small fields) but
+    don't add fat fields (full env dump, PATH, large hostname FQDN
+    arrays) without routing through the truncator first.
     """
     import datetime
     import os

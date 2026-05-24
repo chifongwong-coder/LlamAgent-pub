@@ -56,6 +56,12 @@ def _resolve_within(raw: str, *, base: str, allow_absolute: bool = True) -> str:
         ValueError: If absolute paths are disallowed and ``raw`` is
             absolute, or if the resolved path escapes ``base``.
     """
+    # Round-18 B-5: mirror _resolve_path's expanduser handling so a
+    # future caller that switches to this helper doesn't reintroduce
+    # the pre-d4ac7fe bug (``~/foo`` was treated as relative and joined
+    # to ``base`` instead of expanding to the user's home). isabs in
+    # Python checks the leading character, not POSIX shell meaning.
+    raw = os.path.expanduser(raw)
     if not allow_absolute and os.path.isabs(raw):
         raise ValueError(f"Absolute paths not allowed: {raw}")
     base_real = os.path.realpath(base)

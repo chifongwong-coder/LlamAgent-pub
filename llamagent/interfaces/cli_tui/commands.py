@@ -88,6 +88,12 @@ def cmd_help(app: "LlamAgentTUI", arg: str) -> None:
     lines = ["[bold cyan]Available Commands[/bold cyan]"]
     for cmd, desc in rows:
         lines.append(f"  [cyan]{cmd:<16}[/cyan] {markup_escape(desc)}")
+    # Round-18 C-8 — in-session pointers for the two things users most
+    # often need when something goes wrong but can't grep source for.
+    lines.append("")
+    lines.append("[bold cyan]Troubleshooting[/bold cyan]")
+    lines.append("  TUI crash → traceback at [cyan]~/.llamagent/cli_tui.log[/cyan]")
+    lines.append("  Suppress noisy tools → YAML [cyan]tools.disabled: [name1, ...][/cyan]")
     _mount_block(app, lines)
 
 

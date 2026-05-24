@@ -18,7 +18,7 @@ Q6 mitigation (revised after real-terminal Step-2 result FAIL):
   + stash one-line notice; we emit the notice to stderr AFTER `app.run()`
   returns, so it's a single ~70-byte plain line, not 2.4 KB of box-drawing.
 
-See `LlamAgentTUISpike._handle_exception` in app.py for the implementation.
+See `LlamAgentTUI._handle_exception` in app.py for the implementation.
 """
 import sys
 

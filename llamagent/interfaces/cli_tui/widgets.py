@@ -107,7 +107,12 @@ class LlamAgentInput(Input):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._history: list[str] = []
+        # Round-18 A-12: deque(maxlen=N) is the idiomatic bounded FIFO —
+        # appends are O(1) and overflow auto-evicts the oldest. Pre-fix
+        # the list.pop(0) was O(N) at every full-buffer submit (200
+        # entries → 200 shifts). Cursor arithmetic still works on deques.
+        from collections import deque
+        self._history: deque[str] = deque(maxlen=self.MAX_HISTORY)
         self._history_cursor: int | None = None
         self._scratch: str = ""
 
@@ -116,7 +121,7 @@ class LlamAgentInput(Input):
 
         - Empty / whitespace-only values are not recorded.
         - Consecutive duplicates are dropped.
-        - Capacity 200: oldest entry is evicted FIFO.
+        - Capacity 200: oldest entry is evicted FIFO (handled by deque maxlen).
         - Resets cursor / scratch so the next Up starts fresh.
         """
         value = value.strip()
@@ -130,8 +135,6 @@ class LlamAgentInput(Input):
         if self._history and self._history[-1] == value:
             return
         self._history.append(value)
-        if len(self._history) > self.MAX_HISTORY:
-            self._history.pop(0)
 
     def action_history_prev(self) -> None:
         """Up — move to an older history entry (or enter history mode)."""

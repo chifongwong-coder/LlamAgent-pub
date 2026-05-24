@@ -254,7 +254,9 @@ async def test_pilot_history_up_down(mock_agent):
         await pilot.pause()
 
         inp = app.query_one("#input", LlamAgentInput)
-        assert inp._history == ["/help", "/status"]
+        # Round-18 A-12: _history is now a deque(maxlen=200); compare
+        # as list for clean equality.
+        assert list(inp._history) == ["/help", "/status"]
         # Now Input is empty, scratch is ""
         # First Up: scratch saved (""), cursor = 1 → "/status"
         await pilot.press("up")
@@ -710,7 +712,7 @@ async def test_pilot_history_dedup_consecutive(mock_agent):
         await pilot.press("enter")
         await pilot.pause()
         inp = app.query_one("#input", LlamAgentInput)
-        assert inp._history == ["/help"], f"dedup failed: {inp._history}"
+        assert list(inp._history) == ["/help"], f"dedup failed: {list(inp._history)}"
 
 
 # ---------------------------------------------------------------------------

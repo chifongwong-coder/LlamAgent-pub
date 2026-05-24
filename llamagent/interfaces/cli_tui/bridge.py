@@ -30,11 +30,8 @@ Key invariants:
 """
 import itertools
 import logging
-import os
 import threading
 import time
-from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from rich.markup import escape as markup_escape
