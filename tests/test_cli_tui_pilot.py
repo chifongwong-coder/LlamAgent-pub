@@ -636,7 +636,13 @@ def test_handle_exception_writes_log_and_sets_return_code(tmp_path, monkeypatch,
     """C0 / C8 KPI #1: unhandled exceptions don't dump traceback to
     host scrollback — they go to ~/.llamagent/cli_tui.log + one-line
     notice. Verified statically by mocking Path.home() to a temp dir
-    and feeding a synthetic exception into _handle_exception."""
+    and feeding a synthetic exception into _handle_exception.
+
+    Round-18-5 MED-3: also asserts the crash path calls
+    agent.shutdown() so modules' on_shutdown fires before exit. Prior
+    to round-18-3 the crash path leaked agent resources (Chroma /
+    FTS / sandbox); without this assertion a future refactor could
+    silently re-introduce the leak."""
     from pathlib import Path
     from llamagent.interfaces.cli_tui.app import LlamAgentTUI
 
@@ -655,6 +661,70 @@ def test_handle_exception_writes_log_and_sets_return_code(tmp_path, monkeypatch,
     assert app._return_code == 1
     assert app._crash_notice
     assert str(log) in app._crash_notice
+    # Round-18-5 MED-3: shutdown lock
+    assert mock_agent.shutdown.called
+
+
+@pytest.mark.asyncio
+async def test_pilot_on_unmount_calls_agent_shutdown(mock_agent):
+    """Round-18-5 MED-3: when the App unmounts (clean /quit path),
+    LlamAgentTUI.on_unmount must call self.agent.shutdown() so module
+    on_shutdown fires (Chroma close, FTS flush, memory consolidation,
+    child reap). Pre-round-18-3 only _stop_continuous_runner ran in
+    on_unmount and the agent was leaked. Locks the new behavior in
+    against silent regression."""
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+
+    app = LlamAgentTUI(agent=mock_agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert not mock_agent.shutdown.called, "shutdown should not fire before unmount"
+    # `async with app.run_test()` exits → App unmount → on_unmount fires.
+    assert mock_agent.shutdown.called, "on_unmount must call agent.shutdown"
+
+
+def test_stop_continuous_runner_joins_thread(mock_agent):
+    """Round-18-5 MED-3: _stop_continuous_runner must signal the
+    runner stop event AND join the thread before returning, so a
+    caller that proceeds to agent.shutdown() doesn't race a still-
+    running runner thread against module on_shutdown closing
+    chromadb / FTS / sandbox handles.
+
+    Round-18-4 promoted the join into the helper. This test locks
+    that promotion in: it builds a real threading.Thread running a
+    stub runner that observes a stop flag, calls
+    _stop_continuous_runner, and asserts the thread is no longer
+    alive when the helper returns."""
+    import threading
+    import time
+    from unittest.mock import MagicMock
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+
+    app = LlamAgentTUI(agent=mock_agent)
+    stop_event = threading.Event()
+    started = threading.Event()
+
+    def _runner_loop():
+        started.set()
+        # Mimic ContinuousRunner.run — poll until stop event set.
+        while not stop_event.is_set():
+            time.sleep(0.01)
+
+    thread = threading.Thread(target=_runner_loop, name="test-runner", daemon=True)
+    thread.start()
+    started.wait(timeout=2.0)
+
+    fake_runner = MagicMock()
+    fake_runner.stop.side_effect = lambda: stop_event.set()
+    app._runner = fake_runner
+    app._runner_thread = thread
+
+    app._stop_continuous_runner()
+
+    fake_runner.stop.assert_called_once()
+    assert not thread.is_alive(), "_stop_continuous_runner must join the thread before returning"
+    assert app._runner is None
+    assert app._runner_thread is None
 
 
 # ---------------------------------------------------------------------------

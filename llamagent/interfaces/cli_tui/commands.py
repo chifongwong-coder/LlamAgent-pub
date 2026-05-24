@@ -364,6 +364,16 @@ def cmd_stop(app: "LlamAgentTUI", arg: str) -> None:
        /mode continuous starts from a clean slate.
     4. Flip agent.mode back to interactive + refresh StatusHeader.
     5. Hide MonitorPane so the now-stale state board doesn't linger.
+
+    Round-18-5 P7 note: the stop+join+clear sequence here intentionally
+    does NOT route through ``app._stop_continuous_runner()`` even
+    though the helper does the same three steps. cmd_stop reports
+    ``runner.stop()`` exceptions to the user via ChatLog error bubble
+    (UX requirement — the user typed /stop, they deserve to know if it
+    failed); the helper silently swallows for on_unmount / crash paths
+    where there's no user attention to direct an error to. Keeping the
+    two paths separate preserves the UX divergence without forcing the
+    helper to take an on_error callback.
     """
     agent = app.agent
     runner = getattr(app, "_runner", None)

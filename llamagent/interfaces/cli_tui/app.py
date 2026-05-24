@@ -16,9 +16,12 @@ Input focus (plan v11 §2.11.5): ChatLog declares can_focus=False so it
 doesn't steal focus from Input; on_mount uses call_after_refresh to
 defer Input.focus() until all widget mount cycles complete.
 """
+import logging
 import traceback
 from datetime import datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -265,8 +268,7 @@ class LlamAgentTUI(App):
             try:
                 self.agent.shutdown()
             except Exception as exc:
-                import logging
-                logging.getLogger(__name__).warning(
+                logger.warning(
                     "old agent shutdown raised during set_agent swap: %s", exc
                 )
 
@@ -426,28 +428,13 @@ class LlamAgentTUI(App):
             self.agent.set_mode("continuous")
         except Exception as exc:
             # set_mode shouldn't fail at this point, but be defensive —
-            # if it does we tear down the runner we just started. Mirror
-            # cmd_stop: stop → join(10s) → drop refs. Without the join
-            # the thread keeps polling triggers and posting to ChatLog
-            # after we've cleared the references, and a follow-up
-            # `/mode continuous` would spawn a second ghost runner.
+            # if it does we tear down the runner we just started.
+            # Round-18-5 P7: route through _stop_continuous_runner so
+            # any future tweak to stop/join semantics applies here too.
             log.append_error(
                 f"set_mode(continuous) failed: {type(exc).__name__}: {exc}"
             )
-            try:
-                runner.stop()
-            except Exception:
-                pass
-            if thread.is_alive():
-                thread.join(timeout=10.0)
-                if thread.is_alive():
-                    import logging
-                    logging.getLogger(__name__).warning(
-                        "continuous runner thread did not stop within 10s "
-                        "after set_mode rollback; relying on daemon-thread reap"
-                    )
-            self._runner = None
-            self._runner_thread = None
+            self._stop_continuous_runner()
             return
 
         self.refresh_status_header()
@@ -751,8 +738,7 @@ class LlamAgentTUI(App):
         if thread is not None and thread.is_alive():
             thread.join(timeout=10.0)
             if thread.is_alive():
-                import logging
-                logging.getLogger(__name__).warning(
+                logger.warning(
                     "continuous runner thread did not stop within 10s; "
                     "proceeding with teardown — daemon-thread reap will "
                     "catch it on process exit"
@@ -777,8 +763,7 @@ class LlamAgentTUI(App):
             try:
                 self.agent.shutdown()
             except Exception as exc:
-                import logging
-                logging.getLogger(__name__).warning(
+                logger.warning(
                     "agent.shutdown() raised in on_unmount: %s", exc
                 )
 
@@ -820,8 +805,7 @@ class LlamAgentTUI(App):
             try:
                 self.agent.shutdown()
             except Exception as exc:
-                import logging
-                logging.getLogger(__name__).warning(
+                logger.warning(
                     "agent.shutdown() raised in _handle_exception: %s", exc
                 )
         self._crash_notice = f"[llamagent TUI crash — full traceback in {log_path}]"
