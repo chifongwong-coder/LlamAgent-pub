@@ -3188,7 +3188,19 @@ class LlamAgent:
         shuts down the lazily-created ``_tool_timeout_pool`` so long-running
         hosts that spawn many short-lived agents don't accumulate executor
         worker threads + queued ``Future`` references.
+
+        Round-18-3: idempotent. Multiple interface layers (cli_tui's
+        on_unmount + main.py's try/finally + a future /reload's
+        set_agent swap) can each call shutdown defensively. Without the
+        guard, double-call re-emits SESSION_END, double-closes Chroma
+        clients / FTS connections / executors — chromadb in particular
+        raises or corrupts internal state. The guard is cheap and only
+        adds 2 lines.
         """
+        if getattr(self, "_shutdown_done", False):
+            return
+        self._shutdown_done = True
+
         self.emit_hook(HookEvent.SESSION_END, {"modules": list(self.modules.keys())})
 
         for mod in reversed(list(self.modules.values())):

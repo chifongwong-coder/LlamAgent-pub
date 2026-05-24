@@ -129,15 +129,21 @@ def install_verbose(agent, target: "Widget") -> None:
         """True if ``client.<name>`` is a real attribute (instance dict
         or somewhere in the class MRO), not just a ``__getattr__`` proxy.
 
-        Round-18 A-6: install_verbose now wraps only the outermost
-        layer (``agent.llm``); this guard prevents installing a wrapper
-        over a ``__getattr__`` proxy attribute on that single layer
-        (which would never be invoked because the real owner's
-        descriptor takes precedence on attribute lookup). MRO walk (not
-        just direct class dict) is required because subclasses
-        inheriting a method from a base — e.g. ResilientLLM inheriting
-        ``chat_stream`` from LLMClient — should be treated as real
-        owners.
+        Round-18 A-6 + round-18-3 docstring fix: install_verbose now
+        wraps only the outermost layer (``agent.llm``). The guard is
+        defensive against a future config where the outermost LLM
+        exposes ``chat`` / ``chat_stream`` only through ``__getattr__``
+        forwarding (e.g., a tracing decorator that doesn't redefine
+        these names). Wrapping such an attribute via instance-dict
+        assignment IS technically possible — the assignment shadows
+        ``__getattr__`` lookup on subsequent reads — but the wrapped
+        callable then proxies through to the inner client whose
+        original method has not been touched, so internal flows that
+        bypass the outer attribute (e.g., inner methods invoking each
+        other directly) skip our scan. Defaulting to "skip if not a
+        real owner" matches the production stack today: ResilientLLM /
+        LoggingLLM define ``chat`` directly and inherit ``chat_stream``
+        from LLMClient — both pass the MRO walk.
         """
         if name in vars(client):
             return True

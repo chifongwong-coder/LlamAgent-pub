@@ -919,11 +919,17 @@ async def test_pilot_inject_reply_renders_standalone_bubble(mock_agent):
         from rich.markdown import Markdown
 
         def _bubble_text(child) -> str:
+            # Round-18-3 LOW: ``Markdown.markup`` is an undocumented Rich
+            # attribute (stable across 12.x..14.x today). Add ``str()``
+            # fallback so a rename in a future Rich keeps the test
+            # informative rather than silently returning "" for every
+            # bubble (which would surface as a confusing "bubble not
+            # found" rather than a clear extractor-broke message).
             r = getattr(child, "renderable", None)
             if isinstance(r, Group):
                 for sub in getattr(r, "renderables", []):
                     if isinstance(sub, Markdown):
-                        return sub.markup
+                        return getattr(sub, "markup", None) or str(sub)
             return ""
 
         bubble_texts = [_bubble_text(c) for c in log.children]

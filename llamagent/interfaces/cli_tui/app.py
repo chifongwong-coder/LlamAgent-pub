@@ -247,15 +247,27 @@ class LlamAgentTUI(App):
         )
 
         if self.agent is not None and self.agent is not agent:
-            # Round-18 B-4: if a runner was running on the old agent,
-            # stop it before swapping — otherwise the old runner thread
-            # keeps polling triggers and calling old_agent.chat after
-            # we've moved on, and a new runner started on the fresh
-            # agent coexists with the orphan one. Today's only caller
-            # (_on_setup_done retry) fires before any runner exists, so
-            # this is defensive for future rebuild paths (/reload etc.).
+            # Round-18 B-4 + B-4-2 (third-pass MED): if a runner was
+            # running on the old agent, stop it AND join the thread
+            # before tearing down the agent. _stop_continuous_runner
+            # sets the stop flag but doesn't join — a mid-call
+            # agent.chat in the runner thread could otherwise race
+            # against on_shutdown closing chromadb / FTS / sandbox
+            # subprocess. Mirror cmd_stop's join pattern. Today's only
+            # caller (_on_setup_done retry) fires before any runner
+            # exists, so this is defensive for future rebuild paths
+            # (/reload etc.).
+            old_thread = getattr(self, "_runner_thread", None)
             if getattr(self, "_runner", None) is not None:
                 self._stop_continuous_runner()
+            if old_thread is not None and old_thread.is_alive():
+                old_thread.join(timeout=10.0)
+                if old_thread.is_alive():
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "old runner thread did not stop within 10s of "
+                        "set_agent swap; proceeding with shutdown anyway"
+                    )
             uninstall_hooks(self.agent)
             uninstall_handlers(self.agent)
             uninstall_verbose(self.agent)
@@ -751,6 +763,21 @@ class LlamAgentTUI(App):
         # the process exit reaps anything still running; this is just
         # the polite stop signal.
         self._stop_continuous_runner()
+        # Round-18-3: shut the agent down so module on_shutdown fires
+        # (Chroma close, FTS flush, memory consolidation, child reap).
+        # The agent is shared with main.py / cli_tui.run when scripted,
+        # but LlamAgent.shutdown is idempotent (round-18-3 fix) so the
+        # outer try/finally in those launchers is a harmless second
+        # call. The interactive path's agent is owned exclusively by
+        # the App, so this is the only place it gets shut down.
+        if self.agent is not None:
+            try:
+                self.agent.shutdown()
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "agent.shutdown() raised in on_unmount: %s", exc
+                )
 
     def _handle_exception(self, error: Exception) -> None:
         """Override Textual's default unhandled-exception handler.
@@ -780,6 +807,14 @@ class LlamAgentTUI(App):
         # Runner cleanup before exit so the stop signal reaches the thread
         # even if on_unmount doesn't fire.
         self._stop_continuous_runner()
+        # Round-18-3: on the crash path Textual may skip on_unmount, so
+        # also try to shutdown the agent here. Idempotent — safe even
+        # if on_unmount does fire and shuts down too.
+        if self.agent is not None:
+            try:
+                self.agent.shutdown()
+            except Exception:
+                pass
         self._crash_notice = f"[llamagent TUI crash — full traceback in {log_path}]"
         self._return_code = 1
         self.exit()
