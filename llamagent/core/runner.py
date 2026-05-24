@@ -320,21 +320,31 @@ class TimerTrigger(Trigger):
     Usage:
         TimerTrigger(interval=60, message="check system health")
         # Every 60 seconds, poll() returns "check system health"
+
+        TimerTrigger(interval=60, message="check", fire_immediately=True)
+        # First poll fires immediately; subsequent fires every 60s.
     """
 
     def __init__(self, interval: float, message: str, *,
-                 interruptible: bool = True, on_interrupt: str = "discard"):
+                 interruptible: bool = True, on_interrupt: str = "discard",
+                 fire_immediately: bool = False):
         self.interval = interval
         self.message = message
         self.interruptible = interruptible
         self.on_interrupt = on_interrupt
-        self._last_fire: float | None = None  # None = first poll initializes
+        self.fire_immediately = fire_immediately
+        # State: None means first poll hasn't happened yet. With
+        # fire_immediately=True the first poll fires AND initializes;
+        # without it (default) the first poll only initializes.
+        self._last_fire: float | None = None
 
     def poll(self) -> str | None:
         import time
         now = time.time()
         if self._last_fire is None:
             self._last_fire = now
+            if self.fire_immediately:
+                return self.message
             return None
         if now - self._last_fire >= self.interval:
             self._last_fire = now

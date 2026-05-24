@@ -344,6 +344,7 @@ class LlamAgentTUI(App):
                 trigger = TimerTrigger(
                     interval=float(result["interval"]),
                     message=str(result["message"]),
+                    fire_immediately=bool(result.get("fire_immediately", False)),
                 )
             elif kind == "file":
                 template = result.get("message_template") or ""

@@ -18,7 +18,7 @@ from rich.markup import escape as markup_escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, RadioButton, RadioSet, Static
+from textual.widgets import Button, Checkbox, Input, Label, RadioButton, RadioSet, Static
 
 
 # Preset name → list of module names (None means "load all modules").
@@ -520,6 +520,14 @@ class ContinuousSetupModal(ModalScreen[dict | None]):
                 id="cs-message-template",
             )
 
+            # Timer-only option (silently ignored when File is selected,
+            # since File triggers fire on directory change, not on poll).
+            yield Checkbox(
+                "Timer: run first task immediately (don't wait for the first interval)",
+                value=False,
+                id="cs-fire-immediately",
+            )
+
             yield Static("", id="cs-error")
 
             with Horizontal(id="cs-buttons"):
@@ -579,7 +587,13 @@ class ContinuousSetupModal(ModalScreen[dict | None]):
             if not message_raw:
                 self._set_error("Message required for timer trigger.")
                 return
-            self.dismiss({"type": "timer", "interval": interval, "message": message_raw})
+            fire_immediately = self.query_one("#cs-fire-immediately", Checkbox).value
+            self.dismiss({
+                "type": "timer",
+                "interval": interval,
+                "message": message_raw,
+                "fire_immediately": bool(fire_immediately),
+            })
             return
 
         # File trigger
