@@ -1388,15 +1388,22 @@ class LlamAgent:
                 than the parent agent that registered them via closure).
                 See docs/llamagent-v3.6-plan.md for the full migration.
         """
-        # v3.10+: per-tool disable list — silently skip registration if
-        # the tool is in ``config.disabled_tools``. The tool stays out
-        # of ``self._tools`` entirely, so it never appears in the schema
+        # v3.10+: per-tool disable list — skip registration if the tool
+        # is in ``config.disabled_tools``. The tool stays out of
+        # ``self._tools`` entirely, so it never appears in the schema
         # given to the LLM (the model can't call what it can't see).
         # Used e.g. to suppress ``ask_user`` in continuous mode where no
         # interactive user is watching to answer.
+        #
+        # Round-18 B-2: log at WARNING (not INFO) so users see this when
+        # their config takes effect. The same code path handles builtin
+        # tools (ask_user / web_search) and module-registered tools
+        # (spawn_child / send_message etc.) — a YAML
+        # `tools.disabled: [spawn_child]` looks benign but silently
+        # breaks ChildAgentModule. Loud log makes the consequence visible.
         disabled = getattr(self.config, "disabled_tools", None) or []
         if name in disabled:
-            logger.info("Tool registration skipped (in disabled_tools): %s", name)
+            logger.warning("Tool '%s' skipped via config.disabled_tools", name)
             return
 
         # Infer parameter definition from function signature when empty.

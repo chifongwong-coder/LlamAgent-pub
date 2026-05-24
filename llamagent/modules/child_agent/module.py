@@ -1227,6 +1227,13 @@ class ChildAgentModule(Module):
         # infrastructure config, not role-coupled.
         config.module_prompts = {}
         config.agent_prompts = {}
+        # Round-18 B-1: disabled_tools is a list — shallow copy shares the
+        # reference. Child inherits the value (copy of the list, not the
+        # reference) so a runtime mutation on parent.config.disabled_tools
+        # doesn't silently re-shape the child's tool surface. Matches the
+        # spirit of the prompt-slot reset above (child config is a
+        # snapshot, not a live view).
+        config.disabled_tools = list(parent.config.disabled_tools)
         if is_continuous:
             # Force clean construction; set_mode below establishes the continuous scope.
             config.authorization_mode = "interactive"

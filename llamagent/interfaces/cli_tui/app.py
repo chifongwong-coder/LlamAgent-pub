@@ -247,9 +247,30 @@ class LlamAgentTUI(App):
         )
 
         if self.agent is not None and self.agent is not agent:
+            # Round-18 B-4: if a runner was running on the old agent,
+            # stop it before swapping — otherwise the old runner thread
+            # keeps polling triggers and calling old_agent.chat after
+            # we've moved on, and a new runner started on the fresh
+            # agent coexists with the orphan one. Today's only caller
+            # (_on_setup_done retry) fires before any runner exists, so
+            # this is defensive for future rebuild paths (/reload etc.).
+            if getattr(self, "_runner", None) is not None:
+                self._stop_continuous_runner()
             uninstall_hooks(self.agent)
             uninstall_handlers(self.agent)
             uninstall_verbose(self.agent)
+            # Shutdown old agent so its modules release resources
+            # (Chroma client, FTS connections, child agents, sandbox
+            # subprocesses, runner threads, etc.). Best-effort: if
+            # shutdown raises we still proceed to swap so the user
+            # isn't dead-ended.
+            try:
+                self.agent.shutdown()
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "old agent shutdown raised during set_agent swap: %s", exc
+                )
 
         self.agent = agent
         self.refresh_status_header()
@@ -356,6 +377,17 @@ class LlamAgentTUI(App):
                     try:
                         chat_target.post_message(ChatChunkMessage(text=str(entry.output or "")))
                         chat_target.post_message(TurnCompleteMessage(success=True, error=None))
+                    except Exception:
+                        pass
+                elif entry.status == "interrupted":
+                    # Round-18 B-3: interrupted = user-caused inject
+                    # preemption, not a runtime error. Render as a status
+                    # line so the user sees "their inject took over" rather
+                    # than a red error bubble for a normal flow.
+                    try:
+                        chat_target.post_message(
+                            StatusMessage(message=f"trigger {entry.trigger_type} preempted by inject")
+                        )
                     except Exception:
                         pass
                 else:
