@@ -77,6 +77,7 @@ class ContinuousRunner:
         poll_interval: float = 1.0,
         task_timeout: float = 0,
         on_timeout: str | Callable = "abort",
+        on_task_complete: Callable | None = None,
     ):
         """
         Args:
@@ -85,12 +86,22 @@ class ContinuousRunner:
             poll_interval: Seconds between poll cycles (default 1.0)
             task_timeout: Max seconds per task; 0 = no timeout (default 0)
             on_timeout: "abort" to call agent.abort(), or a callable for custom behavior
+            on_task_complete: Optional callback ``(entry: TaskLogEntry) -> None``
+                fired after every trigger-driven task finishes (success or
+                error). Runs on the runner thread; the callback is responsible
+                for any thread-safety it needs. Designed so an external UI
+                (the cli_tui MonitorPane / ChatLog wiring) can stream
+                trigger-fire events without the runner having to know about
+                a message bus. Inject-driven tasks do NOT fire this callback
+                — the caller of ``inject()`` already gets the response
+                synchronously via its own ``event.wait()``.
         """
         self.agent = agent
         self.triggers = triggers
         self.poll_interval = poll_interval
         self.task_timeout = task_timeout
         self.on_timeout = on_timeout
+        self.on_task_complete = on_task_complete
         self._stopped = threading.Event()
         self.task_log: list[TaskLogEntry] = []
         # Priority scheduling queues (v2.9.5)
@@ -258,6 +269,17 @@ class ContinuousRunner:
                 self._retry_queue.put((task_input, None, [None]))
 
         self.task_log.append(entry)
+
+        # Fire the external observer callback (cli_tui MonitorPane streaming,
+        # custom monitors, test harnesses, ...). Runs on the runner thread;
+        # caller is responsible for thread-safety. Wrapped in try/except so
+        # a buggy callback can't kill the runner thread mid-loop — exception
+        # is logged with full stack and the runner keeps going.
+        if self.on_task_complete is not None:
+            try:
+                self.on_task_complete(entry)
+            except Exception:
+                logger.exception("on_task_complete callback raised")
 
     def stop(self) -> None:
         """Signal the runner to stop. Wake up all waiting inject callers."""

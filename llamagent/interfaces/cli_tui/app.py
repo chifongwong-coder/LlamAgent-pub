@@ -354,7 +354,59 @@ class LlamAgentTUI(App):
             else:
                 raise ValueError(f"Unknown trigger type: {kind!r}")
 
-            runner = ContinuousRunner(self.agent, [trigger])
+            # C7 V2 — capture ChatLog reference here on the main thread so
+            # the callback (runner thread) can post messages without
+            # touching the widget tree directly. ``post_message`` is
+            # thread-safe per Textual docs; ``query_one`` is not, hence the
+            # capture upfront.
+            chat_target = log
+
+            def _on_trigger_fire(entry) -> None:
+                """Runner-thread callback: stream a trigger fire to ChatLog.
+
+                Posts three messages so the ChatLog renders the same way
+                user injects do (status header → assistant bubble → reflow
+                trigger):
+                - StatusMessage: dim header ``⚡ TimerTrigger: <input>``
+                - ChatChunkMessage / ErrorMessage: agent output / error
+                - TurnCompleteMessage: triggers finalize_assistant_bubble
+                  so any Markdown in the output reflows.
+
+                Every post is wrapped in try/except — the App may have
+                torn down between the runner firing and the message
+                reaching the queue. Silent drop is acceptable; the
+                framework runner's task_log already captured the entry.
+                """
+                from llamagent.interfaces.cli_tui.messages import (
+                    ChatChunkMessage,
+                    ErrorMessage,
+                    StatusMessage,
+                    TurnCompleteMessage,
+                )
+                header = f"⚡ {entry.trigger_type}: {entry.input}"
+                try:
+                    chat_target.post_message(StatusMessage(message=header))
+                except Exception:
+                    return
+                if entry.status == "completed":
+                    try:
+                        chat_target.post_message(ChatChunkMessage(text=str(entry.output or "")))
+                        chat_target.post_message(TurnCompleteMessage(success=True, error=None))
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        chat_target.post_message(
+                            ErrorMessage(message=f"trigger {entry.trigger_type} {entry.status}: {entry.error or entry.output}")
+                        )
+                    except Exception:
+                        pass
+
+            runner = ContinuousRunner(
+                self.agent,
+                [trigger],
+                on_task_complete=_on_trigger_fire,
+            )
 
             import threading
             thread = threading.Thread(
