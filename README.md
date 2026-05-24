@@ -115,26 +115,42 @@ cp llamagent.yaml.example llamagent.yaml
 ### Run
 
 ```bash
-python -m llamagent                          # Interactive CLI (smart defaults)
-python -m llamagent --modules tools,retrieval # Specific modules only
+python -m llamagent                          # Interactive CLI — Textual TUI by default
+python -m llamagent --modules tools,retrieval # Specific modules only (skips TUI SetupScreen)
 python -m llamagent --mode web               # Gradio Web UI
 python -m llamagent --mode api               # FastAPI server (REST + SSE + WS)
-python -m llamagent ask "question" --format json  # Single question, JSON output
+python -m llamagent.interfaces.cli ask "question" --format json  # One-shot query, scriptable
 ```
 
 The interactive CLI is a [Textual](https://textual.textualize.io/) TUI by
 default — alt-screen chat surface, slash commands (`/help`, `/tools`,
 `/mode`, `/verbose`, `/monitor`, …), a right-side diagnostic pane for
 thinking and tool detail, a continuous-mode monitor pane for trigger
-status, and Tab / Up / Down for completion + history. The TUI route fires
-when stdin and stdout are both a real terminal; piped input, dumb
-terminals, the `ask` subcommand, and `--legacy` all keep using the
-original line-mode CLI:
+status, and Tab / Up / Down for completion + history. Both
+`python -m llamagent` and `python -m llamagent.interfaces.cli` share the
+same routing: TUI when stdin/stdout are a real terminal and Textual is
+installed; otherwise automatic fallback to the line-mode legacy CLI.
+Common fallback triggers:
 
 ```bash
-python -m llamagent.interfaces.cli            # TUI by default
-python -m llamagent.interfaces.cli --legacy   # Old line-mode CLI
-echo "q" | python -m llamagent.interfaces.cli # Non-TTY → auto legacy
+python -m llamagent.interfaces.cli --legacy   # Force the line-mode CLI
+python -m llamagent.interfaces.cli ask "..."  # One-shot question (always legacy)
+echo "q" | python -m llamagent                # Non-TTY → auto legacy
+# Textual not installed → auto legacy + stderr install hint
+```
+
+**Troubleshooting**: if the TUI crashes, the full traceback is written to
+`~/.llamagent/cli_tui.log` (the alt-screen invariant means only a one-line
+crash notice prints in the host terminal). Tail that file for diagnostics,
+or pass `--legacy` to bypass the TUI if it's reproducibly broken.
+
+To suppress tools that flood weak models (e.g. `ask_user` on a 2B local
+model), add to `llamagent.yaml`:
+
+```yaml
+tools:
+  disabled:
+    - ask_user
 ```
 
 ### Use as a library

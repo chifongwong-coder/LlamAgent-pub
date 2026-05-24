@@ -7,13 +7,19 @@ The "master switch" of the program — decides based on command-line arguments:
 3. Configuration parameters (persona, port, etc.)
 
 Usage:
-    python -m llamagent                                    # Default CLI interactive chat
+    python -m llamagent                                    # Textual TUI when terminal supports it, else legacy CLI
     python -m llamagent --mode web                         # Launch Web UI
     python -m llamagent --mode api                         # Launch HTTP API server
-    python -m llamagent --modules tools,retrieval,memory    # Specify modules to load
+    python -m llamagent --modules tools,retrieval,memory    # Specify modules to load (skips TUI SetupScreen)
     python -m llamagent --no-modules                       # Load no modules (pure chat mode)
-    python -m llamagent --persona CodeLlama                # Specify persona
+    python -m llamagent --persona CodeLlama                # Specify persona (skips TUI SetupScreen)
     python -m llamagent --port 9000                        # Specify port (Web/API)
+
+CLI routing: ``python -m llamagent`` and ``python -m llamagent.interfaces.cli``
+share the same TUI-vs-legacy dispatch. Piped stdin, dumb terminals, missing
+Textual install, or ``ask`` subcommand all auto-fall-back to legacy. For
+``--legacy`` / ``ask`` / subcommand variants use the explicit
+``python -m llamagent.interfaces.cli`` form.
 
 print() usage: this file is the program entry point. All print() calls
 are intentional stdout for banner / error diagnostics / fatal-exit
@@ -167,17 +173,20 @@ def main():
     """Main entry point: parse command-line arguments and launch the corresponding interface."""
     parser = argparse.ArgumentParser(
         prog="llamagent",
-        description="LlamAgent — Modular AI Agent Framework",
+        description="LlamAgent — Modular AI Agent Framework (Textual TUI by default for CLI)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python -m llamagent                                  CLI interactive chat
+  python -m llamagent                                  TUI by default (legacy fallback when non-TTY / no Textual)
   python -m llamagent --mode web                       Launch Web UI
   python -m llamagent --mode api                       Launch HTTP API
   python -m llamagent --modules tools,retrieval         Load only tools and retrieval
   python -m llamagent --no-modules                     Pure chat mode
   python -m llamagent --persona CodeLlama              Use a specific persona
   python -m llamagent --mode web --port 9000           Specify port
+
+For ``--legacy``, ``ask`` subcommand, or fine-grained CLI flag control:
+  python -m llamagent.interfaces.cli --help
         """,
     )
 
@@ -225,14 +234,49 @@ Examples:
 
     # Launch the corresponding interface based on mode
     if args.mode == "cli":
-        # main.py is a launcher — it shouldn't know that the CLI is
-        # implemented as a ``LlamAgentCLI`` class or that ``chat_mode()``
-        # is its loop entry. Use the ``run_cli`` function the same way
-        # we use ``launch_web_ui`` / ``launch_api_server`` below; the
-        # CLI module owns chat-loop + shutdown.
-        from llamagent.interfaces.cli import run_cli
-        agent = create_agent(module_names, persona_name=args.persona)
-        run_cli(agent)
+        # `python -m llamagent` and `python -m llamagent.interfaces.cli`
+        # share the same routing rules — TUI by default when stdin/stdout
+        # are a real terminal and Textual is installed; legacy CLI for
+        # scripted (--modules / --no-modules), piped stdin, or missing
+        # textual. main.py owns --persona / --config so we forward those
+        # by pre-building the agent when scripted; otherwise let the
+        # TUI's SetupScreen ask interactively.
+        from llamagent.interfaces.cli import _route, run_cli
+
+        router_args = argparse.Namespace(
+            legacy=False,
+            modules=args.modules,
+            no_modules=args.no_modules,
+            command=None,
+            question=None,
+            output_format="text",
+        )
+        scripted = bool(args.modules or args.no_modules or args.persona)
+
+        if _route(router_args) == "tui":
+            try:
+                from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+            except ImportError as exc:
+                sys.stderr.write(
+                    f"[Note] Textual not available ({exc}); falling back to legacy CLI.\n"
+                    f"        Install the TUI with:  pip install textual\n"
+                )
+                agent = create_agent(module_names, persona_name=args.persona)
+                run_cli(agent)
+                return
+            if scripted:
+                agent = create_agent(module_names, persona_name=args.persona)
+                app = LlamAgentTUI(agent=agent)
+            else:
+                app = LlamAgentTUI()
+            app.run()
+            notice = getattr(app, "_crash_notice", None)
+            if notice:
+                sys.stderr.write(notice + "\n")
+            sys.exit(getattr(app, "_return_code", 0) or 0)
+        else:
+            agent = create_agent(module_names, persona_name=args.persona)
+            run_cli(agent)
 
     elif args.mode == "web":
         from llamagent.interfaces.web_ui import create_web_ui, launch_web_ui
