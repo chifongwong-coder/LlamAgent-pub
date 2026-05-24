@@ -155,7 +155,22 @@ def main():
     # accepts a pre-parsed Namespace (TUI ignores ``--legacy``;
     # honours ``--modules`` / ``--no-modules`` as scripted-startup
     # hints).
-    from llamagent.interfaces.cli_tui import run as tui_run
+    #
+    # ImportError fallback: if Textual isn't installed in this Python
+    # environment (e.g. user picked the wrong interpreter; default
+    # python instead of llamagent_env), running into the TUI would
+    # crash with a confusing module-not-found traceback. Fall back to
+    # the legacy CLI with a one-line install hint instead — the
+    # legacy path needs only rich which is already a hard dep.
+    try:
+        from llamagent.interfaces.cli_tui import run as tui_run
+    except ImportError as exc:
+        sys.stderr.write(
+            f"[Note] Textual not available ({exc}); falling back to legacy CLI.\n"
+            f"        Install the TUI with:  pip install textual\n"
+        )
+        legacy_main(args)
+        return
     tui_run(args)
 
 
