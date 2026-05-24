@@ -199,14 +199,11 @@ class SlashCommandSuggester(SuggestFromList):
 
 
 class StatusHeader(Static):
-    """Top status bar: model | persona | mode | modules | child counter.
+    """Top status bar: model | persona | mode | modules.
 
     Replaces Textual's default Header (which is decorative-only). Reactive
     attributes update the rendered text via Textual's reactive system —
     e.g., switching mode via ``status_header.mode = "task"``.
-
-    Fixed-width slot for child counter (right-justified) avoids the L2
-    Header-jitter risk flagged in round-6 review.
     """
 
     DEFAULT_CSS = """
@@ -223,29 +220,18 @@ class StatusHeader(Static):
     persona: reactive[str] = reactive("default")
     mode: reactive[str] = reactive("interactive")
     modules_count: reactive[int] = reactive(0)
-    child_running: reactive[int] = reactive(0)
-    child_failed: reactive[int] = reactive(0)
 
     def render(self) -> str:
         # NOTE (C1.e MED A-3): returns a markup string; relies on Static
         # `markup=True` default for [bold]/[cyan]/etc. to render. If a
         # future Textual changes the default, switch to returning
         # `Text.from_markup(...)` instead.
-        left = (
+        return (
             f"model: {self.model}  |  "
             f"persona: {self.persona}  |  "
             f"mode: {self.mode}  |  "
             f"modules: {self.modules_count}"
         )
-        # Plan v11 §2.4.3 — three-state counter
-        if self.child_running == 0 and self.child_failed == 0:
-            child = "🤖 idle"
-        elif self.child_failed == 0:
-            child = f"🤖 {self.child_running} running"
-        else:
-            child = f"🤖 {self.child_running} running, {self.child_failed} failed"
-        # Fixed 18-char right slot (L2 Header-jitter mitigation)
-        return f"{left}  {child:>18}"
 
 
 # ---------------------------------------------------------------------------

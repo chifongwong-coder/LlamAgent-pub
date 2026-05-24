@@ -97,24 +97,6 @@ class ErrorMessage(Message):
         self.message = message
 
 
-class ChildSpawnMessage(Message):
-    """Pushed from monkey-patched ``task_board.create`` (plan §2.4.3)."""
-
-    def __init__(self, task_id: str) -> None:
-        super().__init__()
-        self.task_id = task_id
-
-
-class ChildCompleteMessage(Message):
-    """Pushed from monkey-patched ``task_board.update`` when status enters
-    a terminal state {completed, failed, cancelled} (plan §2.4.3)."""
-
-    def __init__(self, task_id: str, status: str) -> None:
-        super().__init__()
-        self.task_id = task_id
-        self.status = status
-
-
 class TurnCompleteMessage(Message):
     """C2 — posted by ``bridge.run_turn`` when ``agent.chat_stream``
     finishes (success or exception). Triggers ChatLog finalize so the

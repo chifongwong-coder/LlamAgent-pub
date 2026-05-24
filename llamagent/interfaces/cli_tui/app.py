@@ -142,43 +142,6 @@ class LlamAgentTUI(App):
         )
         yield Footer()
 
-    def action_toggle_verbose(self) -> None:
-        """F3 toggle for VerbosePane (plan §2.3 / §C5).
-
-        Toggles ``.display`` rather than mounting/unmounting so the
-        widget retains its message history across hide/show cycles.
-        Default is hidden (DEFAULT_CSS sets display:none).
-
-        Round-12 M3: guard against modal screens — when SetupScreen /
-        ConfirmModal / AskUserModal is active, F3 would still flip the
-        VerbosePane below the modal overlay, leaving the user with a
-        surprising visible-state change after dismiss. Only act on the
-        default screen.
-
-        Round-14 user-test follow-up: wrap the body in try/except so any
-        unexpected error (Textual layout edge case, reactive surprise)
-        renders as a chat-log error bubble instead of crashing the App
-        through ``_handle_exception``. The original Ctrl+V crash report
-        turned out to be a terminal/key collision (Ctrl+V is termios
-        VLNEXT) — we changed the binding to F3 — but the defensive
-        try/except is still worth keeping for any future regression.
-        """
-        try:
-            if len(self.screen_stack) > 1:
-                return
-            try:
-                pane = self.query_one("#verbose-pane", VerbosePane)
-            except Exception:
-                return
-            pane.display = not pane.display
-        except Exception as e:
-            try:
-                self.query_one("#chat-log", ChatLog).append_error(
-                    f"toggle_verbose failed: {type(e).__name__}: {e}"
-                )
-            except Exception:
-                pass
-
     def on_mount(self) -> None:
         self.refresh_status_header()
 
