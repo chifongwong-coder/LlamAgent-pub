@@ -539,6 +539,15 @@ class LlamAgentTUI(App):
     # ------------------------------------------------------------------
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        # Modal screens (SetupScreen / ConfirmModal / AskUserModal /
+        # ContinuousSetupModal) own their own Input widgets and have their
+        # own on_input_submitted handlers. When those handlers forget to
+        # ``event.stop()``, the event bubbles up to the App and we try to
+        # query `#chat-log` against the active (modal) screen — NoMatches.
+        # Guard at the App level too so a missing ``event.stop()`` in a
+        # modal can't crash the App.
+        if len(self.screen_stack) > 1:
+            return
         text = event.value.strip()
         if not text:
             return

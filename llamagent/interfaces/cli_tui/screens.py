@@ -143,7 +143,14 @@ class SetupScreen(ModalScreen[dict | None]):
         """Round-10 HIGH A-MED-1: Enter inside an Input triggers Build
         instead of dying as an unhandled event. RadioSet doesn't emit
         Input.Submitted, so the radios stay keyboard-toggleable without
-        accidentally submitting the form."""
+        accidentally submitting the form.
+
+        2026-05-24 crash fix: ``event.stop()`` so the Input.Submitted
+        doesn't bubble up to ``App.on_input_submitted``, which then
+        tries to ``query_one("#chat-log")`` against the active (modal)
+        screen and crashes with NoMatches.
+        """
+        event.stop()
         self._do_build()
 
     def _do_build(self) -> None:
@@ -388,6 +395,9 @@ class AskUserModal(ModalScreen[Optional[str]]):
         self.dismiss(None)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        # Stop bubbling to prevent App.on_input_submitted picking it up
+        # against the modal-active screen (2026-05-24 crash fix).
+        event.stop()
         self._do_submit()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -532,7 +542,13 @@ class ContinuousSetupModal(ModalScreen[dict | None]):
             self._do_build()
 
     def on_input_submitted(self, event: "Input.Submitted") -> None:
-        """Enter inside any Input triggers Build (mirrors SetupScreen)."""
+        """Enter inside any Input triggers Build (mirrors SetupScreen).
+
+        ``event.stop()`` keeps the submission from bubbling to
+        ``App.on_input_submitted`` (2026-05-24 crash fix — same root
+        cause as the SetupScreen/AskUserModal handlers above).
+        """
+        event.stop()
         self._do_build()
 
     def _set_error(self, msg: str) -> None:
