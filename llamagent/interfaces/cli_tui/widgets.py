@@ -348,13 +348,22 @@ class ChatLog(VerticalScroll):
             "success": "[green]✓[/]",
             "error": "[red]✗[/]",
         }.get(status, "")
-        self._mount_capped(Static(f"{marker} tool: [cyan]{name}[/cyan]"))
+        # Round-18 A-5: escape ``name`` — tool names are static today
+        # but plug-in tools could legitimately contain ``[`` in the name.
+        self._mount_capped(Static(f"{marker} tool: [cyan]{markup_escape(name)}[/cyan]"))
 
     def append_status(self, message: str) -> None:
-        self._mount_capped(Static(f"[dim]{message}[/dim]"))
+        # Round-18 A-5: ``message`` is callsite-supplied text (LLM
+        # output, exception repr, file paths) — any ``[`` would parse
+        # as Rich markup and mis-style or raise MarkupError. Mirror
+        # append_user's escape pattern.
+        self._mount_capped(Static(f"[dim]{markup_escape(message)}[/dim]"))
 
     def append_error(self, message: str) -> None:
-        self._mount_capped(Static(f"[bold red]Error:[/bold red] {message}"))
+        # Round-18 A-5: see append_status — error messages are exactly
+        # the case where unescaped ``[`` is most likely (exception
+        # repr, type-with-arguments output).
+        self._mount_capped(Static(f"[bold red]Error:[/bold red] {markup_escape(message)}"))
 
     # ----- ring buffer eviction -----
 
