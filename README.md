@@ -122,6 +122,21 @@ python -m llamagent --mode api               # FastAPI server (REST + SSE + WS)
 python -m llamagent ask "question" --format json  # Single question, JSON output
 ```
 
+The interactive CLI is a [Textual](https://textual.textualize.io/) TUI by
+default — alt-screen chat surface, slash commands (`/help`, `/tools`,
+`/mode`, `/verbose`, `/monitor`, …), a right-side diagnostic pane for
+thinking and tool detail, a continuous-mode monitor pane for trigger
+status, and Tab / Up / Down for completion + history. The TUI route fires
+when stdin and stdout are both a real terminal; piped input, dumb
+terminals, the `ask` subcommand, and `--legacy` all keep using the
+original line-mode CLI:
+
+```bash
+python -m llamagent.interfaces.cli            # TUI by default
+python -m llamagent.interfaces.cli --legacy   # Old line-mode CLI
+echo "q" | python -m llamagent.interfaces.cli # Non-TTY → auto legacy
+```
+
 ### Use as a library
 
 ```python
