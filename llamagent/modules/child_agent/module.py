@@ -1232,8 +1232,10 @@ class ChildAgentModule(Module):
         # reference) so a runtime mutation on parent.config.disabled_tools
         # doesn't silently re-shape the child's tool surface. Matches the
         # spirit of the prompt-slot reset above (child config is a
-        # snapshot, not a live view).
-        config.disabled_tools = list(parent.config.disabled_tools)
+        # snapshot, not a live view). getattr fallback mirrors the read
+        # in agent.register_tool — handles legacy test fixtures that
+        # build a Config via __new__ without setting every attribute.
+        config.disabled_tools = list(getattr(parent.config, "disabled_tools", None) or [])
         if is_continuous:
             # Force clean construction; set_mode below establishes the continuous scope.
             config.authorization_mode = "interactive"
