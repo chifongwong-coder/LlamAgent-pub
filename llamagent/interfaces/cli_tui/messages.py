@@ -106,3 +106,14 @@ class TurnCompleteMessage(Message):
         super().__init__()
         self.success = success
         self.error = error
+
+
+class InjectReplyMessage(Message):
+    """C7 — full (non-streaming) assistant reply produced by
+    ``ContinuousRunner.inject(immediate=False)``. Renders as a
+    self-contained bubble so two concurrent injects can't share
+    ChatLog's streaming accumulator state."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self.text = text

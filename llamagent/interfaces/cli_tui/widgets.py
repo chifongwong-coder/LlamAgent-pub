@@ -20,6 +20,7 @@ from textual.widgets import Input, Static
 from llamagent.interfaces.cli_tui.messages import (
     ChatChunkMessage,
     ErrorMessage,
+    InjectReplyMessage,
     StatusMessage,
     ThinkingMessage,
     ToolEndMessage,
@@ -446,6 +447,24 @@ class ChatLog(VerticalScroll):
         self.finalize_assistant_bubble()
         if not message.success and message.error:
             self.append_error(f"agent error: {message.error}")
+
+    def on_inject_reply_message(self, message: InjectReplyMessage) -> None:
+        """C7 — full inject reply from ContinuousRunner. Mounted as a
+        standalone bubble so concurrent injects can't share streaming
+        state (round-18 A-4 — two injects landing within the same
+        message-pump tick would otherwise concat into one accumulator)."""
+        # Finalize any streaming bubble in flight so this reply doesn't
+        # piggyback on its tag / state.
+        if self._current_assistant is not None and self._accum:
+            self.finalize_assistant_bubble()
+        static = Static(
+            Group(
+                Text.from_markup("[bold cyan]Assistant:[/bold cyan]"),
+                Markdown(message.text),
+            )
+        )
+        self._mount_capped(static)
+        self.scroll_end(animate=False)
 
 
 # ---------------------------------------------------------------------------

@@ -396,7 +396,11 @@ class LlamAgentTUI(App):
             self.agent.set_mode("continuous")
         except Exception as exc:
             # set_mode shouldn't fail at this point, but be defensive —
-            # if it does we tear down the runner we just started.
+            # if it does we tear down the runner we just started. Mirror
+            # cmd_stop: stop → join(10s) → drop refs. Without the join
+            # the thread keeps polling triggers and posting to ChatLog
+            # after we've cleared the references, and a follow-up
+            # `/mode continuous` would spawn a second ghost runner.
             log.append_error(
                 f"set_mode(continuous) failed: {type(exc).__name__}: {exc}"
             )
@@ -404,6 +408,14 @@ class LlamAgentTUI(App):
                 runner.stop()
             except Exception:
                 pass
+            if thread.is_alive():
+                thread.join(timeout=10.0)
+                if thread.is_alive():
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "continuous runner thread did not stop within 10s "
+                        "after set_mode rollback; relying on daemon-thread reap"
+                    )
             self._runner = None
             self._runner_thread = None
             return
@@ -613,10 +625,10 @@ class LlamAgentTUI(App):
         Plan §4 C7 (f): `runner.inject(immediate=False)` blocks the calling
         thread until the runner pops the item off its queue and processes
         it, so we run it in a Textual worker. ``group="continuous-inject"``
-        keeps this separate from C2's `group="agent-turn"` so an injection
-        in-flight isn't cancelled when the user submits another message
-        (exclusive=False — the runner serializes queue items, no extra
-        coordination needed here).
+        with ``exclusive=False`` — the runner serializes queue items, so
+        concurrent injects are safe; each reply lands in its own bubble
+        via InjectReplyMessage so they can't share streaming accumulator
+        state (round-18 A-4).
         """
         agent = self.agent
         runner = self._runner
@@ -626,9 +638,8 @@ class LlamAgentTUI(App):
 
         from llamagent.interfaces.cli_tui.messages import (
             ErrorMessage,
-            TurnCompleteMessage,
+            InjectReplyMessage,
         )
-        # ChatChunkMessage is already imported at module top; reuse it.
 
         def _do_inject() -> None:
             try:
@@ -640,12 +651,10 @@ class LlamAgentTUI(App):
                 except Exception:
                     pass
                 return
-            # The runner returns a single completed assistant reply (not a
-            # stream), so post it as one chunk + TurnComplete to drive
-            # the same Markdown reflow path C2 uses for chat_stream.
+            # Self-contained bubble so two concurrent injects don't
+            # share ChatLog's _current_assistant / _accum state.
             try:
-                target.post_message(ChatChunkMessage(text=str(response or "")))
-                target.post_message(TurnCompleteMessage(success=True, error=None))
+                target.post_message(InjectReplyMessage(text=str(response or "")))
             except Exception:
                 pass  # App might be gone — drop is acceptable.
 
