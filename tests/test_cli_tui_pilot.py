@@ -374,3 +374,466 @@ def test_route_no_tty_picks_legacy():
         assert cli_mod._route(_NS()) == "legacy"
     finally:
         cli_mod._terminal_supports_tui = orig
+
+
+# ---------------------------------------------------------------------------
+# C6 — Each legacy-ported slash command renders something to ChatLog
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pilot_slash_status_renders(mock_agent):
+    """C6 /status: produces a block containing model + mode."""
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+    from llamagent.interfaces.cli_tui.widgets import ChatLog
+
+    app = LlamAgentTUI(agent=mock_agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press(*"/status")
+        await pilot.press("enter")
+        await pilot.pause()
+        log = app.query_one("#chat-log", ChatLog)
+        joined = "\n".join(str(getattr(c, "renderable", c)) for c in log.children)
+        assert "mock/llama" in joined  # model name from fixture
+        assert "interactive" in joined  # mode from fixture
+
+
+@pytest.mark.asyncio
+async def test_pilot_slash_modules_no_modules(mock_agent):
+    """C6 /modules with empty modules dict: prints 'No modules ... pure chat'."""
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+    from llamagent.interfaces.cli_tui.widgets import ChatLog
+
+    app = LlamAgentTUI(agent=mock_agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press(*"/modules")
+        await pilot.press("enter")
+        await pilot.pause()
+        log = app.query_one("#chat-log", ChatLog)
+        joined = "\n".join(str(getattr(c, "renderable", c)) for c in log.children)
+        assert "No modules" in joined or "pure chat mode" in joined
+
+
+@pytest.mark.asyncio
+async def test_pilot_slash_tools_groups_by_tier(mock_agent_with_tools):
+    """C6 /tools with fixture-registered tools: renders both tools grouped
+    by tier (default / admin)."""
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+    from llamagent.interfaces.cli_tui.widgets import ChatLog
+
+    app = LlamAgentTUI(agent=mock_agent_with_tools)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press(*"/tools")
+        await pilot.press("enter")
+        await pilot.pause()
+        log = app.query_one("#chat-log", ChatLog)
+        joined = "\n".join(str(getattr(c, "renderable", c)) for c in log.children)
+        assert "read_files" in joined
+        assert "shell_run" in joined
+        assert "default" in joined  # tier header
+        assert "admin" in joined
+
+
+@pytest.mark.asyncio
+async def test_pilot_slash_clear_resets_chatlog(mock_agent):
+    """C6 /clear: empties chat-log widgets + clears agent.clear_conversation."""
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+    from llamagent.interfaces.cli_tui.widgets import ChatLog
+
+    app = LlamAgentTUI(agent=mock_agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Add some content first
+        await pilot.press(*"/help")
+        await pilot.press("enter")
+        await pilot.pause()
+        log = app.query_one("#chat-log", ChatLog)
+        assert len(log.children) >= 1  # at least the help table
+
+        # /clear
+        await pilot.press(*"/clear")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        # After clear the only remaining child should be the "Conversation cleared"
+        # status line; help table is gone.
+        bodies = [str(getattr(c, "renderable", c)) for c in log.children]
+        joined = "\n".join(bodies)
+        assert "Conversation cleared" in joined, f"missing status: {joined[:200]}"
+        # Available Commands table from /help should have been wiped
+        assert "Available Commands" not in joined
+        # Agent's clear_conversation invoked
+        assert mock_agent.clear_conversation.called
+
+
+@pytest.mark.asyncio
+async def test_pilot_slash_abort_calls_agent_abort(mock_agent):
+    """C6 /abort: invokes agent.abort()."""
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+
+    app = LlamAgentTUI(agent=mock_agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press(*"/abort")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert mock_agent.abort.called
+
+
+@pytest.mark.asyncio
+async def test_pilot_slash_mode_invalid_keeps_mode(mock_agent):
+    """C6 /mode bogus: agent.mode unchanged + error rendered."""
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+    from llamagent.interfaces.cli_tui.widgets import ChatLog
+
+    app = LlamAgentTUI(agent=mock_agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # mode starts interactive (fixture default)
+        assert mock_agent.mode == "interactive"
+        await pilot.press(*"/mode bogus")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert mock_agent.mode == "interactive", "mode must not change"
+        log = app.query_one("#chat-log", ChatLog)
+        joined = "\n".join(str(getattr(c, "renderable", c)) for c in log.children)
+        assert "Invalid mode" in joined
+
+
+@pytest.mark.asyncio
+async def test_pilot_slash_mode_task_switches(mock_agent):
+    """C6 /mode task: agent.set_mode called + agent.mode flips."""
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+
+    app = LlamAgentTUI(agent=mock_agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press(*"/mode task")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert mock_agent.mode == "task"
+        mock_agent.set_mode.assert_called_with("task")
+
+
+# ---------------------------------------------------------------------------
+# C6 — Footer BINDINGS shortcuts route through dispatch_slash
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pilot_ctrl_l_runs_clear(mock_agent):
+    """C6 BINDINGS: Ctrl+L invokes the same path as /clear."""
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+    from llamagent.interfaces.cli_tui.widgets import ChatLog
+
+    app = LlamAgentTUI(agent=mock_agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Add a help table so we can verify clear wipes it
+        await pilot.press(*"/help")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press("ctrl+l")
+        await pilot.pause()
+        log = app.query_one("#chat-log", ChatLog)
+        joined = "\n".join(str(getattr(c, "renderable", c)) for c in log.children)
+        assert "Conversation cleared" in joined
+        assert "Available Commands" not in joined
+
+
+@pytest.mark.asyncio
+async def test_pilot_ctrl_g_runs_abort(mock_agent):
+    """C6 BINDINGS: Ctrl+G invokes /abort path."""
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+
+    app = LlamAgentTUI(agent=mock_agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert mock_agent.abort.called
+
+
+# ---------------------------------------------------------------------------
+# C7 — /mode continuous opens setup modal; cancel keeps interactive mode
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pilot_mode_continuous_pushes_setup_modal(mock_agent):
+    """C7: /mode continuous pushes ContinuousSetupModal but does NOT
+    set_mode yet — the modal's dismiss callback is responsible."""
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+    from llamagent.interfaces.cli_tui.screens import ContinuousSetupModal
+
+    app = LlamAgentTUI(agent=mock_agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press(*"/mode continuous")
+        await pilot.press("enter")
+        await pilot.pause()
+        # Modal screen on top of stack
+        assert len(app.screen_stack) >= 2
+        assert isinstance(app.screen_stack[-1], ContinuousSetupModal)
+        # Agent mode untouched until modal commits
+        assert mock_agent.mode == "interactive"
+
+
+@pytest.mark.asyncio
+async def test_pilot_continuous_setup_cancel_leaves_mode(mock_agent):
+    """C7: cancelling ContinuousSetupModal via Esc keeps interactive mode."""
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+
+    app = LlamAgentTUI(agent=mock_agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press(*"/mode continuous")
+        await pilot.press("enter")
+        await pilot.pause()
+        # Modal pushed; press Esc to cancel
+        await pilot.press("escape")
+        await pilot.pause()
+        # Back to single-screen stack
+        assert len(app.screen_stack) == 1
+        # Mode unchanged, runner not built
+        assert mock_agent.mode == "interactive"
+        assert getattr(app, "_runner", None) is None
+
+
+# ---------------------------------------------------------------------------
+# C7 — /stop without active runner reports "Not in continuous mode"
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pilot_stop_without_runner(mock_agent):
+    """C7 /stop guard: no runner → friendly message, no crash."""
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+    from llamagent.interfaces.cli_tui.widgets import ChatLog
+
+    app = LlamAgentTUI(agent=mock_agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press(*"/stop")
+        await pilot.press("enter")
+        await pilot.pause()
+        log = app.query_one("#chat-log", ChatLog)
+        joined = "\n".join(str(getattr(c, "renderable", c)) for c in log.children)
+        assert "Not in continuous mode" in joined
+
+
+# ---------------------------------------------------------------------------
+# C8 — App._handle_exception override writes to log file (not stderr)
+# ---------------------------------------------------------------------------
+
+
+def test_handle_exception_writes_log_and_sets_return_code(tmp_path, monkeypatch, mock_agent):
+    """C0 / C8 KPI #1: unhandled exceptions don't dump traceback to
+    host scrollback — they go to ~/.llamagent/cli_tui.log + one-line
+    notice. Verified statically by mocking Path.home() to a temp dir
+    and feeding a synthetic exception into _handle_exception."""
+    from pathlib import Path
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    app = LlamAgentTUI(agent=mock_agent)
+    # Avoid calling .exit() which would tear down the un-mounted App
+    monkeypatch.setattr(app, "exit", lambda: None)
+    try:
+        raise RuntimeError("synthetic crash for testing")
+    except RuntimeError as exc:
+        app._handle_exception(exc)
+    log = tmp_path / ".llamagent" / "cli_tui.log"
+    assert log.exists()
+    contents = log.read_text()
+    assert "synthetic crash for testing" in contents
+    assert app._return_code == 1
+    assert app._crash_notice
+    assert str(log) in app._crash_notice
+
+
+# ---------------------------------------------------------------------------
+# Modal Enter event bubble fix (2026-05-24 user crash report)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pilot_modal_input_submit_does_not_crash_app(mock_agent):
+    """2026-05-24 crash fix: Enter inside a modal Input must NOT bubble
+    up to App.on_input_submitted and crash with NoMatches('#chat-log').
+
+    We trigger this by opening ContinuousSetupModal and pressing Enter
+    inside one of its inputs — the modal should consume the event via
+    its own on_input_submitted (which calls event.stop() now)."""
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+
+    app = LlamAgentTUI(agent=mock_agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Push the continuous setup modal
+        await pilot.press(*"/mode continuous")
+        await pilot.press("enter")
+        await pilot.pause()
+        # Press Enter inside the modal — if the bubble fix is missing
+        # this crashes with NoMatches('#chat-log'). After fix, modal's
+        # _do_build runs with empty inputs → renders #cs-error.
+        await pilot.press("enter")
+        await pilot.pause()
+        # App still alive (no crash), still in interactive mode (validation
+        # failed, modal didn't dismiss).
+        assert mock_agent.mode == "interactive"
+        # Modal still on screen (Build failed validation, no dismiss)
+        assert len(app.screen_stack) >= 2
+
+
+# ---------------------------------------------------------------------------
+# History dedup
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pilot_history_dedup_consecutive(mock_agent):
+    """C6.1: submitting the same command twice records only one entry."""
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+    from llamagent.interfaces.cli_tui.widgets import LlamAgentInput
+
+    app = LlamAgentTUI(agent=mock_agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press(*"/help")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press(*"/help")
+        await pilot.press("enter")
+        await pilot.pause()
+        inp = app.query_one("#input", LlamAgentInput)
+        assert inp._history == ["/help"], f"dedup failed: {inp._history}"
+
+
+# ---------------------------------------------------------------------------
+# C5 — VerbosePane Thinking message handler routes to the pane
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pilot_thinking_message_routes_to_verbose_pane(mock_agent):
+    """C5 routing: posting a ThinkingMessage directly to VerbosePane mounts
+    a Static carrying the source + content. Verifies the handler chain
+    independently of verbose.py's chain-walker patching."""
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+    from llamagent.interfaces.cli_tui.messages import ThinkingMessage
+    from llamagent.interfaces.cli_tui.widgets import VerbosePane
+
+    app = LlamAgentTUI(agent=mock_agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        pane = app.query_one("#verbose-pane", VerbosePane)
+        pane.post_message(
+            ThinkingMessage(source="reasoning_content", content="step 1: hello", dedup_hash="x")
+        )
+        await pilot.pause()
+        bodies = [str(getattr(c, "renderable", c)) for c in pane.children]
+        joined = "\n".join(bodies)
+        assert "step 1: hello" in joined
+        assert "reasoning_content" in joined
+
+
+# ---------------------------------------------------------------------------
+# C2 / C5 — ToolStartMessage routes to BOTH ChatLog (folded card) and VerbosePane
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pilot_tool_message_fans_out_to_both(mock_agent):
+    """C5 round-12 B1: install_hooks(target, verbose_target) wiring fans
+    ToolStartMessage out to both ChatLog (folded card) and VerbosePane
+    (full args repr). Verify by posting to both widgets directly so the
+    test doesn't depend on a real ReAct turn."""
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+    from llamagent.interfaces.cli_tui.messages import ToolStartMessage
+    from llamagent.interfaces.cli_tui.widgets import ChatLog, VerbosePane
+
+    app = LlamAgentTUI(agent=mock_agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        log = app.query_one("#chat-log", ChatLog)
+        pane = app.query_one("#verbose-pane", VerbosePane)
+        msg_to_log = ToolStartMessage(name="read_files", args={"paths": ["a.py"]}, call_id="t1-0")
+        msg_to_pane = ToolStartMessage(name="read_files", args={"paths": ["a.py"]}, call_id="t1-0")
+        log.post_message(msg_to_log)
+        pane.post_message(msg_to_pane)
+        await pilot.pause()
+        log_text = "\n".join(str(getattr(c, "renderable", c)) for c in log.children)
+        pane_text = "\n".join(str(getattr(c, "renderable", c)) for c in pane.children)
+        assert "read_files" in log_text
+        assert "read_files" in pane_text
+        # ChatLog renders as folded card with "tool:" prefix
+        assert "tool:" in log_text
+        # VerbosePane renders full args repr
+        assert "args:" in pane_text
+
+
+# ---------------------------------------------------------------------------
+# C7 — MonitorPane renders idle text when no runner attached
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pilot_monitor_pane_idle_render(mock_agent):
+    """C7 V1+: MonitorPane shows "Continuous mode not active" until a
+    runner is attached. We don't attach a runner here so the idle path
+    is the one that renders."""
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+    from llamagent.interfaces.cli_tui.widgets import MonitorPane
+
+    app = LlamAgentTUI(agent=mock_agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        pane = app.query_one("#monitor-pane", MonitorPane)
+        # Open monitor so it actually renders
+        await pilot.press(*"/monitor on")
+        await pilot.press("enter")
+        # set_interval fires every 1.0s — wait long enough to catch one tick
+        await pilot.pause(1.2)
+        body = "\n".join(str(getattr(c, "renderable", c)) for c in pane.children)
+        assert "Continuous mode not active" in body
+
+
+# ---------------------------------------------------------------------------
+# C8 — ImportError fallback path: confirm cli.main calls legacy_main when
+# cli_tui import fails
+# ---------------------------------------------------------------------------
+
+
+def test_cli_main_falls_back_when_cli_tui_import_fails(monkeypatch, capsys, mock_agent):
+    """C8 round-16 fallback: simulate ``from cli_tui import run`` raising
+    ImportError → main() prints a stderr notice and calls legacy_main."""
+    from llamagent.interfaces import cli as cli_mod
+
+    legacy_called = []
+
+    def fake_legacy_main(args):
+        legacy_called.append(args)
+
+    monkeypatch.setattr(cli_mod, "legacy_main", fake_legacy_main)
+    monkeypatch.setattr(cli_mod, "_terminal_supports_tui", lambda: True)
+
+    # Replace the cli_tui submodule in sys.modules so the deferred
+    # ``from llamagent.interfaces.cli_tui import run`` raises.
+    import sys
+
+    class _Broken:
+        def __getattr__(self, name):
+            raise ImportError(f"simulated ({name})")
+
+    monkeypatch.setitem(sys.modules, "llamagent.interfaces.cli_tui", _Broken())
+
+    # Call main() with default args → routes to TUI → ImportError → fallback
+    monkeypatch.setattr(sys, "argv", ["llamagent-cli"])
+    cli_mod.main()
+    captured = capsys.readouterr()
+    assert "Textual not available" in captured.err
+    assert legacy_called  # legacy_main was invoked
