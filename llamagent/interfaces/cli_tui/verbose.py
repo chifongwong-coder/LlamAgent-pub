@@ -224,19 +224,19 @@ def install_verbose(agent, target: "Widget") -> None:
         client.chat_stream = _traced_chat_stream
         client._verbose_chat_stream_wrapped = True
 
-    def _walk(client, visited: set, depth: int) -> None:
-        if id(client) in visited or depth > 4:
-            return
-        visited.add(id(client))
-        _wrap_chat(client)
-        _wrap_chat_stream(client)
-        # Recurse through LoggingLLM wrappers + ResilientLLMClient fallbacks.
-        for attr in ("_wrapped", "_fallback_llm"):
-            inner = getattr(client, attr, None)
-            if inner is not None:
-                _walk(inner, visited, depth + 1)
-
-    _walk(agent.llm, set(), 0)
+    # Round-18 A-6: wrap only the outermost LLM layer. The previous
+    # recursion descended through `_wrapped` (LoggingLLM → ResilientLLM)
+    # and wrapped every layer with a real `chat` / `chat_stream` method.
+    # That meant every LLM call paid for two _scan_response_message
+    # passes — LoggingLLM.chat → original LoggingLLM.chat → which
+    # internally calls self._wrapped.chat (= wrapped ResilientLLM.chat
+    # → second scan) → returns up to outer wrapper → first scan. The
+    # per-turn dedup hashes hid the duplicate emit but the substring
+    # scans + thinking_blocks iteration ran twice for every chunk.
+    # The outermost wrapper sees the same final response — wrapping
+    # inner layers adds CPU cost for zero new information.
+    _wrap_chat(agent.llm)
+    _wrap_chat_stream(agent.llm)
 
     # Round-12 H3: clear the dedup set at every turn boundary so a turn
     # that repeats the same short reasoning as a previous turn isn't

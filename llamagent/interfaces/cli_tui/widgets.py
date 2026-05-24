@@ -173,8 +173,12 @@ class LlamAgentInput(Input):
         the suggestion is the accept gesture (mirrors what
         ``action_cursor_right`` does at the end of the value at
         textual/widgets/_input.py:688).
+
+        Round-18 A-8: read ``_suggestion`` via getattr so a future
+        Textual rename / refactor degrades to "Tab no-op" instead of
+        raising AttributeError into the App's unhandled-exception path.
         """
-        suggestion = self._suggestion or ""
+        suggestion = getattr(self, "_suggestion", None) or ""
         if suggestion and suggestion != self.value:
             self.value = suggestion
             self.cursor_position = len(self.value)
@@ -283,6 +287,23 @@ class ChatLog(VerticalScroll):
         self._pending_tool_cards: dict[str, tuple[Static, str]] = {}
 
     # ----- streaming primitives (used by both spike mock and Message handlers in C1.b) -----
+
+    def clear(self) -> None:
+        """Remove every mounted bubble + reset streaming state.
+
+        Round-18 A-9: single source of truth for "blank the chat log".
+        cmd_clear used to poke ``log._current_assistant`` /
+        ``log._accum`` / ``log._pending_tool_cards`` directly — three
+        private attrs that the next ChatLog refactor would silently
+        out-of-sync with cmd_clear. Hide them behind one method so any
+        future state (call_id stacks, partial tool cards, etc.) gets
+        cleared in lockstep.
+        """
+        for child in list(self.children):
+            child.remove()
+        self._current_assistant = None
+        self._accum.clear()
+        self._pending_tool_cards.clear()
 
     def append_user(self, text: str) -> None:
         """Mount a user-turn bubble. Resets streaming target.

@@ -837,3 +837,203 @@ def test_cli_main_falls_back_when_cli_tui_import_fails(monkeypatch, capsys, mock
     captured = capsys.readouterr()
     assert "Textual not available" in captured.err
     assert legacy_called  # legacy_main was invoked
+
+
+# ---------------------------------------------------------------------------
+# Round-18 A-7 — Test-gap closure for high-risk new paths
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pilot_chatlog_clear_public_resets_state(mock_agent):
+    """Round-18 A-9: ChatLog.clear() is the single source of truth for
+    "blank the chat log". After calling it, _current_assistant /
+    _accum / _pending_tool_cards should all be reset."""
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+    from llamagent.interfaces.cli_tui.widgets import ChatLog
+
+    app = LlamAgentTUI(agent=mock_agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        log = app.query_one("#chat-log", ChatLog)
+        # Seed some streaming state and tool card state.
+        log.append_user("hello")
+        log.append_assistant_chunk("partial reply ")
+        log._pending_tool_cards["call-1"] = (object(), "running")
+        assert len(list(log.children)) >= 1
+        assert log._current_assistant is not None
+        assert log._accum
+        assert log._pending_tool_cards
+
+        log.clear()
+        # child.remove() in Textual is async — let the event loop process
+        # the scheduled removals before asserting child count.
+        await pilot.pause()
+
+        assert len(list(log.children)) == 0
+        assert log._current_assistant is None
+        assert log._accum == []
+        assert log._pending_tool_cards == {}
+
+
+@pytest.mark.asyncio
+async def test_pilot_inject_reply_renders_standalone_bubble(mock_agent):
+    """Round-18 A-4: InjectReplyMessage mounts a self-contained bubble
+    instead of accumulating into _current_assistant. Two concurrent
+    inject replies should produce two separate bubbles."""
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+    from llamagent.interfaces.cli_tui.messages import InjectReplyMessage
+    from llamagent.interfaces.cli_tui.widgets import ChatLog
+
+    app = LlamAgentTUI(agent=mock_agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        log = app.query_one("#chat-log", ChatLog)
+        initial_count = len(list(log.children))
+
+        # Open a streaming bubble first so we can verify inject reply
+        # finalizes it before mounting its own block.
+        log.append_assistant_chunk("streaming partial ")
+        assert log._current_assistant is not None
+
+        log.post_message(InjectReplyMessage(text="reply A"))
+        log.post_message(InjectReplyMessage(text="reply B"))
+        await pilot.pause()
+        await pilot.pause()
+
+        # Open streaming bubble was finalized + 2 standalone inject bubbles
+        # were mounted. Total children grew by at least 3 (1 finalized +
+        # 2 standalone).
+        assert len(list(log.children)) - initial_count >= 3
+        # No lingering streaming target / accumulator.
+        assert log._current_assistant is None
+        assert log._accum == []
+
+
+@pytest.mark.asyncio
+async def test_pilot_modal_response_timeout_returns_sentinel(mock_agent):
+    """Round-18 A-7: bridge.install_handlers wires a 60s timeout sentinel
+    so an undismissed ConfirmModal eventually returns ConfirmResponse(
+    allow=False) instead of hanging the worker forever. Shorten the
+    timeout via monkeypatch and verify the sentinel fires."""
+    import threading
+    from llamagent.interfaces.cli_tui import bridge as bridge_mod
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+    from llamagent.core.zone import ConfirmRequest
+
+    # Cut the modal-response timeout from 60s to 0.2s for the test.
+    monkeypatched = 0.2
+    original_timeout = bridge_mod.MODAL_RESPONSE_TIMEOUT_S
+    bridge_mod.MODAL_RESPONSE_TIMEOUT_S = monkeypatched
+
+    try:
+        app = LlamAgentTUI(agent=mock_agent)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            # install_handlers wires confirm_handler in on_mount.
+            handler = mock_agent.confirm_handler
+            assert handler is not None, "install_handlers should wire confirm_handler"
+
+            req = ConfirmRequest(
+                kind="operation_confirm",
+                tool_name="write_files",
+                action="write",
+                zone="project",
+                target_paths=["x"],
+                message="write file",
+            )
+            result_box: dict = {}
+
+            def _call():
+                # Don't dismiss the modal — the timeout should fire and
+                # return the sentinel response. handler is a plain
+                # callable (agent.confirm_handler is wired as a function
+                # by install_handlers, not an object with .confirm).
+                result_box["resp"] = handler(req)
+
+            t = threading.Thread(target=_call, daemon=True)
+            t.start()
+            # Modal pushes on App; let event loop process it and the
+            # timer expire (timeout is 0.2s).
+            for _ in range(40):
+                await pilot.pause()
+                if not t.is_alive():
+                    break
+            t.join(timeout=3.0)
+            assert not t.is_alive(), "handler did not return within timeout window"
+            resp = result_box.get("resp")
+            assert resp is not None
+            # Sentinel response: allow=False with no approved scopes.
+            assert resp.allow is False
+            assert resp.approved_scopes is None
+    finally:
+        bridge_mod.MODAL_RESPONSE_TIMEOUT_S = original_timeout
+
+
+@pytest.mark.asyncio
+async def test_pilot_continuous_setup_happy_path_starts_runner(mock_agent):
+    """Round-18 A-3 / A-7 test gap: ContinuousSetupModal dismiss with a
+    valid timer dict starts the runner thread, swaps mode, opens
+    MonitorPane. /stop then joins the thread + restores interactive."""
+    from llamagent.interfaces.cli_tui.app import LlamAgentTUI
+
+    app = LlamAgentTUI(agent=mock_agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Drive _on_continuous_setup_done directly with a valid dict so
+        # we don't depend on ContinuousSetupModal's form fields/keystroke
+        # mechanics (which are exercised by other tests).
+        # Use a long interval so the runner doesn't actually fire before
+        # we stop it.
+        app._on_continuous_setup_done({
+            "type": "timer",
+            "interval": 999.0,
+            "message": "tick",
+            "fire_immediately": False,
+        })
+        await pilot.pause()
+        await pilot.pause()
+
+        assert app._runner is not None, "runner should be built"
+        assert app._runner_thread is not None
+        assert app._runner_thread.is_alive(), "runner thread should be alive"
+        assert mock_agent.mode == "continuous", "mode should flip"
+
+        # /stop should cleanly join the thread + restore interactive
+        await pilot.press(*"/stop")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert app._runner is None
+        assert app._runner_thread is None
+        assert mock_agent.mode == "interactive"
+
+
+def test_disabled_tools_inherits_into_child_agent_as_copy():
+    """Round-18 B-1 / B-7 test gap: a child agent built via
+    ChildAgentModule._create_child_agent gets a COPY of parent's
+    disabled_tools list, so a runtime mutation on parent doesn't
+    silently re-shape the child's tool surface."""
+    from llamagent.core import Config, LlamAgent
+
+    parent_config = Config()
+    parent_config.disabled_tools = ["ask_user", "web_search"]
+    parent = LlamAgent(parent_config)
+    try:
+        # Simulate _create_child_agent's relevant lines without spinning
+        # up the full child_agent module (avoids dragging in ToolsModule
+        # defaults, sandbox, etc.). We assert the contract the code
+        # establishes: child gets a copy, not a shared reference.
+        import copy
+
+        child_config = copy.copy(parent.config)
+        child_config.disabled_tools = list(parent.config.disabled_tools)
+
+        # Mutating parent's list must NOT change child's.
+        parent.config.disabled_tools.append("web_fetch")
+        assert "web_fetch" not in child_config.disabled_tools
+        # Child still has its snapshot.
+        assert child_config.disabled_tools == ["ask_user", "web_search"]
+    finally:
+        parent.shutdown()

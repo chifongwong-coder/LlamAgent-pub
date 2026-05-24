@@ -188,14 +188,10 @@ def cmd_clear(app: "LlamAgentTUI", arg: str) -> None:
         except Exception as e:
             _error(app, f"clear_conversation() failed: {type(e).__name__}: {e}")
             return
-    # Agent state is now clean (or there was no agent) — drop every
-    # mounted bubble and reset the streaming target / accumulator so
-    # the next chunk opens a fresh Assistant bubble.
-    for child in list(log.children):
-        child.remove()
-    log._current_assistant = None
-    log._accum.clear()
-    log._pending_tool_cards.clear()
+    # Round-18 A-9: ChatLog owns its own private state; route through
+    # the public clear() so future ChatLog refactors don't desync with
+    # us.
+    log.clear()
     _info(app, "Conversation cleared")
 
 
