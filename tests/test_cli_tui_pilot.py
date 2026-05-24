@@ -910,6 +910,28 @@ async def test_pilot_inject_reply_renders_standalone_bubble(mock_agent):
         # No lingering streaming target / accumulator.
         assert log._current_assistant is None
         assert log._accum == []
+        # Round-18-2: assert the two inject replies actually rendered in
+        # the right order and aren't merged into one bubble. Each bubble
+        # is a Static wrapping a rich Group of (Text + Markdown); pull
+        # the Markdown source text out of each Group so we can compare
+        # against the posted strings.
+        from rich.console import Group
+        from rich.markdown import Markdown
+
+        def _bubble_text(child) -> str:
+            r = getattr(child, "renderable", None)
+            if isinstance(r, Group):
+                for sub in getattr(r, "renderables", []):
+                    if isinstance(sub, Markdown):
+                        return sub.markup
+            return ""
+
+        bubble_texts = [_bubble_text(c) for c in log.children]
+        idx_a = next((i for i, t in enumerate(bubble_texts) if "reply A" in t), -1)
+        idx_b = next((i for i, t in enumerate(bubble_texts) if "reply B" in t), -1)
+        assert idx_a >= 0, f"reply A bubble not found: {bubble_texts}"
+        assert idx_b >= 0, f"reply B bubble not found: {bubble_texts}"
+        assert idx_a < idx_b, "inject reply order should match post order"
 
 
 @pytest.mark.asyncio
@@ -1016,26 +1038,42 @@ def test_disabled_tools_inherits_into_child_agent_as_copy():
     """Round-18 B-1 / B-7 test gap: a child agent built via
     ChildAgentModule._create_child_agent gets a COPY of parent's
     disabled_tools list, so a runtime mutation on parent doesn't
-    silently re-shape the child's tool surface."""
+    silently re-shape the child's tool surface.
+
+    Round-18-2 fix: invoke the real production path
+    (``ChildAgentModule._create_child_agent``) so a regression that
+    swaps ``list(...)`` back to a shared reference is actually caught.
+    The previous version re-asserted the contract inline and would
+    pass even if module.py was reverted."""
     from llamagent.core import Config, LlamAgent
+    from llamagent.modules.child_agent import ChildAgentModule
+    from llamagent.modules.child_agent.policy import (
+        AgentExecutionPolicy,
+        ChildAgentSpec,
+    )
 
     parent_config = Config()
     parent_config.disabled_tools = ["ask_user", "web_search"]
     parent = LlamAgent(parent_config)
+    mod = ChildAgentModule()
+    parent.register_module(mod)
     try:
-        # Simulate _create_child_agent's relevant lines without spinning
-        # up the full child_agent module (avoids dragging in ToolsModule
-        # defaults, sandbox, etc.). We assert the contract the code
-        # establishes: child gets a copy, not a shared reference.
-        import copy
-
-        child_config = copy.copy(parent.config)
-        child_config.disabled_tools = list(parent.config.disabled_tools)
-
-        # Mutating parent's list must NOT change child's.
-        parent.config.disabled_tools.append("web_fetch")
-        assert "web_fetch" not in child_config.disabled_tools
-        # Child still has its snapshot.
-        assert child_config.disabled_tools == ["ask_user", "web_search"]
+        spec = ChildAgentSpec(
+            task="probe",
+            role="worker",
+            policy=AgentExecutionPolicy(),
+            parent_task_id=None,
+            task_id="test-task-id",
+        )
+        child = mod._create_child_agent(spec)
+        try:
+            # Production path produced a value-equal but reference-distinct list.
+            assert child.config.disabled_tools == ["ask_user", "web_search"]
+            assert child.config.disabled_tools is not parent.config.disabled_tools
+            # Mutating parent must NOT propagate.
+            parent.config.disabled_tools.append("web_fetch")
+            assert "web_fetch" not in child.config.disabled_tools
+        finally:
+            child.shutdown()
     finally:
         parent.shutdown()

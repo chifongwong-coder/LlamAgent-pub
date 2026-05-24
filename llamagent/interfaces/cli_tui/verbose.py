@@ -15,9 +15,16 @@ The dedup set is cleared at every PRE_CHAT (turn boundary) — round-12
 H3 fix — so identical short reasoning ("Let me check…") from two turns
 both render instead of the second one being silently swallowed.
 
-The chain walker recurses through ``_wrapped`` (LoggingLLM) and
-``_fallback_llm`` (ResilientLLMClient) so a model fallback still shows
-its thinking instead of dropping it on the floor (round-8 H2).
+Round-18 A-6: install_verbose now patches only the outermost LLM
+layer (``agent.llm``). LoggingLLM / ResilientLLMClient wrappers
+delegate down via ``_wrapped`` / ``_fallback_llm`` and the response
+flows back up through the outer wrapper, so a fallback's final
+response still reaches the scanner. Pre-fix the walker recursed into
+each inner layer and re-wrapped its ``chat`` / ``chat_stream`` — every
+call paid for two ``_scan_response_message`` passes (one at outer
+wrapper, one at inner wrapper invoked via ``self._wrapped.chat(...)``);
+per-turn dedup hashes masked the duplicate emit but the scan cost
+doubled.
 
 Streaming detection: ``<think>…</think>`` is extracted from chat_stream
 chunks while tracking open/close tags across chunk boundaries. A small
@@ -122,12 +129,15 @@ def install_verbose(agent, target: "Widget") -> None:
         """True if ``client.<name>`` is a real attribute (instance dict
         or somewhere in the class MRO), not just a ``__getattr__`` proxy.
 
-        Round-12 M1: LoggingLLM defines ``chat`` directly but proxies
-        ``chat_stream`` via ``__getattr__`` — wrapping the proxy attribute
-        would create a duplicate scan layer over the real owner. MRO walk
-        (not just direct class dict) is required because ResilientLLM
-        inherits ``chat_stream`` from LLMClient — it's not in
-        ``ResilientLLM.__dict__`` but it IS in ``LLMClient.__dict__``.
+        Round-18 A-6: install_verbose now wraps only the outermost
+        layer (``agent.llm``); this guard prevents installing a wrapper
+        over a ``__getattr__`` proxy attribute on that single layer
+        (which would never be invoked because the real owner's
+        descriptor takes precedence on attribute lookup). MRO walk (not
+        just direct class dict) is required because subclasses
+        inheriting a method from a base — e.g. ResilientLLM inheriting
+        ``chat_stream`` from LLMClient — should be treated as real
+        owners.
         """
         if name in vars(client):
             return True

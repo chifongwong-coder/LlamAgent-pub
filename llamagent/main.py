@@ -264,12 +264,30 @@ For ``--legacy``, ``ask`` subcommand, or fine-grained CLI flag control:
                 agent = create_agent(module_names, persona_name=args.persona)
                 run_cli(agent)
                 return
+            agent = None
             if scripted:
                 agent = create_agent(module_names, persona_name=args.persona)
                 app = LlamAgentTUI(agent=agent)
             else:
                 app = LlamAgentTUI()
-            app.run()
+            try:
+                app.run()
+            finally:
+                # Round-18-2 review: shutdown the agent we built so its
+                # modules' on_shutdown fires (Chroma close, FTS flush,
+                # memory consolidation, child reap). The unscripted path
+                # has the App owning the agent — LlamAgentTUI doesn't
+                # shut it down on unmount today, so this only covers the
+                # scripted case where main.py owns the build. If unset
+                # (interactive path), skip — App owns lifecycle.
+                if agent is not None:
+                    try:
+                        agent.shutdown()
+                    except Exception as exc:
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            "agent.shutdown() raised at TUI exit: %s", exc
+                        )
             notice = getattr(app, "_crash_notice", None)
             if notice:
                 sys.stderr.write(notice + "\n")

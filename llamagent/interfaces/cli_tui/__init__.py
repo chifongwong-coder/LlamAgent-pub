@@ -163,6 +163,7 @@ def run(args: "argparse.Namespace | None" = None) -> int:
     # to legacy) to pay the Textual import cost. Defer to the launch.
     from llamagent.interfaces.cli_tui.app import LlamAgentTUI
 
+    agent = None
     if scripted:
         if args.no_modules:
             modules: list[str] = []
@@ -178,7 +179,22 @@ def run(args: "argparse.Namespace | None" = None) -> int:
         # Interactive: SetupScreen captures persona + preset inside the TUI
         app = LlamAgentTUI()
 
-    app.run()
+    try:
+        app.run()
+    finally:
+        # Round-18-2 review: shutdown the agent we built here so module
+        # on_shutdown fires (Chroma close, FTS flush, memory consolidate,
+        # child reap). Only covers the scripted branch — the unscripted
+        # path's agent is built by the App inside SetupScreen's dismiss
+        # callback and lives inside the App; the App's lifecycle owns it.
+        if agent is not None:
+            try:
+                agent.shutdown()
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "agent.shutdown() raised at TUI exit: %s", exc
+                )
 
     notice = getattr(app, "_crash_notice", None)
     if notice:
