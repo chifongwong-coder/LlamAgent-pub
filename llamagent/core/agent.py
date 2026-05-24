@@ -3194,12 +3194,18 @@ class LlamAgent:
         set_agent swap) can each call shutdown defensively. Without the
         guard, double-call re-emits SESSION_END, double-closes Chroma
         clients / FTS connections / executors — chromadb in particular
-        raises or corrupts internal state. The guard is cheap and only
-        adds 2 lines.
+        raises or corrupts internal state.
+
+        Round-18-4: idempotency flag is set AFTER the shutdown loop
+        completes, not before. This way a future caller that retries
+        shutdown after fixing a transient module failure can succeed
+        on the second attempt — individual module on_shutdown raises
+        are still caught + logged inside the loop so one bad module
+        can't block the rest; the flag just prevents the post-loop
+        no-op-on-second-call case.
         """
         if getattr(self, "_shutdown_done", False):
             return
-        self._shutdown_done = True
 
         self.emit_hook(HookEvent.SESSION_END, {"modules": list(self.modules.keys())})
 
@@ -3214,6 +3220,7 @@ class LlamAgent:
         if pool is not None:
             pool.shutdown(wait=False)
             self._tool_timeout_pool = None
+        self._shutdown_done = True
         logger.info("Agent shut down")
 
     # ============================================================

@@ -247,27 +247,13 @@ class LlamAgentTUI(App):
         )
 
         if self.agent is not None and self.agent is not agent:
-            # Round-18 B-4 + B-4-2 (third-pass MED): if a runner was
-            # running on the old agent, stop it AND join the thread
-            # before tearing down the agent. _stop_continuous_runner
-            # sets the stop flag but doesn't join — a mid-call
-            # agent.chat in the runner thread could otherwise race
-            # against on_shutdown closing chromadb / FTS / sandbox
-            # subprocess. Mirror cmd_stop's join pattern. Today's only
-            # caller (_on_setup_done retry) fires before any runner
-            # exists, so this is defensive for future rebuild paths
-            # (/reload etc.).
-            old_thread = getattr(self, "_runner_thread", None)
+            # Round-18 B-4: if a runner was running on the old agent,
+            # stop + join the thread before tearing down the agent's
+            # modules. _stop_continuous_runner does both (round-18-4
+            # promoted the join into the helper so on_unmount and
+            # _handle_exception get the safety for free).
             if getattr(self, "_runner", None) is not None:
                 self._stop_continuous_runner()
-            if old_thread is not None and old_thread.is_alive():
-                old_thread.join(timeout=10.0)
-                if old_thread.is_alive():
-                    import logging
-                    logging.getLogger(__name__).warning(
-                        "old runner thread did not stop within 10s of "
-                        "set_agent swap; proceeding with shutdown anyway"
-                    )
             uninstall_hooks(self.agent)
             uninstall_handlers(self.agent)
             uninstall_verbose(self.agent)
@@ -742,18 +728,35 @@ class LlamAgentTUI(App):
 
         Plan §4 C7 (g): both quit paths (clean unmount + crash) should
         attempt to stop the runner so logger output is flushed and the
-        agent.abort() in runner.stop() runs. We don't .join() here —
-        on_unmount is on the main event loop and any agent.chat in
-        progress can take seconds; better to set the stop flag and let
-        the daemon thread reap on process exit.
+        agent.abort() in runner.stop() runs.
+
+        Round-18-4 HIGH: this helper used to skip the thread.join to
+        keep on_unmount snappy. But on_unmount + _handle_exception then
+        call agent.shutdown() immediately after, which closes Chroma /
+        FTS / sandbox subprocess. A runner thread still mid-agent.chat
+        would read from closed handles → C-extension segfault risk.
+        Join up to 10s so the thread observes the stop signal before
+        we tear down its dependencies. Daemon=True still backstops the
+        timeout — if join times out we proceed and let process exit
+        reap the straggler.
         """
         runner = getattr(self, "_runner", None)
         if runner is None:
             return
+        thread = getattr(self, "_runner_thread", None)
         try:
             runner.stop()
         except Exception:
             pass
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=10.0)
+            if thread.is_alive():
+                import logging
+                logging.getLogger(__name__).warning(
+                    "continuous runner thread did not stop within 10s; "
+                    "proceeding with teardown — daemon-thread reap will "
+                    "catch it on process exit"
+                )
         self._runner = None
         self._runner_thread = None
 
@@ -809,12 +812,18 @@ class LlamAgentTUI(App):
         self._stop_continuous_runner()
         # Round-18-3: on the crash path Textual may skip on_unmount, so
         # also try to shutdown the agent here. Idempotent — safe even
-        # if on_unmount does fire and shuts down too.
+        # if on_unmount does fire and shuts down too. Round-18-4 LOW:
+        # log shutdown exceptions so a chromadb crash that ALSO breaks
+        # shutdown leaves diagnostic breadcrumbs in cli_tui.log, not
+        # just the original exception.
         if self.agent is not None:
             try:
                 self.agent.shutdown()
-            except Exception:
-                pass
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "agent.shutdown() raised in _handle_exception: %s", exc
+                )
         self._crash_notice = f"[llamagent TUI crash — full traceback in {log_path}]"
         self._return_code = 1
         self.exit()
