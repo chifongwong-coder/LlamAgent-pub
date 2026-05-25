@@ -175,6 +175,88 @@ BANNER = (
 
 from llamagent.interfaces.presets import MODULE_DESCRIPTIONS, MODULE_GROUPS, apply_presets
 
+
+def _install_verbose_tracing(agent):
+    """v3.9.0+: when ``config.cli_verbose`` is true, print every LLM
+    thinking burst, tool call, and tool result to the terminal in real
+    time. Activated only from the CLI (Web/API have their own UX);
+    no-op when cli_verbose is False.
+
+    Hooks the agent's PRE_TOOL_USE / POST_TOOL_USE so tool activity is
+    surfaced even when the model uses cached per-module LLMs, and wraps
+    every cached LLMClient.chat to print thinking content + outgoing
+    tool_calls before the response returns.
+    """
+    if not getattr(agent.config, "cli_verbose", False):
+        return
+
+    from llamagent.core.hooks import HookEvent
+
+    def _truncate(s, limit=240):
+        s = str(s)
+        return s if len(s) <= limit else s[:limit - 1] + "…"
+
+    def _print_thinking(msg) -> None:
+        # Three places thinking may surface (see real-test _TracingLLMClient):
+        # 1. msg.reasoning_content — OpenAI-style separated field
+        # 2. msg.thinking_blocks   — Anthropic-style structured blocks
+        # 3. <think>...</think>    — Qwen3 / Qwen3.5 local
+        reasoning = getattr(msg, "reasoning_content", None)
+        if reasoning:
+            console.print(f"[dim italic]thinking: {_truncate(reasoning, 400)}[/dim italic]")
+        blocks = getattr(msg, "thinking_blocks", None)
+        if blocks:
+            for tb in blocks:
+                t = tb.get("thinking") if isinstance(tb, dict) else getattr(tb, "thinking", "")
+                if t:
+                    console.print(f"[dim italic]thinking: {_truncate(t, 400)}[/dim italic]")
+        content = (getattr(msg, "content", None) or "")
+        if "<think>" in content:
+            inside = content.split("<think>", 1)[1].split("</think>", 1)[0]
+            if inside.strip():
+                console.print(f"[dim italic]thinking: {_truncate(inside.strip(), 400)}[/dim italic]")
+
+    def _wrap_chat(client):
+        original = client.chat
+        def _traced(messages, **kwargs):
+            resp = original(messages, **kwargs)
+            try:
+                msg = resp.choices[0].message
+                _print_thinking(msg)
+                for tc in (getattr(msg, "tool_calls", None) or []):
+                    fn = getattr(tc, "function", None) or tc.get("function", {})
+                    name = getattr(fn, "name", None) or fn.get("name", "?")
+                    args = getattr(fn, "arguments", None) or fn.get("arguments", "")
+                    console.print(f"[cyan]→ tool call: {name}({_truncate(args, 200)})[/cyan]")
+            except Exception:
+                pass
+            return resp
+        client.chat = _traced
+
+    # Wrap the agent's primary LLM + any cached per-module LLMs created so far.
+    _wrap_chat(agent.llm)
+    for cached in getattr(agent, "_llm_cache", {}).values():
+        if cached is not agent.llm:
+            _wrap_chat(cached)
+
+    # Hook PRE/POST_TOOL_USE so the tool side of every loop is visible.
+    def _pre_tool(ctx):
+        d = getattr(ctx, "data", {}) or {}
+        console.print(
+            f"[cyan]  ↪ exec: {d.get('tool_name', '?')}"
+            f"({_truncate(d.get('args', {}), 200)})[/cyan]"
+        )
+
+    def _post_tool(ctx):
+        d = getattr(ctx, "data", {}) or {}
+        console.print(
+            f"[dim cyan]  ← {d.get('tool_name', '?')} → "
+            f"{_truncate(d.get('result_preview') or d.get('result', ''), 200)}[/dim cyan]"
+        )
+
+    agent.register_hook(HookEvent.PRE_TOOL_USE, _pre_tool)
+    agent.register_hook(HookEvent.POST_TOOL_USE, _post_tool)
+
 # Preset configurations
 PRESETS = {
     "full": "All modules — full capabilities (recommended for new users)",
@@ -1165,15 +1247,32 @@ def main():
     parser = _create_parser()
     args = parser.parse_args()
 
-    # v3.9.0+: if neither --modules nor --no-modules was passed but the
-    # YAML config sets ``modules``, use it as if the user had typed
-    # --modules "<list>". CLI flag still wins when present. This lets
-    # users drive the whole CLI from a config file without prompts.
-    if args.modules is None and not args.no_modules:
+    # v3.9.0+: if YAML config sets ``modules`` and the user is launching
+    # without an explicit module flag, show a config summary and ask
+    # whether to use it as-is or customize it interactively. The 'ask'
+    # subcommand bypasses the prompt — it's the scripted one-shot path
+    # and prompting there would break automation.
+    if (args.modules is None and not args.no_modules
+            and args.command != "ask"):
         from llamagent.core import Config as _Config
-        config_modules = getattr(_Config(), "modules", None)
-        if config_modules is not None:
-            args.modules = ",".join(config_modules)
+        _cfg = _Config()
+        _cfg_modules = getattr(_cfg, "modules", None)
+        if _cfg_modules is not None:
+            console.print("\n[bold]Loaded YAML config:[/bold]")
+            console.print(f"  Model:            [cyan]{_cfg.model}[/cyan]")
+            console.print(f"  Modules:          [cyan]{', '.join(_cfg_modules)}[/cyan]")
+            if getattr(_cfg, "disable_thinking", False):
+                console.print("  Disable thinking: [cyan]yes[/cyan]")
+            if getattr(_cfg, "agent_prompts", None):
+                console.print(f"  Agent prompts:    [cyan]{list(_cfg.agent_prompts.keys())}[/cyan]")
+            if _ask_confirm("\nModify settings?", default=False):
+                # Fall through to the interactive setup loop below; the
+                # interactive flow already starts from sensible defaults
+                # and the YAML-loaded Config drives Config-level fields.
+                pass
+            else:
+                # Quick mode: use YAML modules + agent defaults straight to chat
+                args.modules = ",".join(_cfg_modules)
 
     # Direct mode: --modules or --no-modules skips interactive setup
     if args.no_modules or args.modules is not None:
@@ -1189,6 +1288,7 @@ def main():
             "persona_desc": "A helpful AI assistant",
         }
         agent = build_agent(setup)
+        _install_verbose_tracing(agent)
         console.print(BANNER)
         cli = LlamAgentCLI(agent)
 
@@ -1215,6 +1315,7 @@ def main():
             "persona_desc": "A helpful AI assistant",
         }
         agent = build_agent(setup)
+        _install_verbose_tracing(agent)
         try:
             if getattr(args, 'output_format', 'text') == 'json':
                 import json
@@ -1242,6 +1343,7 @@ def main():
 
         try:
             agent = build_agent(setup)
+            _install_verbose_tracing(agent)
         except Exception as e:
             console.print(f"\n[red]Failed to build agent: {e}[/red]")
             continue

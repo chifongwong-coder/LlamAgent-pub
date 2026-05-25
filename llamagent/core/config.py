@@ -61,6 +61,10 @@ _YAML_MAP = [
     (("llm", "resilience_max_retries"), "resilience_max_retries", int),
     (("llm", "disable_thinking"), "disable_thinking", bool),
     (("llm", "routing_simple_model"), "routing_simple_model", str),
+    # CLI-only observability toggle. When true the CLI wires hooks that
+    # print every tool call + the model's thinking content to the
+    # terminal in real time. No effect on Web / API interfaces.
+    (("cli", "verbose"), "cli_verbose", bool),
     (("agent", "system_prompt"), "system_prompt", str),
     (("agent", "context_window_size"), "context_window_size", int),
     (("agent", "context_compress_threshold"), "context_compress_threshold", float),
@@ -217,6 +221,9 @@ class Config:
         self.api_retry_count: int = 1
         self.fallback_model: str | None = None
         self.resilience_max_retries: int = 3
+        # CLI-only: print thinking content + tool calls + tool results
+        # to the terminal in real time. No effect on Web / API.
+        self.cli_verbose: bool = False
         # v3.9.0+: route to LLMClient's Ollama think=False injection.
         # Effective only for Ollama models; other providers ignore it.
         self.disable_thinking: bool = False
