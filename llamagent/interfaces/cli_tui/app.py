@@ -21,8 +21,6 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
-
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
@@ -41,6 +39,8 @@ from llamagent.interfaces.cli_tui.widgets import (
     StatusHeader,
     VerbosePane,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class LlamAgentTUI(App):
@@ -434,7 +434,7 @@ class LlamAgentTUI(App):
             log.append_error(
                 f"set_mode(continuous) failed: {type(exc).__name__}: {exc}"
             )
-            self._stop_continuous_runner()
+            self._stop_continuous_runner(context="set_mode rollback")
             return
 
         self.refresh_status_header()
@@ -709,9 +709,14 @@ class LlamAgentTUI(App):
     # Q6 crash-path mitigation (plan v11 §2.2)
     # ------------------------------------------------------------------
 
-    def _stop_continuous_runner(self) -> None:
+    def _stop_continuous_runner(self, context: str = "") -> None:
         """Best-effort runner cleanup, callable from on_unmount and
         from _handle_exception. Idempotent. Never raises.
+
+        ``context`` is an optional caller-supplied tag appended to the
+        join-timeout warning (e.g. ``"set_mode rollback"``) so ops can
+        tell apart "/stop hung" vs "rollback hung" vs "/quit hung" in
+        cli_tui.log without diffing call-site line numbers.
 
         Plan §4 C7 (g): both quit paths (clean unmount + crash) should
         attempt to stop the runner so logger output is flushed and the
@@ -738,10 +743,12 @@ class LlamAgentTUI(App):
         if thread is not None and thread.is_alive():
             thread.join(timeout=10.0)
             if thread.is_alive():
+                suffix = f" ({context})" if context else ""
                 logger.warning(
-                    "continuous runner thread did not stop within 10s; "
+                    "continuous runner thread did not stop within 10s%s; "
                     "proceeding with teardown — daemon-thread reap will "
-                    "catch it on process exit"
+                    "catch it on process exit",
+                    suffix,
                 )
         self._runner = None
         self._runner_thread = None

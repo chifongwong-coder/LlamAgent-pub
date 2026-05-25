@@ -696,7 +696,6 @@ def test_stop_continuous_runner_joins_thread(mock_agent):
     _stop_continuous_runner, and asserts the thread is no longer
     alive when the helper returns."""
     import threading
-    import time
     from unittest.mock import MagicMock
     from llamagent.interfaces.cli_tui.app import LlamAgentTUI
 
@@ -706,9 +705,13 @@ def test_stop_continuous_runner_joins_thread(mock_agent):
 
     def _runner_loop():
         started.set()
-        # Mimic ContinuousRunner.run — poll until stop event set.
-        while not stop_event.is_set():
-            time.sleep(0.01)
+        # Block on stop_event with a long timeout so if a future
+        # refactor removes the helper's thread.join, this test fails
+        # deterministically — the assertion that fires immediately
+        # after _stop_continuous_runner returns would see a thread
+        # still mid-wait (the long timeout widens the failure window
+        # from ~10ms to ~5s, no race-pass risk on fast CI).
+        stop_event.wait(timeout=5.0)
 
     thread = threading.Thread(target=_runner_loop, name="test-runner", daemon=True)
     thread.start()
