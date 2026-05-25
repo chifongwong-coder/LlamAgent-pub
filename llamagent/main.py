@@ -259,7 +259,7 @@ For ``--legacy``, ``ask`` subcommand, or fine-grained CLI flag control:
             except ImportError as exc:
                 sys.stderr.write(
                     f"[Note] Textual not available ({exc}); falling back to legacy CLI.\n"
-                    f"        Install the TUI with:  pip install textual\n"
+                    f"        Install the TUI with:  pip install -e \".[tui]\"\n"
                 )
                 agent = create_agent(module_names, persona_name=args.persona)
                 run_cli(agent)

@@ -167,7 +167,7 @@ def main():
     except ImportError as exc:
         sys.stderr.write(
             f"[Note] Textual not available ({exc}); falling back to legacy CLI.\n"
-            f"        Install the TUI with:  pip install textual\n"
+            f"        Install the TUI with:  pip install -e \".[tui]\"\n"
         )
         legacy_main(args)
         return

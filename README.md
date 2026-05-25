@@ -96,6 +96,7 @@ pip install -e .
 # Optional extras
 pip install -e ".[rag]"     # ChromaDB for memory & RAG
 pip install -e ".[cli]"     # Rich terminal output
+pip install -e ".[tui]"     # Textual TUI for interactive CLI (default chat surface)
 pip install -e ".[web]"     # Gradio web interface
 pip install -e ".[api]"     # FastAPI server
 pip install -e ".[all]"     # Everything

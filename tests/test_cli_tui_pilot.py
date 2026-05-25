@@ -36,6 +36,14 @@ import pytest
 from typing import Iterator
 from unittest.mock import MagicMock
 
+# Textual is an optional dep (pyproject `tui` extras). Pilot tests rely on
+# App.run_test() / Pilot which only exist if textual is installed. Skip the
+# whole file when missing — matches the chromadb / gradio / fastapi pattern
+# the project uses for optional-dep tests. CI fail (2026-05-25) revealed
+# round-18 ship reviewers all ran with textual installed locally and didn't
+# notice the unconditional import would brick CI default `[dev]` extras.
+pytest.importorskip("textual")
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
