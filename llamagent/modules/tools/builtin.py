@@ -2,9 +2,10 @@
 Platform built-in tools (common tier): available to all llamas out of the box.
 
 Includes:
-- ask_user:    Ask the user a question (requires interaction handler)
-- web_search:  Web search via pluggable backends (DuckDuckGo / SerpAPI / Tavily)
-- web_fetch:   Fetch page content from a specified URL
+- ask_user:     Ask the user a question (requires interaction handler)
+- system_info:  Current time, OS, hostname, cwd, etc. (read-only)
+- web_search:   Web search via pluggable backends (DuckDuckGo / SerpAPI / Tavily)
+- web_fetch:    Fetch page content from a specified URL
 
 Registered to global_registry with safety_level assigned per tool characteristics.
 """
@@ -53,6 +54,55 @@ def ask_user(agent, question: str, choices: list[str] | None = None) -> str:
         return handler.ask(question, choices)
     except Exception as e:
         return f"Failed to get user response: {e}"
+
+
+# ============================================================
+# System info (current time, host, OS, ...)
+# ============================================================
+
+@tool(
+    name="system_info",
+    description="Get current system info — local + UTC time, weekday, timezone, OS, "
+                "hostname, CPU count, Python version, current working directory, and user. "
+                "Use this when you need a timestamp or environment context.",
+    parameters={"type": "object", "properties": {}, "required": []},
+    tier="default",
+    safety_level=1,
+)
+def system_info() -> str:
+    """Return a JSON dict of read-only system / time information.
+
+    All fields come from stdlib (datetime / os / platform / socket) so this
+    tool has no external dependencies and no side effects. Safe for
+    every mode including continuous (no confirm modal, no user prompt).
+
+    Round-18 B-6: keep total output under ~1 KB. This tool bypasses the
+    framework's observation truncator (max_observation_tokens) — it's
+    sized to fit any budget today (~500 bytes for 12 small fields) but
+    don't add fat fields (full env dump, PATH, large hostname FQDN
+    arrays) without routing through the truncator first.
+    """
+    import datetime
+    import os
+    import platform
+    import socket
+
+    now_local = datetime.datetime.now().astimezone()
+    info = {
+        "now_local":     now_local.isoformat(timespec="seconds"),
+        "now_utc":       datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        "timezone":      str(now_local.tzinfo),
+        "weekday":       now_local.strftime("%A"),
+        "os":            platform.system(),
+        "os_release":    platform.release(),
+        "platform":      platform.platform(),
+        "hostname":      socket.gethostname(),
+        "python_version": platform.python_version(),
+        "cpu_count":     os.cpu_count(),
+        "cwd":           os.getcwd(),
+        "user":          os.environ.get("USER") or os.environ.get("USERNAME") or "unknown",
+    }
+    return json.dumps(info, ensure_ascii=False, indent=2)
 
 
 # ============================================================

@@ -77,6 +77,7 @@ class ContinuousRunner:
         poll_interval: float = 1.0,
         task_timeout: float = 0,
         on_timeout: str | Callable = "abort",
+        on_task_complete: Callable | None = None,
     ):
         """
         Args:
@@ -85,12 +86,22 @@ class ContinuousRunner:
             poll_interval: Seconds between poll cycles (default 1.0)
             task_timeout: Max seconds per task; 0 = no timeout (default 0)
             on_timeout: "abort" to call agent.abort(), or a callable for custom behavior
+            on_task_complete: Optional callback ``(entry: TaskLogEntry) -> None``
+                fired after every trigger-driven task finishes (success or
+                error). Runs on the runner thread; the callback is responsible
+                for any thread-safety it needs. Designed so an external UI
+                (the cli_tui MonitorPane / ChatLog wiring) can stream
+                trigger-fire events without the runner having to know about
+                a message bus. Inject-driven tasks do NOT fire this callback
+                — the caller of ``inject()`` already gets the response
+                synchronously via its own ``event.wait()``.
         """
         self.agent = agent
         self.triggers = triggers
         self.poll_interval = poll_interval
         self.task_timeout = task_timeout
         self.on_timeout = on_timeout
+        self.on_task_complete = on_task_complete
         self._stopped = threading.Event()
         self.task_log: list[TaskLogEntry] = []
         # Priority scheduling queues (v2.9.5)
@@ -259,6 +270,17 @@ class ContinuousRunner:
 
         self.task_log.append(entry)
 
+        # Fire the external observer callback (cli_tui MonitorPane streaming,
+        # custom monitors, test harnesses, ...). Runs on the runner thread;
+        # caller is responsible for thread-safety. Wrapped in try/except so
+        # a buggy callback can't kill the runner thread mid-loop — exception
+        # is logged with full stack and the runner keeps going.
+        if self.on_task_complete is not None:
+            try:
+                self.on_task_complete(entry)
+            except Exception:
+                logger.exception("on_task_complete callback raised")
+
     def stop(self) -> None:
         """Signal the runner to stop. Wake up all waiting inject callers."""
         self._stopped.set()
@@ -298,21 +320,31 @@ class TimerTrigger(Trigger):
     Usage:
         TimerTrigger(interval=60, message="check system health")
         # Every 60 seconds, poll() returns "check system health"
+
+        TimerTrigger(interval=60, message="check", fire_immediately=True)
+        # First poll fires immediately; subsequent fires every 60s.
     """
 
     def __init__(self, interval: float, message: str, *,
-                 interruptible: bool = True, on_interrupt: str = "discard"):
+                 interruptible: bool = True, on_interrupt: str = "discard",
+                 fire_immediately: bool = False):
         self.interval = interval
         self.message = message
         self.interruptible = interruptible
         self.on_interrupt = on_interrupt
-        self._last_fire: float | None = None  # None = first poll initializes
+        self.fire_immediately = fire_immediately
+        # State: None means first poll hasn't happened yet. With
+        # fire_immediately=True the first poll fires AND initializes;
+        # without it (default) the first poll only initializes.
+        self._last_fire: float | None = None
 
     def poll(self) -> str | None:
         import time
         now = time.time()
         if self._last_fire is None:
             self._last_fire = now
+            if self.fire_immediately:
+                return self.message
             return None
         if now - self._last_fire >= self.interval:
             self._last_fire = now

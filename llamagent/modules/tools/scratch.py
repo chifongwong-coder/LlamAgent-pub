@@ -56,6 +56,12 @@ def _resolve_within(raw: str, *, base: str, allow_absolute: bool = True) -> str:
         ValueError: If absolute paths are disallowed and ``raw`` is
             absolute, or if the resolved path escapes ``base``.
     """
+    # Round-18 B-5: mirror _resolve_path's expanduser handling so a
+    # future caller that switches to this helper doesn't reintroduce
+    # the pre-d4ac7fe bug (``~/foo`` was treated as relative and joined
+    # to ``base`` instead of expanding to the user's home). isabs in
+    # Python checks the leading character, not POSIX shell meaning.
+    raw = os.path.expanduser(raw)
     if not allow_absolute and os.path.isabs(raw):
         raise ValueError(f"Absolute paths not allowed: {raw}")
     base_real = os.path.realpath(base)
@@ -67,14 +73,26 @@ def _resolve_within(raw: str, *, base: str, allow_absolute: bool = True) -> str:
 
 def _resolve_path(raw: str, *, base: str) -> str:
     """Resolve ``raw`` to an absolute realpath. Absolute paths are kept;
-    relative paths are joined with ``base``.
+    relative paths are joined with ``base``. ``~`` / ``~user`` prefixes
+    are expanded first via :func:`os.path.expanduser`.
 
     Unlike :func:`_resolve_within` this does **not** reject paths that
     escape ``base`` — the caller (typically :func:`classify_write`)
     decides routing based on the resolved location. macOS HFS+/APFS
     case-insensitivity is handled by the canonical case ``realpath``
     returns when the parent directory exists.
+
+    Tilde expansion: ``os.path.isabs("~/x")`` returns ``False`` because
+    Python's ``isabs`` checks the leading character, not the *meaning*
+    of the path. Without ``expanduser`` the helper would join
+    ``~/.llamagent/foo`` to ``base`` and produce a nonsense path like
+    ``/Users/<u>/proj/~/.llamagent/foo`` — every tool that resolved a
+    ``~``-prefixed path would silently miss the file the user meant.
+    Expanding first matches POSIX shell behaviour (``echo ~/x`` writes
+    ``/Users/<u>/x``) and is a no-op for inputs that don't start with
+    ``~``.
     """
+    raw = os.path.expanduser(raw)
     if os.path.isabs(raw):
         return os.path.realpath(raw)
     return os.path.realpath(os.path.join(base, raw))

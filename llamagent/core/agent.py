@@ -1388,6 +1388,24 @@ class LlamAgent:
                 than the parent agent that registered them via closure).
                 See docs/llamagent-v3.6-plan.md for the full migration.
         """
+        # v3.10+: per-tool disable list — skip registration if the tool
+        # is in ``config.disabled_tools``. The tool stays out of
+        # ``self._tools`` entirely, so it never appears in the schema
+        # given to the LLM (the model can't call what it can't see).
+        # Used e.g. to suppress ``ask_user`` in continuous mode where no
+        # interactive user is watching to answer.
+        #
+        # Round-18 B-2: log at WARNING (not INFO) so users see this when
+        # their config takes effect. The same code path handles builtin
+        # tools (ask_user / web_search) and module-registered tools
+        # (spawn_child / send_message etc.) — a YAML
+        # `tools.disabled: [spawn_child]` looks benign but silently
+        # breaks ChildAgentModule. Loud log makes the consequence visible.
+        disabled = getattr(self.config, "disabled_tools", None) or []
+        if name in disabled:
+            logger.warning("Tool '%s' skipped via config.disabled_tools", name)
+            return
+
         # Infer parameter definition from function signature when empty.
         # v3.6: when takes_agent=True, drop the first positional arg from
         # the inferred schema — it's framework-injected, not model-facing.
@@ -3170,7 +3188,25 @@ class LlamAgent:
         shuts down the lazily-created ``_tool_timeout_pool`` so long-running
         hosts that spawn many short-lived agents don't accumulate executor
         worker threads + queued ``Future`` references.
+
+        Round-18-3: idempotent. Multiple interface layers (cli_tui's
+        on_unmount + main.py's try/finally + a future /reload's
+        set_agent swap) can each call shutdown defensively. Without the
+        guard, double-call re-emits SESSION_END, double-closes Chroma
+        clients / FTS connections / executors — chromadb in particular
+        raises or corrupts internal state.
+
+        Round-18-4: idempotency flag is set AFTER the shutdown loop
+        completes, not before. This way a future caller that retries
+        shutdown after fixing a transient module failure can succeed
+        on the second attempt — individual module on_shutdown raises
+        are still caught + logged inside the loop so one bad module
+        can't block the rest; the flag just prevents the post-loop
+        no-op-on-second-call case.
         """
+        if getattr(self, "_shutdown_done", False):
+            return
+
         self.emit_hook(HookEvent.SESSION_END, {"modules": list(self.modules.keys())})
 
         for mod in reversed(list(self.modules.values())):
@@ -3184,6 +3220,7 @@ class LlamAgent:
         if pool is not None:
             pool.shutdown(wait=False)
             self._tool_timeout_pool = None
+        self._shutdown_done = True
         logger.info("Agent shut down")
 
     # ============================================================

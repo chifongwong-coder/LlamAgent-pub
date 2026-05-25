@@ -102,6 +102,7 @@ _YAML_MAP = [
     (("rag", "rerank_enabled"), "rag_rerank_enabled", bool),
     (("persona", "file"), "persona_file", str),
     (("tools", "agent_tools_dir"), "agent_tools_dir", str),
+    (("tools", "disabled"), "disabled_tools", list),
     (("planning", "max_plan_adjustments"), "max_plan_adjustments", int),
     (("reflection", "write_mode"), "reflection_write_mode", str),
     (("reflection", "read_mode"), "reflection_read_mode", str),
@@ -325,6 +326,15 @@ class Config:
 
         # Tools
         self.agent_tools_dir: str = str(BASE_DIR / "data" / "agent_tools")
+        # v3.10+: per-tool disable list. Tool names in this list are
+        # silently skipped by ``LlamAgent.register_tool`` — the tool is
+        # not added to ``agent._tools`` and therefore not exposed in the
+        # tool schema given to the LLM. Use for built-ins that don't fit
+        # a particular agent's mode (e.g. ``ask_user`` in continuous
+        # mode where no interactive user is watching). Module-registered
+        # tools, agent-tier tools, and user-defined tools are all
+        # subject to the same filter.
+        self.disabled_tools: list[str] = []
 
         # Planning
         self.max_plan_adjustments: int = 7
